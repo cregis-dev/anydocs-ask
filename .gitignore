@@ -1,0 +1,15 @@
+# Claude Code per-developer local settings
+.claude/settings.local.json
+
+# anydocs-ask index database (local persistence; see ARCHITECTURE.md §3)
+.anydocs-ask/
+
+# Node
+node_modules/
+dist/
+*.log
+.env
+.env.local
+
+# macOS
+.DS_Store
