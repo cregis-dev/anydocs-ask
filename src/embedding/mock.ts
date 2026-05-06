@@ -1,0 +1,65 @@
+/**
+ * Deterministic mock embedder for tests and the cache-hit gate that the §4.6
+ * "drag-zero-reembed" guarantee depends on.
+ *
+ * Properties:
+ *   - Same input string always yields the same vector (within a process).
+ *   - `calls` counter exposed so tests can assert "no embed calls happened
+ *     after a metadata-only edit" (the cornerstone of §4.6 verification).
+ *   - Vector layout is sparse-ish but non-trivial: we hash 8-char windows
+ *     into the vector dim, so unrelated strings rarely collide.
+ *   - No I/O, no async work — `await` is just for interface compatibility.
+ */
+
+import { createHash } from 'node:crypto';
+import type { Embedder, EmbedResult } from './types.ts';
+
+export type MockEmbedderOptions = {
+  model?: string;
+  dim?: number;
+};
+
+export class MockEmbedder implements Embedder {
+  readonly model: string;
+  readonly dim: number;
+  ready = false;
+  calls = 0;
+  textsEmbedded = 0;
+
+  constructor(opts: MockEmbedderOptions = {}) {
+    this.model = opts.model ?? 'mock-embedder';
+    this.dim = opts.dim ?? 1024;
+  }
+
+  async warmUp(): Promise<void> {
+    this.ready = true;
+  }
+
+  async embed(texts: string[]): Promise<EmbedResult[]> {
+    if (!this.ready) await this.warmUp();
+    this.calls += 1;
+    this.textsEmbedded += texts.length;
+    return texts.map((text) => ({ vector: vectorFor(text, this.dim) }));
+  }
+}
+
+function vectorFor(text: string, dim: number): Float32Array {
+  const v = new Float32Array(dim);
+  if (text.length === 0) return v;
+
+  // Hash overlapping 8-char windows; each hash bucket adds 1.0 to its
+  // dim-mod slot. Then L2-normalize so the cosine space behaves.
+  const windowSize = Math.min(8, text.length);
+  for (let i = 0; i + windowSize <= text.length; i++) {
+    const window = text.slice(i, i + windowSize);
+    const h = createHash('sha1').update(window).digest();
+    const slot = (h.readUInt32BE(0) % dim);
+    v[slot] = (v[slot] ?? 0) + 1;
+  }
+
+  let norm = 0;
+  for (let i = 0; i < dim; i++) norm += (v[i] ?? 0) ** 2;
+  norm = Math.sqrt(norm) || 1;
+  for (let i = 0; i < dim; i++) v[i] = (v[i] ?? 0) / norm;
+  return v;
+}

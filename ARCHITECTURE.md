@@ -495,11 +495,18 @@ HTTP 400。`scope_id` 校验是硬条件——未命中 `pages` 表中任一 `su
 1. 扫 pages/**/*.json + navigation/**/*.json（递归 glob，支持嵌套，如 pages/zh/intro.json）
 2. 过滤 status = 'published'
 3. 构建 pages 表（含 breadcrumb / nav_index / subtree_root，规则见 §2.2.1）
-4. 切 chunks：
-   ├─ 按 DocContentV1 节点切（h2 / h3 边界优先）
-   ├─ 代码块原子（is_code=1，不切分；超长代码块独立成 chunk）
-   ├─ 段落 ≤ 500 token，硬上限 1000
-   └─ 计算 content_hash = sha256(normalize(text))
+4. 切 chunks（v1 锁定，2026-05-06 修订）：
+   ├─ 通过 @anydocs/core/render-page-content 把 DocContentV1 渲染成 markdown
+   ├─ 按 markdown heading（h1 / h2 / h3）切 section，每 section 含 headingPath（祖先 heading
+   │  链）+ headingId（来自 anydocs createHeadingIdGenerator，与 Reader 对齐）
+   ├─ 短 section（≤ 2000 char ≈ 500 token）→ **整段一个 chunk，保持完整性**（用户原则：
+   │  原文档已结构化，按原有块切完整性更强）
+   ├─ 长 section（> 2000 char）→ 滚动切，overlap 200 char，与 anydocs build-artifacts.ts 一致
+   ├─ 代码块（fenced code block）**跟随所在 section**，**不再单独原子化**
+   │  （早期 v1 草案的"is_code=1 独立 chunk"策略改写为：is_code 字段保留为 BM25 / rerank
+   │   辅助信号——仅当一个 section 几乎全是代码时标 1。理由：把代码块从语境里剥离会
+   │   破坏问答生成时"这段代码用在何处"的上下文，与 §4.7 立体溯源精神冲突）
+   └─ 计算 content_hash = sha256(normalize(text))，是 §4.6 拖拽零重算的核心
 5. 算 / 取 embedding：
    ├─ 查 embedding_cache（hash, model）
    ├─ hit → 复用
