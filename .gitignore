@@ -10,6 +10,23 @@ dist/
 *.log
 .env
 .env.local
+*.tsbuildinfo
 
-# macOS
+# Editors / OS
+.vscode/
+.idea/
 .DS_Store
+*.swp
+
+# Tests / coverage
+coverage/
+.nyc_output/
+
+# SQLite local artifacts (in case tests / fixtures drop one in repo root)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Transformers.js / model cache (when @xenova/transformers drops into project)
+.cache/
