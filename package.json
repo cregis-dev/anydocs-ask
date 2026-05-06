@@ -31,7 +31,7 @@
   },
   "scripts": {
     "dev": "node --experimental-strip-types src/cli.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "prepublishOnly": "pnpm clean && pnpm build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
@@ -44,9 +44,12 @@
   "packageManager": "pnpm@9.0.0",
   "dependencies": {
     "@hono/node-server": "^1.13.7",
-    "hono": "^4.6.14"
+    "better-sqlite3": "^12.4.1",
+    "hono": "^4.6.14",
+    "sqlite-vec": "^0.1.6"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.19.1",
     "typescript": "^5.6.0"
   },
