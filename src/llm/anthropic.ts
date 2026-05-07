@@ -63,13 +63,24 @@ export class AnthropicLLM implements LLM {
         create: (req: AnthropicMessageRequest) => Promise<AnthropicMessageResponse>;
       };
     };
-    const response = await client.messages.create({
-      model: this.model,
-      max_tokens: input.maxTokens ?? this.defaultMaxTokens,
-      system: input.systemPrompt,
-      messages: [{ role: 'user', content: input.userPrompt }],
-      ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
-    });
+    let response: AnthropicMessageResponse;
+    try {
+      response = await client.messages.create({
+        model: this.model,
+        max_tokens: input.maxTokens ?? this.defaultMaxTokens,
+        system: input.systemPrompt,
+        messages: [{ role: 'user', content: input.userPrompt }],
+        ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`AnthropicLLM request failed (model=${this.model}): ${msg}`);
+    }
+    if (!response || typeof response !== 'object') {
+      throw new Error(
+        `AnthropicLLM: gateway returned non-object response (model=${this.model}): ${JSON.stringify(response)}`,
+      );
+    }
     const text = extractText(response);
     return { text, modelUsed: response.model ?? this.model };
   }

@@ -33,12 +33,42 @@ export async function rewriteCandidatesWithLLM(
   opts: RewriteOptions,
 ): Promise<GoldenCaseCandidate[]> {
   if (candidates.length === 0) return [];
-  const batchSize = opts.batchSize ?? 200;
+  // 50 keeps the implied max_tokens under 5K, which any gateway/model in our
+  // matrix can hold without truncation. 200 was attractive (one round-trip
+  // per ~100-page project) but turned out fragile against gateways that cap
+  // output tokens around 8K-16K.
+  const batchSize = opts.batchSize ?? 50;
 
   const out: GoldenCaseCandidate[] = [];
+  const total = Math.ceil(candidates.length / batchSize);
   for (let i = 0; i < candidates.length; i += batchSize) {
     const batch = candidates.slice(i, i + batchSize);
-    const rewritten = await rewriteBatch(batch, opts.llm);
+    const idx = Math.floor(i / batchSize) + 1;
+    process.stdout.write(`  rewrite batch ${idx}/${total} (${batch.length} items)...`);
+    const t0 = Date.now();
+    let lastErr: unknown;
+    let rewritten: GoldenCaseCandidate[] | null = null;
+    // Gateways with output-token quota or concurrency throttling sometimes drop
+    // the second/third back-to-back call (observed: undefined response after a
+    // 30s wait). Retry up to 3 times with exponential backoff before giving up.
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        rewritten = await rewriteBatch(batch, opts.llm);
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < 3) {
+          const backoffMs = 2000 * 2 ** (attempt - 1);
+          process.stdout.write(` retry ${attempt}/2 after ${backoffMs}ms (${(err as Error).message})...`);
+          await new Promise((r) => setTimeout(r, backoffMs));
+        }
+      }
+    }
+    if (rewritten === null) {
+      process.stdout.write(` FAIL in ${Date.now() - t0}ms\n`);
+      throw lastErr;
+    }
+    process.stdout.write(` ok in ${Date.now() - t0}ms\n`);
     out.push(...rewritten);
   }
   return out;
@@ -51,7 +81,12 @@ async function rewriteBatch(
   const systemPrompt = SYSTEM_PROMPT;
   const userPrompt = buildUserPrompt(batch);
 
-  const result = await llm.generate({ systemPrompt, userPrompt, temperature: 0.2 });
+  // Output budget: each rewrite is a JSON-quoted question, roughly 30-60 tokens.
+  // Reserve 80 tokens per item plus a 256-token JSON-frame overhead so the
+  // model never truncates mid-array (the AnthropicLLM default of 1024 cannot
+  // hold even a 30-item batch).
+  const maxTokens = 256 + batch.length * 80;
+  const result = await llm.generate({ systemPrompt, userPrompt, temperature: 0.2, maxTokens });
   const parsed = parseRewriteResponse(result.text, batch.length);
   return batch.map((c, i) => ({
     ...c,
