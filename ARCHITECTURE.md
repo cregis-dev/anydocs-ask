@@ -438,14 +438,14 @@ HTTP 400。`scope_id` 校验是硬条件——未命中 `pages` 表中任一 `su
 5. 子树聚合 + lang 路径判定（在重排后 top-10 上）
    先按 lang 切片：top10_same_lang = top10 ∩ {chunks.lang == query_lang}
 
-   分支 A — 同 lang 充分（top10_same_lang 非空且 max(rrf) ≥ 0.05）
+   分支 A — 同 lang 充分（top10_same_lang 非空且 max(rrf) ≥ 0.01）
      按 chunks.page_id → pages.subtree_root 分组，计算各子树得分占比 p_i：
      ├─ max(p_i) ≥ 0.65 → 单一子树主导，进入生成（语种 = query_lang，正常路径）
      ├─ 否则 top-2 子树得分差 < 0.15 → 触发 clarify（选项全是同 lang 子树，
      │  反问文案也用 query_lang）
      └─ 中间情况 → 直接进入生成（按主导子树，语种 = query_lang）
 
-   分支 B — 同 lang 不足（top10_same_lang 空 或 max(rrf) < 0.05）
+   分支 B — 同 lang 不足（top10_same_lang 空 或 max(rrf) < 0.01）
      → 跨 lang 翻译降级
      使用 top10（不限 lang）作为生成上下文；
      生成时显式提示 LLM「用户用 query_lang 提问，参考片段含其他语种；
@@ -919,7 +919,7 @@ CREATE TABLE chunk_priors (
 1. 拉取最近 N 天（默认 30）的 feedback：
    - rating < 0 OR
    - 触发 clarify 但 30min 内无后续 scope_id 重发 OR
-   - 该 query 当时检索 max(rrf_score) < 0.05
+   - 该 query 当时检索 max(rrf_score) < 0.01（与 §6 步骤 5 同口径）
 
 2. 对 query 文本嵌入聚类
    - v1 已有 embedding 模型，复用，不引新依赖
