@@ -195,20 +195,16 @@ function buildDefaultLLM(config: ResolvedConfig): LLM {
     const apiKey = process.env[config.llm.apiKeyEnv] ?? process.env.ANTHROPIC_API_KEY;
     const authToken = process.env.ANTHROPIC_AUTH_TOKEN;
     const baseURL = process.env.ANTHROPIC_BASE_URL;
-    // Model: env wins over config so per-environment gateway model ids
-    // (e.g. company-internal aliases) don't have to ship in
-    // anydocs.ask.json. Empty / whitespace-only values are treated as
-    // unset.
-    const envModel = process.env.ANTHROPIC_MODEL?.trim();
-    const model = envModel && envModel.length > 0 ? envModel : config.llm.model;
     if (!apiKey && !authToken) {
       throw new Error(
         `LLM provider 'anthropic' requires either '${config.llm.apiKeyEnv}' / 'ANTHROPIC_API_KEY' or 'ANTHROPIC_AUTH_TOKEN' env var. ` +
           `For internal Anthropic-compatible gateways set ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL.`,
       );
     }
+    // Model id is already env-resolved by applyEnvOverrides() during
+    // loadConfig — config.llm.model is the canonical value here.
     return new AnthropicLLM({
-      model,
+      model: config.llm.model,
       ...(apiKey ? { apiKey } : {}),
       ...(authToken ? { authToken } : {}),
       ...(baseURL ? { baseURL } : {}),

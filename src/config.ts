@@ -110,7 +110,9 @@ export async function loadConfig(projectRoot: string): Promise<LoadConfigResult>
     raw = await fs.readFile(path, 'utf8');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { config: structuredClone(DEFAULTS), source: null, warnings: [] };
+      const config = structuredClone(DEFAULTS);
+      applyEnvOverrides(config);
+      return { config, source: null, warnings: [] };
     }
     throw err;
   }
@@ -127,7 +129,22 @@ export async function loadConfig(projectRoot: string): Promise<LoadConfigResult>
 
   const warnings: string[] = [];
   const config = mergeWithDefaults(parsed as Record<string, unknown>, warnings);
+  applyEnvOverrides(config);
   return { config, source: path, warnings };
+}
+
+/**
+ * Apply env-var overrides to a freshly loaded (or default) config. Today this
+ * is just `ANTHROPIC_MODEL`, but the seam is here so adding more env knobs
+ * (e.g. retrieval tuning) doesn't need to ripple into every command. Called
+ * once at config-load time so /v1/index/status, /v1/health, and CLI status
+ * all see the same resolved values.
+ */
+export function applyEnvOverrides(config: ResolvedConfig): void {
+  const envModel = process.env.ANTHROPIC_MODEL?.trim();
+  if (envModel && envModel.length > 0 && config.llm.provider === 'anthropic') {
+    config.llm.model = envModel;
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -87,6 +87,34 @@ test('loadConfig: type-mismatched fields are warned (not thrown), defaults prese
   }
 });
 
+test('loadConfig: ANTHROPIC_MODEL env var overrides llm.model', async () => {
+  const prev = process.env.ANTHROPIC_MODEL;
+  process.env.ANTHROPIC_MODEL = 'glm-5.1';
+  const { root, cleanup } = await withTmpProject(async () => {});
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.llm.model, 'glm-5.1', 'env wins over default');
+  } finally {
+    if (prev === undefined) delete process.env.ANTHROPIC_MODEL;
+    else process.env.ANTHROPIC_MODEL = prev;
+    await cleanup();
+  }
+});
+
+test('loadConfig: blank ANTHROPIC_MODEL leaves config.llm.model alone', async () => {
+  const prev = process.env.ANTHROPIC_MODEL;
+  process.env.ANTHROPIC_MODEL = '   ';
+  const { root, cleanup } = await withTmpProject(async () => {});
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.llm.model, 'claude-sonnet-4-6', 'blank env should not override');
+  } finally {
+    if (prev === undefined) delete process.env.ANTHROPIC_MODEL;
+    else process.env.ANTHROPIC_MODEL = prev;
+    await cleanup();
+  }
+});
+
 test('loadConfig: api key never read out of file even if present', async () => {
   // Spec: API keys come ONLY from env vars named in apiKeyEnv. The loader
   // doesn't surface a `apiKey` field; if a user sticks one in, it should be
