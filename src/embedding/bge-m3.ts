@@ -71,4 +71,16 @@ export class Bgem3Embedder implements Embedder {
     }
     return results;
   }
+
+  async dispose(): Promise<void> {
+    if (!this.pipeline) return;
+    // transformers.js exposes pipeline.dispose() that releases the ONNX
+    // session + worker. Without this, node exits with the ONNX session still
+    // alive and the C runtime aborts during worker thread teardown
+    // (`libc++abi: mutex lock failed`). Order matters in runtime.stop():
+    // dispose the embedder BEFORE closing the SQLite handle.
+    await this.pipeline.dispose();
+    this.pipeline = null;
+    this.ready = false;
+  }
 }

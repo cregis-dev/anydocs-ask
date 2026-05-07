@@ -5,6 +5,14 @@
  *   - the index DB was lost / corrupted
  *   - the embedding model changed (config swap)
  *   - someone hand-edited project files outside the watcher's view
+ *
+ * Exit-cleanness note: onnxruntime-node 1.21 (pulled in by
+ * @huggingface/transformers 3.8) aborts with `libc++abi: mutex lock failed`
+ * during process shutdown when its worker thread races with node's native
+ * teardown. Calling pipeline.dispose() doesn't fix it. We therefore force-
+ * exit via SIGKILL after the SQLite handle has been closed (WAL is fsynced
+ * on commit, so no data loss). This is the same workaround the rest of the
+ * onnxruntime-node ecosystem uses pending an upstream fix.
  */
 
 import { resolve } from 'node:path';

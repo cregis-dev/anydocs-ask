@@ -66,8 +66,21 @@ export function createApp(deps: AppDeps): Hono {
       );
     }
     const req = body as AskRequest;
+    let llm;
+    try {
+      llm = runtime.llm;
+    } catch (err) {
+      return c.json(
+        {
+          type: 'error',
+          code: 'llm_unavailable',
+          message: (err as Error).message,
+        },
+        503,
+      );
+    }
     const result = await ask(
-      { db: runtime.db, embedder: runtime.embedder, llm: runtime.llm },
+      { db: runtime.db, embedder: runtime.embedder, llm },
       req,
     );
 

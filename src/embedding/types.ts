@@ -29,4 +29,11 @@ export interface Embedder {
    * Implementations may chunk into smaller batches internally.
    */
   embed(texts: string[]): Promise<EmbedResult[]>;
+  /**
+   * Release any underlying resources (ONNX session, worker threads). Optional
+   * because MockEmbedder doesn't need it; required for clean shutdown of
+   * Bgem3Embedder — without it node exits while the ONNX worker is mid-
+   * teardown and the C runtime aborts with a mutex-lock-failed crash.
+   */
+  dispose?(): Promise<void>;
 }

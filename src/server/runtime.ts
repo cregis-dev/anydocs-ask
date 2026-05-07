@@ -54,19 +54,32 @@ export class Runtime {
   readonly config: ResolvedConfig;
   readonly db: DbHandle;
   readonly embedder: Embedder;
-  readonly llm: LLM;
   readonly indexer: Indexer;
   private watcher: ProjectWatcher | null = null;
   private warmFlag = false;
   private startedAt: number | null = null;
   private lastIndexedAt: number | null = null;
+  /**
+   * LLM is built lazily — index-only commands (`reindex`, `status`) and
+   * health probes never touch it, so requiring ANTHROPIC_API_KEY at boot
+   * just to run a reindex would be hostile. The first /v1/ask call resolves
+   * the provider; missing env vars surface there as a normal error to the
+   * caller, not as a fatal startup crash.
+   */
+  private readonly llmFactory: () => LLM;
+  private llmInstance: LLM | null = null;
 
   constructor(opts: RuntimeOptions) {
     this.projectRoot = resolve(opts.projectRoot);
     this.config = opts.config;
     this.db = opts.db ?? openDatabase({ projectRoot: this.projectRoot });
     this.embedder = opts.embedder ?? buildDefaultEmbedder(opts.config);
-    this.llm = opts.llm ?? buildDefaultLLM(opts.config);
+    if (opts.llm) {
+      this.llmInstance = opts.llm;
+      this.llmFactory = () => opts.llm!;
+    } else {
+      this.llmFactory = () => buildDefaultLLM(opts.config);
+    }
     this.indexer = new Indexer({
       db: this.db,
       embedder: this.embedder,
@@ -86,6 +99,18 @@ export class Runtime {
 
   get warm(): boolean {
     return this.warmFlag;
+  }
+
+  /**
+   * Returns the LLM, building it on first access. Throws synchronously if
+   * the configured provider can't be constructed (e.g. missing API key);
+   * /v1/ask catches this and turns it into a structured error response.
+   */
+  get llm(): LLM {
+    if (!this.llmInstance) {
+      this.llmInstance = this.llmFactory();
+    }
+    return this.llmInstance;
   }
 
   get lastIndexedAtMs(): number | null {
@@ -116,6 +141,14 @@ export class Runtime {
       await this.watcher.stop();
       this.watcher = null;
     }
+    // We deliberately do NOT call embedder.dispose() here. With
+    // onnxruntime-node 1.21 (the version transformers.js@3.8 pulls in),
+    // explicit pipeline.dispose() races with the ONNX worker thread's own
+    // shutdown and the C runtime aborts with `libc++abi: mutex lock failed`.
+    // Letting the OS reap the worker on process exit produces a clean exit
+    // because SQLite WAL is already fsynced by the close() below. dispose()
+    // is still on the Embedder interface for future use / for a safer ONNX
+    // upgrade path.
     try {
       this.db.close();
     } catch {
