@@ -623,8 +623,16 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
 ### 仍待 spike 的事项
 
 - **bge-m3 在小内存机器上的首次加载耗时**：模型 ~600MB，加载到内存后 ~1.5GB RSS。VPS 1GB RAM 场景下需观察是否 OOM；超 §6.1 P95 8s 上限时需在 `anydocs.ask.json` 加 `embedding.preferQuantized: true` 走 int8 版本（@xenova/transformers 支持）。
-- **embedding 量化**：bge-m3 默认 fp32；100k+ chunks 时考虑 int8 量化降磁盘（embedding_cache 体积从 ~400MB 降至 ~100MB / 10 万 chunk）。
 - **bge-m3 在英文 API 名混合中文文档场景下的召回**：BM25 兜底英文标识符；spike 期跑黄金样例集观察。
+
+### 已完成的 spike
+
+- **embedding 量化（2026-05-07 实测，codex-mcp-docs 8 页 16 chunk on M-series Mac）**：
+  - fp32：首次冷启 7m20s（含 1.2GB 模型下载）；纯 embed 时间 ≈ 27s/chunk
+  - int8（`preferQuantized: true`）：冷启 1m18s（含 191MB 模型下载）；二次启动 2.1s 跑完 15 chunk，约 100ms/chunk（batch）
+  - **可见加速 ≈ 5-6×**，磁盘 191MB vs 1.2GB
+  - 实现细节：embedding_cache 的 `model` 列在量化时附 `:q8` 后缀（`Xenova/bge-m3:q8`），fp32/int8 互不污染缓存；切换 `preferQuantized` 不会静默用错维度向量
+  - v1 默认仍 fp32（保留召回保真），但**生产 / VPS 场景推荐 `preferQuantized: true`**；仅在 PRD §8 召回回归测试发现明显损失才回 fp32
 
 ---
 

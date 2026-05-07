@@ -31,14 +31,20 @@ export class Bgem3Embedder implements Embedder {
   readonly dim = 1024;
   ready = false;
 
+  private readonly hfModel: string;
   private readonly preferQuantized: boolean;
   private readonly cacheDir: string | undefined;
   private pipeline: FeatureExtractionPipeline | null = null;
 
   constructor(opts: Bgem3EmbedderOptions = {}) {
-    this.model = opts.model ?? 'Xenova/bge-m3';
+    this.hfModel = opts.model ?? 'Xenova/bge-m3';
     this.preferQuantized = opts.preferQuantized ?? false;
     this.cacheDir = opts.cacheDir;
+    // The `model` field is what gets written to embedding_cache.model and is
+    // the cache key downstream. fp32 and int8 produce different vectors, so
+    // they MUST occupy different cache key spaces — flipping preferQuantized
+    // after warm should not silently serve the other flavor's vectors.
+    this.model = this.preferQuantized ? `${this.hfModel}:q8` : this.hfModel;
   }
 
   async warmUp(): Promise<void> {
@@ -46,7 +52,7 @@ export class Bgem3Embedder implements Embedder {
     // Lazy-load to keep MockEmbedder users from paying the import cost.
     const tx = await import('@huggingface/transformers');
     if (this.cacheDir) tx.env.cacheDir = this.cacheDir;
-    this.pipeline = (await tx.pipeline('feature-extraction', this.model, {
+    this.pipeline = (await tx.pipeline('feature-extraction', this.hfModel, {
       dtype: this.preferQuantized ? 'q8' : 'fp32',
     })) as FeatureExtractionPipeline;
     // Run a single token through to ensure ONNX session is hot.
