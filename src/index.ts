@@ -1,9 +1,23 @@
 /**
  * Public library entry for `@anydocs/ask`.
  *
- * Stage 1 surface is intentionally minimal — embedders / tests can import the
- * Hono app factory directly. Public API will widen as stages 2-7 land.
+ * Surface intentionally narrow — most consumers use the CLI. The named
+ * exports here are for tests and for downstream consumers who want to
+ * embed the runtime (e.g. an in-process Reader during build).
  */
 
-export { createApp } from './server/app.ts';
-export type { AppDeps } from './server/app.ts';
+export { createApp, type AppDeps } from './server/app.ts';
+export { Runtime } from './server/runtime.ts';
+export type { RuntimeOptions, RuntimeStartResult } from './server/runtime.ts';
+export { loadConfig } from './config.ts';
+export type { ResolvedConfig } from './config.ts';
+export { ask } from './query/answer.ts';
+export type {
+  AskRequest,
+  AskResult,
+  AskAnswer,
+  AskClarify,
+  AskError,
+  Citation,
+  ClarifyOption,
+} from './query/types.ts';

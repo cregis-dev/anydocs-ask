@@ -1,4 +1,15 @@
+/**
+ * `anydocs-ask reindex <projectRoot>` — single-shot full reindex, then exit.
+ *
+ * Useful when:
+ *   - the index DB was lost / corrupted
+ *   - the embedding model changed (config swap)
+ *   - someone hand-edited project files outside the watcher's view
+ */
+
 import { resolve } from 'node:path';
+import { Runtime } from '../server/runtime.ts';
+import { loadConfig } from '../config.ts';
 
 export type ReindexOptions = {
   projectRoot: string;
@@ -6,9 +17,27 @@ export type ReindexOptions = {
 
 export async function runReindex(opts: ReindexOptions): Promise<number> {
   const projectRoot = resolve(opts.projectRoot);
-  // TODO(stage 5): wire to IndexManager.rebuildAll().
-  process.stderr.write(
-    `reindex not yet implemented (stage 5); project: ${projectRoot}\n`,
-  );
-  return 1;
+  const { config, warnings } = await loadConfig(projectRoot);
+  for (const w of warnings) process.stderr.write(`[ask] ${w}\n`);
+
+  const runtime = new Runtime({ projectRoot, config, skipWatcher: true });
+  try {
+    process.stdout.write(`anydocs-ask reindex: warming embedder (${config.embedding.model})...\n`);
+    const t0 = Date.now();
+    const result = await runtime.start();
+    const duration = Date.now() - t0;
+    const { initialIndex } = result;
+    process.stdout.write(
+      `done in ${duration}ms\n` +
+        `  pages: +${initialIndex.pages.inserted} ~${initialIndex.pages.updated} -${initialIndex.pages.deleted}\n` +
+        `  chunks: ${initialIndex.chunks.totalChunks} written across ${initialIndex.chunks.writtenPages} pages (${initialIndex.chunks.skippedPages} skipped)\n` +
+        `  embeddings: hits=${initialIndex.embed.hits} misses=${initialIndex.embed.misses}\n`,
+    );
+    if (initialIndex.warnings.length > 0) {
+      process.stderr.write(`warnings:\n  ${initialIndex.warnings.join('\n  ')}\n`);
+    }
+    return 0;
+  } finally {
+    await runtime.stop();
+  }
 }

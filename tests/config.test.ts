@@ -1,0 +1,108 @@
+/**
+ * Config loader tests — defaults, file overrides, lenient validation.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { loadConfig } from '../src/config.ts';
+
+async function withTmpProject(setup: (root: string) => Promise<void>): Promise<{
+  root: string;
+  cleanup: () => Promise<void>;
+}> {
+  const root = await fs.mkdtemp(join(tmpdir(), 'anydocs-cfg-'));
+  await setup(root);
+  return { root, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
+}
+
+test('loadConfig: missing file -> defaults, source = null', async () => {
+  const { root, cleanup } = await withTmpProject(async () => {});
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.source, null);
+    assert.deepEqual(r.warnings, []);
+    assert.equal(r.config.embedding.model, 'bge-m3');
+    assert.equal(r.config.llm.provider, 'anthropic');
+    assert.equal(r.config.server.port, 3100);
+    assert.deepEqual(r.config.server.cors.allowedOrigins, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: user fields merge over defaults', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        embedding: { preferQuantized: true },
+        server: { port: 4200, cors: { allowedOrigins: ['https://reader.example.com'] } },
+        llm: { model: 'claude-opus-4-7' },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.embedding.preferQuantized, true);
+    assert.equal(r.config.embedding.model, 'bge-m3', 'unchanged fields fall back to default');
+    assert.equal(r.config.server.port, 4200);
+    assert.deepEqual(r.config.server.cors.allowedOrigins, ['https://reader.example.com']);
+    assert.equal(r.config.llm.model, 'claude-opus-4-7');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: malformed JSON throws with a clear message', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(join(r, 'anydocs.ask.json'), '{ this is not json ');
+  });
+  try {
+    await assert.rejects(() => loadConfig(root), /malformed JSON/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: type-mismatched fields are warned (not thrown), defaults preserved', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        retrieval: { topK: 'twenty' }, // wrong type
+        server: 'oops',                // wrong type
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.retrieval.topK, 20, 'default preserved on type mismatch');
+    assert.equal(r.config.server.port, 3100, 'default preserved when section is wrong type');
+    assert.ok(r.warnings.length >= 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: api key never read out of file even if present', async () => {
+  // Spec: API keys come ONLY from env vars named in apiKeyEnv. The loader
+  // doesn't surface a `apiKey` field; if a user sticks one in, it should be
+  // silently ignored (we just don't have a field for it).
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ llm: { apiKey: 'sk-secret', apiKeyEnv: 'CUSTOM_VAR' } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.llm.apiKeyEnv, 'CUSTOM_VAR');
+    // No 'apiKey' field exists on the resolved config — narrow types prove it.
+    assert.equal((r.config.llm as { apiKey?: string }).apiKey, undefined);
+  } finally {
+    await cleanup();
+  }
+});
