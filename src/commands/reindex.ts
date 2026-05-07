@@ -21,14 +21,16 @@ import { loadConfig } from '../config.ts';
 
 export type ReindexOptions = {
   projectRoot: string;
+  stateRoot: string;
 };
 
 export async function runReindex(opts: ReindexOptions): Promise<number> {
   const projectRoot = resolve(opts.projectRoot);
+  const stateRoot = resolve(opts.stateRoot);
   const { config, warnings } = await loadConfig(projectRoot);
   for (const w of warnings) process.stderr.write(`[ask] ${w}\n`);
 
-  const runtime = new Runtime({ projectRoot, config, skipWatcher: true });
+  const runtime = new Runtime({ projectRoot, stateRoot, config, skipWatcher: true });
   try {
     process.stdout.write(`anydocs-ask reindex: warming embedder (${config.embedding.model})...\n`);
     const t0 = Date.now();

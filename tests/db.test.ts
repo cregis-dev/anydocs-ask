@@ -26,9 +26,9 @@ function f32Bytes(values: number[]): Buffer {
   return Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength);
 }
 
-test('resolveDbPath puts index.db inside .anydocs-ask/', () => {
-  const p = resolveDbPath('/tmp/proj');
-  assert.equal(p, '/tmp/proj/.anydocs-ask/index.db');
+test('resolveDbPath puts index.db inside the state root', () => {
+  const p = resolveDbPath('/tmp/state/myproj');
+  assert.equal(p, '/tmp/state/myproj/index.db');
 });
 
 test('openDatabase creates schema, loads sqlite-vec, sets user_version=1', () => {

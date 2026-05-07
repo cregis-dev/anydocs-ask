@@ -12,12 +12,15 @@
  * during boot doesn't tie up resources.
  */
 
+import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { Hono } from 'hono';
 import type { Runtime } from './runtime.ts';
 import { buildCorsMiddleware } from './cors.ts';
-import { ask } from '../query/answer.ts';
+import { askWithTrace, type AskTrace } from '../query/answer.ts';
 import { persistAnswer } from './answer-cache.ts';
-import type { AskRequest } from '../query/types.ts';
+import type { AskRequest, AskResult, Citation } from '../query/types.ts';
+import type { RunCitation, RunRecord } from '../runs/types.ts';
 
 export type AppDeps = {
   runtime: Runtime;
@@ -79,10 +82,26 @@ export function createApp(deps: AppDeps): Hono {
         503,
       );
     }
-    const result = await ask(
+    const t0 = performance.now();
+    const { result, trace } = await askWithTrace(
       { db: runtime.db, embedder: runtime.embedder, llm },
       req,
     );
+
+    // Persist + log to runs.jsonl regardless of outcome — analyze needs
+    // visibility into errors / clarifies / answers alike.
+    const requestId = randomUUID();
+    const latencyMs =
+      result.type === 'answer' ? result.latency_ms : Math.round(performance.now() - t0);
+    appendRun(runtime, {
+      requestId,
+      query: req.question ?? '',
+      filters: extractFilters(req),
+      contextPageId: req.context?.current_page_id ?? null,
+      result,
+      trace,
+      latencyMs,
+    });
 
     if (result.type === 'error') {
       const status = result.code === 'invalid_scope' ? 400 : 400;
@@ -198,4 +217,114 @@ export function createApp(deps: AppDeps): Hono {
 
   app.notFound((c) => c.json({ type: 'error', code: 'not_found' }, 404));
   return app;
+}
+
+// ---------------------------------------------------------------------------
+// Runs jsonl helpers (ARCH §16.4)
+// ---------------------------------------------------------------------------
+
+function extractFilters(req: AskRequest): Record<string, unknown> {
+  const filters: Record<string, unknown> = {};
+  if (req.context?.scope_id !== undefined && req.context.scope_id !== null) {
+    filters.scope_id = req.context.scope_id;
+  }
+  if (req.options?.max_chunks !== undefined) {
+    filters.max_chunks = req.options.max_chunks;
+  }
+  if (req.options?.model !== undefined && req.options.model !== null) {
+    filters.model_override = req.options.model;
+  }
+  return filters;
+}
+
+function citationsForRun(citations: Citation[]): RunCitation[] {
+  return citations.map((c) => ({
+    chunk_id: chunkIdFromCitationId(c.citation_id),
+    page: c.page_id,
+    quote: c.snippet,
+  }));
+}
+
+/**
+ * Citation ids are formatted "c<chunk_id>:..." in v1 — see postprocess.ts.
+ * We pull the numeric chunk id back out so runs records match the trace.
+ * Returns null on any unexpected shape (forward-compat).
+ */
+function chunkIdFromCitationId(citationId: string): number | null {
+  const m = /^c(\d+)/.exec(citationId);
+  if (!m || !m[1]) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function appendRun(
+  runtime: Runtime,
+  args: {
+    requestId: string;
+    query: string;
+    filters: Record<string, unknown>;
+    contextPageId: string | null;
+    result: AskResult;
+    trace: AskTrace;
+    latencyMs: number;
+  },
+): void {
+  if (!runtime.runs.isEnabled) return;
+  const { result, trace } = args;
+  let kind: RunRecord['answer']['kind'];
+  let answerId: string | null = null;
+  let md: string | null = null;
+  let citations: RunCitation[] = [];
+  let model: string | null = null;
+  let errorCode: string | null = null;
+  if (result.type === 'answer') {
+    kind = 'answer';
+    answerId = result.answer_id;
+    md = result.answer_md;
+    citations = citationsForRun(result.citations);
+    model = result.model;
+  } else if (result.type === 'clarify') {
+    kind = 'clarify';
+    answerId = result.answer_id;
+    md = result.message;
+  } else {
+    kind = 'error';
+    errorCode = result.code;
+    md = result.message;
+  }
+  const record: RunRecord = {
+    ts: new Date().toISOString(),
+    request_id: args.requestId,
+    session_id: null,
+    query: args.query,
+    filters: args.filters,
+    context_pageId: args.contextPageId,
+    retrieval: {
+      fused: trace.fused.map((f) => ({
+        chunk_id: f.chunk_id,
+        page: f.page_id,
+        rrf_score: f.rrf_score,
+        final_score: f.final_score,
+        vec_rank: f.vec_rank,
+        bm25_rank: f.bm25_rank,
+        nav_index: f.nav_index,
+        nav_index_boost: f.nav_index_boost,
+      })),
+      subtree_ask_triggered: trace.subtree_ask_triggered,
+    },
+    answer: {
+      kind,
+      answer_id: answerId,
+      md,
+      citations,
+      confidence: trace.top_final_score,
+      latency_ms: args.latencyMs,
+      tokens_in: trace.tokens_in,
+      tokens_out: trace.tokens_out,
+      model,
+      error_code: errorCode,
+    },
+    feedback: { beta: null, gamma: null },
+  };
+  runtime.runs.append(record);
 }

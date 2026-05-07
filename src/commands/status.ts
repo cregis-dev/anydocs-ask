@@ -12,11 +12,13 @@ import { loadConfig } from '../config.ts';
 
 export type StatusOptions = {
   projectRoot: string;
+  stateRoot: string;
 };
 
 export async function runStatus(opts: StatusOptions): Promise<number> {
   const projectRoot = resolve(opts.projectRoot);
-  const dbPath = resolveDbPath(projectRoot);
+  const stateRoot = resolve(opts.stateRoot);
+  const dbPath = resolveDbPath(stateRoot);
   if (!existsSync(dbPath)) {
     process.stderr.write(
       `no index DB at ${dbPath}; run 'anydocs-ask reindex ${projectRoot}' first.\n`,
@@ -24,7 +26,7 @@ export async function runStatus(opts: StatusOptions): Promise<number> {
     return 1;
   }
   const { config } = await loadConfig(projectRoot);
-  const db = openDatabase({ projectRoot, skipMigrations: true });
+  const db = openDatabase({ stateRoot, skipMigrations: true });
   try {
     const counts = db
       .prepare(`SELECT
@@ -38,7 +40,8 @@ export async function runStatus(opts: StatusOptions): Promise<number> {
 
     process.stdout.write(
       `anydocs-ask status\n` +
-        `  project root:  ${projectRoot}\n` +
+        `  source root:   ${projectRoot}\n` +
+        `  state root:    ${stateRoot}\n` +
         `  db path:       ${dbPath}\n` +
         `  schema version: ${userVersion}\n` +
         `  pages:         ${counts.pages}\n` +

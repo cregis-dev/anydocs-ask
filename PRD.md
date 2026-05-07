@@ -390,7 +390,7 @@ v1 落库的反馈数据是后续多个版本的基础设施：
 QA 记录走文件路径（详细 layout 见 ARCHITECTURE §15.5）：
 
 ```
-.anydocs-ask/feedback/
+<workspace>/state/<projectId>/feedback/
 ├── inbox/         # 待审：每个 query 簇一份 markdown
 ├── approved/      # 审过通过：JSONL，喂 reranker
 ├── rejected/      # 审过否决：JSONL，仅留痕
@@ -428,3 +428,187 @@ anydocs-ask feedback diagnose  # 触发 A+ 失败查询诊断
 | 5 | feedback 关闭时（默认）查询管线行为与 v1 等价（无副作用） | 回归测试 |
 
 > 阈值在 v1 上线、积累 ≥ 200 条 feedback 后基于真实数据校准；当前仅占位。
+
+---
+
+## 12. 运行环境与评测闭环（v1 + v1.5）
+
+> Status: v0.1 计划（未实现）
+> Date: 2026-05-08
+> 范围：v1 立项部分（workspace / runs / 冷启动 golden / analyze 1-3 维度）+ v1.5 增量部分（β/γ 依赖的 analyze 4-5 维度）。详见 §12.8 范围分配。
+> 详细架构：[ARCHITECTURE.md §16](./ARCHITECTURE.md)
+
+### 12.1 目标
+
+把 anydocs-ask 从"能跑"推到"可评测、可改进"，三件事一次性立项：
+
+- **代码与运行时分离**：真实文档库、索引、ask 历史、golden、reports 全部脱离代码仓，进独立 runtime workspace，多项目并列、互不干扰。
+- **评测闭环**：Golden 集 + 周期 eval + runs 历史 + analyze 诊断，让"调权重 / 改 chunk / 补文档"每一步都有数据依据。
+- **冷启动门槛**：第一次加载文档后没有反馈数据时，用 Golden 三指标判断"v1 默认配置是否够用 / 文档编排是否合格"。
+
+### 12.2 决策边界（2026-05-08 锁定）
+
+四项决策，决定本节的所有设计取舍。任何后续提议违背任意一条 → 视为破边界，需重新评审：
+
+| # | 决策 | 否决的方案 |
+|---|---|---|
+| 1 | Runtime workspace 默认路径 `~/anydocs-ask-runtime/`（可见目录、便于 git 化 golden/feedback/reports） | `~/.anydocs-ask/`（隐藏目录，习惯不会 git） |
+| 2 | Golden 冷启动启用 LLM 自动生成候选 + 人工筛选 | 全人工生成（成本高、上线慢） |
+| 3 | Runs 历史**默认开启**（127.0.0.1 本地、不写 PII），通过 `runs.enabled=false` opt-out | 默认关闭 / 强制 opt-in（评测和 analyze 失去数据源） |
+| 4 | 多项目**并列**：每个项目独立目录、独立进程、独立端口；HTTP 服务也分开 | 一进程多项目（破 v1 §5.5 "一进程一项目"硬约束） |
+
+### 12.3 Workspace 布局
+
+代码仓和运行时分离：
+
+| 角色 | 路径 | 内容 |
+|---|---|---|
+| 代码仓 | `/Users/ahs/code/anydocs-ask/` | TS 源码、tests、最小 `fixtures/starter-docs`（仅供单测） |
+| Runtime workspace | `~/anydocs-ask-runtime/`（默认；可被 `--workspace <path>` 或 `$ANYDOCS_ASK_WORKSPACE` 覆盖） | 真实文档、索引、ask 历史、golden、reports、feedback |
+
+```
+~/anydocs-ask-runtime/
+├── .env                                # workspace 全局凭证（ANTHROPIC_*、模型 override 等）
+├── projects/                           # source 侧：文档项目本体（path 或 symlink）
+│   ├── docs-zh/                        # 完整 anydocs 项目
+│   │   ├── pages/  navigation/  anydocs.config.json
+│   │   └── anydocs.ask.json            # 可选 per-project 覆盖（保留在源仓）
+│   ├── hermes-docs -> /Users/ahs/code/hermes-docs/   # symlink 接入既有仓库
+│   └── starter-demo/
+└── state/                              # runtime 侧：所有可重建的派生数据
+    ├── docs-zh/                        # state-key = anydocs.config.json projectId
+    │   ├── index.db                    # sqlite + sqlite-vec + FTS5
+    │   ├── runs/<YYYY-Www>.jsonl       # ask 运行记录（按 ISO 周切片）
+    │   ├── golden/cases.jsonl          # 评测 Golden 集
+    │   ├── reports/<date>-{baseline,eval,analyze}.md
+    │   ├── feedback/{inbox,approved,rejected,suggestions}/   # v1.5 §11
+    │   └── answer-cache/
+    └── hermes-docs/
+```
+
+**双根分离**（2026-05-08 三次订正，撤回二次订正的"项目自包含"）：source 与 runtime 数据走两个并列顶层 (`projects/` vs `state/`)。
+
+| 维度 | source 侧 (`projects/<name>/`) | runtime 侧 (`state/<projectId>/`) |
+|---|---|---|
+| 内容 | 文档本体 + 用户 authored 配置 (`anydocs.config.json`, 可选 `anydocs.ask.json`) | 索引、runs、golden、reports、feedback、answer-cache |
+| 接入 | 真实目录 / symlink 进 `projects/<name>` 都可 | 一律 `<workspace>/state/<projectId>/`，绝不回写 source |
+| git 关系 | 由用户决定（hermes-docs 自有仓） | 独立 git，可单独提 review、单独迁移 |
+| 删除安全 | 删了就没文档了 | `rm -rf state/<id>` 完全可恢复（reindex + golden generate 重来） |
+
+**state-key 解析**：state 子目录名 = `<projectRoot>/anydocs.config.json` 里的 `projectId`（anydocs 格式必填字段）。bare-name `serve docs-zh` 与 path-form `serve /abs/docs-zh` 都查同一个 projectId → 同一份 state。projectId 冲突视为人为错误（CLI 检测时报错并指引）。
+
+**为什么撤回"项目自包含"**：二次订正的 4 条理由（搬迁跟随 / git 化包含 / 路径全功能 / 一进程一项目）在 symlink 接入既有仓库时全部反转——污染源仓 `git status`、6.8MB index.db 误打进生产 git、用户清源仓时误删评测数据、`.gitignore` 还得手动加。三次订正后这些缺陷都消失。
+
+**多项目语义**：每个 `projects/<name>/` 仍是独立 anydocs 项目，独立跑一个 `anydocs-ask serve` 进程占独立端口（3100/3101/3102 ...），不改变 v1 §5.5 一进程一项目硬约束。
+
+**.env 加载**：CLI 启动时按顺序加载 `<workspace>/.env` → `<projectRoot>/.env`（process.loadEnvFile 不覆盖已存在变量 → workspace 是默认、projectRoot override）。cwd/.env 不再参与（避免 shell 位置偶然改变行为）。
+
+### 12.4 Golden 集（评测基线）
+
+三个来源，分阶段：
+
+| 阶段 | 来源 | 工具 | 量级 |
+|---|---|---|---|
+| Day 0（冷启动） | **结构反向 + LLM 改写**：遍历 navigation，每页生成 3-5 个候选 Q（"什么是 X / X 和 Y 区别 / X 怎么用"），LLM 改写为自然语言；人工 30 分钟筛掉 ~50% | `anydocs-ask golden generate <project> --from structure` | 50–200 |
+| v1 ≥2 周 | **从 runs 历史挑**：confidence ≥0.7 + 用户未重问 + answer 简洁 → 候选；人工补 `must_cite_pages` / `must_contain` | `... --from runs --since 14d` | 30–100/周 |
+| v1.5 后 | **失败修补**：analyze 报告里"无 citation / 离场快"的 query → 人工补 expected | `... --from inbox` | 长尾 |
+
+Golden case schema（jsonl，每行）：
+
+```json
+{
+  "id": "q-001",
+  "query": "鉴权怎么做",
+  "filters": { "audience": "public" },
+  "context_pageId": null,
+  "expected": {
+    "must_cite_pages": ["security/jwt"],
+    "must_contain": ["JWT", "Bearer"],
+    "forbid_contain": ["session cookie"]
+  },
+  "created_by": "author | llm-curated",
+  "reviewed_at": "2026-05-08"
+}
+```
+
+评测输出三个指标（详见 ARCHITECTURE §16.3）：
+
+- **R@5**：top-5 命中 `must_cite_pages` 的覆盖率
+- **Citation-pass**：答案 citations 全部落在 `must_cite_pages` 内的样本占比
+- **Answer-rule-pass**：答案文本满足 `must_contain` ∧ ¬`forbid_contain` 的样本占比
+
+### 12.5 Runs 历史
+
+**位置**：`<workspace>/state/<projectId>/runs/<YYYY-Www>.jsonl`（runtime 侧，与 sqlite 同位），按 ISO 周切片，避免单文件无限增长。
+
+**默认开启**，`runs.enabled=false` opt-out。每行记录一次 `/v1/ask`：query、filters、context、检索 trace（fused chunks + RRF/BM25/vec rank + nav_index_boost）、answer、citations、confidence、latency、tokens、model。详细 schema 见 ARCHITECTURE §16.4。
+
+**隐私**：v1 默认不写 IP / UA / 用户标识；脱敏 hook 留 v1.5（PRD §9 已留口子）。`feedback.beta` / `feedback.gamma` 字段在 runs 中预留为 null，由 v1.5 §11 反馈回路异步回填。
+
+**导出 / 探查**：`anydocs-ask runs tail <project>` / `runs export <project> --since ... --format csv|jsonl`。
+
+### 12.6 冷启动评测协议
+
+无 β/γ 信号、无积累 runs 时**严禁乱调权重**——只用 v1 默认（vec+BM25 RRF + nav_index_boost + 子树聚合反问 + sonnet-4-6 默认 prompt，详见 §4.2 / ARCHITECTURE §6）。
+
+**Day 0 必做**：
+
+1. `anydocs-ask golden generate <project> --from structure` 出 50–200 条 baseline。
+2. `anydocs-ask eval <project>` 跑指标（默认读 `<workspace>/state/<projectId>/golden/cases.jsonl`）。
+3. 结果写入 `<workspace>/state/<projectId>/reports/<date>-baseline.md`，作为后续任何 retrieval 配置变更的回归基线。
+
+**上线门槛建议**（推荐值，可调）：
+
+| 指标 | 门槛 | 不达标的含义 |
+|---|---|---|
+| R@5 | ≥0.70 | 关键页缺失 / navigation 编排有歧义 |
+| Citation-pass | ≥0.65 | chunk 边界 / breadcrumb 投影问题 |
+| Answer-rule-pass | ≥0.60 | LLM prompt 或文档行文不够明确 |
+
+**冷启动期不应该做**：reranker model、建议问题侧栏、query expansion、LLM few-shot——全在 v1.5+。践行 PRD §1 "服从编排"原则：先确认编排是否合格，再调算法。
+
+### 12.7 Analyze 历史诊断
+
+`anydocs-ask analyze runs <project> --since 7d` 周期产 markdown 报告（落 `<workspace>/state/<projectId>/reports/<date>-analyze.md`），高价值条目自动入 `<workspace>/state/<projectId>/feedback/suggestions/<YYYY-Www>.md` 等人工评审。五个诊断维度：
+
+| # | 维度 | 触发条件 | 输出动作 | v1 / v1.5 |
+|---|---|---|---|---|
+| 1 | **召回失败** | confidence<0.4 ∨ 无 citation ∨ 30s 内重问 | 列 query + 高频缺失 page → 给作者"应补文档"建议 | v1 |
+| 2 | **延迟异常** | latency_ms p95 超阈值的 query 模式 | 提示 chunk 过大 / token 爆 → 调 chunking 配置 | v1 |
+| 3 | **歧义高发** | 反问触发率 / 未被 disambiguate 命中 | 提示 navigation 调整（合并/拆分子树） | v1 |
+| 4 | **引用错配** | β=negative 的 citation | 反查 chunk → 是否拆分；进 feedback inbox | v1.5（依赖 β） |
+| 5 | **embedding 漂移** | 同一 query 跨 reindex 命中页面变化 | embedding 模型选型信号 | v1.5（需累积多次 reindex） |
+
+维度 1-3 是 v1.5 §11.3 F2（A+ 失败诊断）的具体化、且不依赖反馈信号——v1 即可上。维度 4-5 等 v1.5 反馈回路落地后启用。
+
+### 12.8 v1 / v1.5 范围分配
+
+明确每个能力的归属版本，避免 §11 v1.5 反馈回路与本节耦合不清：
+
+| 能力 | v1 | v1.5 |
+|---|---|---|
+| Runtime workspace 目录约定 | ✅ | — |
+| `--workspace` flag + `$ANYDOCS_ASK_WORKSPACE` | ✅ | — |
+| 多项目并列（多进程多端口） | ✅ | — |
+| Golden case schema + `golden generate --from structure` | ✅ | — |
+| LLM 改写候选 Q | ✅ | — |
+| `golden generate --from runs` | ✅ | — |
+| `golden generate --from inbox` | — | ✅ |
+| `eval` 命令 + 三指标 | ✅ | — |
+| Runs jsonl 默认开启 | ✅ | — |
+| `runs tail` / `runs export` | ✅ | — |
+| Analyze 维度 1-3（召回 / 延迟 / 歧义） | ✅ | — |
+| Analyze 维度 4-5（β 错配 / embedding 漂移） | — | ✅ |
+| Cold-start baseline + 上线门槛 | ✅ | — |
+
+### 12.9 v1 验收标准
+
+| # | 标准 | 验证方式 |
+|---|---|---|
+| 1 | 默认 workspace `~/anydocs-ask-runtime/` 不存在时，CLI 自动创建并打印路径 | 集成测试 |
+| 2 | 多项目并列：两个 `serve` 进程在 3100/3101 同时运行，互不读写对方 sqlite/runs/golden | 集成测试 |
+| 3 | `runs.enabled=true` 时每次 `/v1/ask` 落一行 jsonl；`enabled=false` 时不落 | 单元测试 |
+| 4 | `golden generate --from structure` 在 starter-demo 上至少生成 30 条候选并给出 LLM token 估算 | 集成测试 |
+| 5 | `eval` 在 baseline golden 上输出三指标 + diff 上一次 baseline | 集成测试 |
+| 6 | `analyze runs --since 7d` 在合成 runs 上识别全部 1-3 维度信号 | 红队验证 |
+| 7 | 默认 LLM 关闭（无 ANTHROPIC_API_KEY）时，`golden generate --from structure` 报错并给出指引；不静默回退到纯结构候选 | 单元测试 |

@@ -51,6 +51,16 @@ export type IndexingConfig = {
   debounceMs: number;
 };
 
+export type RunsConfig = {
+  enabled: boolean;
+  /** v1 only supports 'weekly' (ISO-week file rotation). */
+  rotation: 'weekly';
+  /** Cap persisted query length in chars. null = no truncation. */
+  truncateQueryChars: number | null;
+  /** Cap persisted answer.md length in chars. null = no truncation. */
+  truncateAnswerChars: number | null;
+};
+
 export type ResolvedConfig = {
   embedding: EmbeddingConfig;
   llm: LLMConfig;
@@ -58,6 +68,7 @@ export type ResolvedConfig = {
   clarify: ClarifyConfig;
   server: ServerConfig;
   indexing: IndexingConfig;
+  runs: RunsConfig;
 };
 
 export type LoadConfigResult = {
@@ -100,6 +111,12 @@ const DEFAULTS: ResolvedConfig = {
     chunkMaxTokens: 500,
     chunkHardCap: 1000,
     debounceMs: 200,
+  },
+  runs: {
+    enabled: true,
+    rotation: 'weekly',
+    truncateQueryChars: null,
+    truncateAnswerChars: null,
   },
 };
 
@@ -162,7 +179,34 @@ function mergeWithDefaults(
   applySection(user.clarify, out.clarify, 'clarify', warnings);
   applyServer(user.server, out.server, warnings);
   applySection(user.indexing, out.indexing, 'indexing', warnings);
+  applyRuns(user.runs, out.runs, warnings);
   return out;
+}
+
+function applyRuns(value: unknown, target: RunsConfig, warnings: string[]): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'runs' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.enabled === 'boolean') target.enabled = obj.enabled;
+  if (obj.rotation === 'weekly') target.rotation = 'weekly';
+  else if (obj.rotation !== undefined) {
+    warnings.push(`anydocs.ask.json: runs.rotation only supports 'weekly' in v1; using default`);
+  }
+  for (const key of ['truncateQueryChars', 'truncateAnswerChars'] as const) {
+    if (obj[key] === undefined) continue;
+    if (obj[key] === null) {
+      target[key] = null;
+    } else if (typeof obj[key] === 'number' && Number.isFinite(obj[key]) && (obj[key] as number) > 0) {
+      target[key] = obj[key] as number;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: runs.${key} must be a positive number or null; using default`,
+      );
+    }
+  }
 }
 
 function applySection(

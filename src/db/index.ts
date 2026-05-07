@@ -2,7 +2,8 @@
  * SQLite + sqlite-vec opener and migration runner for anydocs-ask.
  *
  * Concerns kept here:
- *   1. Resolve the index DB path inside `<projectRoot>/.anydocs-ask/index.db`
+ *   1. Resolve the index DB path inside `<stateRoot>/index.db`
+ *      (stateRoot = `<workspace>/state/<projectId>/`, see workspace.ts)
  *   2. Open with WAL + foreign_keys=ON
  *   3. Load the sqlite-vec extension (vec0 / vec_distance_cosine / ...)
  *   4. Run any pending migrations using PRAGMA user_version as the cursor
@@ -22,9 +23,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 export type OpenOptions = {
-  /** anydocs project root. The DB lives at `<projectRoot>/.anydocs-ask/index.db`. */
-  projectRoot?: string;
-  /** Override DB path entirely (used by tests; ignores `projectRoot`). */
+  /** Runtime state root: `<workspace>/state/<projectId>/`. The DB lives at
+   *  `<stateRoot>/index.db`. Mutually exclusive with `dbPath`. */
+  stateRoot?: string;
+  /** Override DB path entirely (used by tests; ignores `stateRoot`). */
   dbPath?: string;
   /** If true, skip running migrations after open. Default false. */
   skipMigrations?: boolean;
@@ -33,23 +35,22 @@ export type OpenOptions = {
 export type DbHandle = DatabaseHandle;
 
 /**
- * Where `index.db` lives for a given anydocs project.
+ * Where `index.db` lives for a given runtime state root.
  *
- * Putting state under `.anydocs-ask/` (not `.anydocs/`) keeps us out of
- * anydocs' own subtree, in line with the "do not invade anydocs schema" rule
- * (PRD §6.5).
+ * The 双根分离 rule (ARCH §16.1) puts runtime data under
+ * `<workspace>/state/<projectId>/` so source repos stay clean.
  */
-export function resolveDbPath(projectRoot: string): string {
-  return join(resolve(projectRoot), '.anydocs-ask', 'index.db');
+export function resolveDbPath(stateRoot: string): string {
+  return join(resolve(stateRoot), 'index.db');
 }
 
 export function openDatabase(options: OpenOptions = {}): DbHandle {
   const dbPath =
     options.dbPath ??
-    (options.projectRoot
-      ? resolveDbPath(options.projectRoot)
+    (options.stateRoot
+      ? resolveDbPath(options.stateRoot)
       : (() => {
-          throw new Error('openDatabase: provide projectRoot or dbPath');
+          throw new Error('openDatabase: provide stateRoot or dbPath');
         })());
 
   if (dbPath !== ':memory:') {

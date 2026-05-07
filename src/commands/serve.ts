@@ -15,12 +15,14 @@ import { loadConfig } from '../config.ts';
 
 export type ServeOptions = {
   projectRoot: string;
+  stateRoot: string;
   host?: string;
   port?: number;
 };
 
 export async function runServe(opts: ServeOptions): Promise<number> {
   const projectRoot = resolve(opts.projectRoot);
+  const stateRoot = resolve(opts.stateRoot);
   const { config, source, warnings } = await loadConfig(projectRoot);
   if (source) {
     process.stdout.write(`anydocs-ask: loaded config from ${source}\n`);
@@ -32,7 +34,7 @@ export async function runServe(opts: ServeOptions): Promise<number> {
   const host = opts.host ?? config.server.host;
   const port = opts.port ?? config.server.port;
 
-  const runtime = new Runtime({ projectRoot, config });
+  const runtime = new Runtime({ projectRoot, stateRoot, config });
   const app = createApp({ runtime });
 
   // Start HTTP first so /v1/health is reachable for warm-up probes.
@@ -44,7 +46,9 @@ export async function runServe(opts: ServeOptions): Promise<number> {
     { fetch: app.fetch, hostname: host, port },
     (info) => {
       process.stdout.write(
-        `anydocs-ask listening on http://${info.address}:${info.port} (project: ${projectRoot})\n` +
+        `anydocs-ask listening on http://${info.address}:${info.port}\n` +
+          `  source:    ${projectRoot}\n` +
+          `  state:     ${stateRoot}\n` +
           `  embedding: ${config.embedding.model}\n` +
           `  llm:       ${config.llm.provider}/${config.llm.model}\n` +
           `  GET /v1/health will return 503 until warm-up finishes.\n`,

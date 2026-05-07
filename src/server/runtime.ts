@@ -20,14 +20,18 @@ import { Indexer, type FullReindexStats } from '../index/indexer.ts';
 import { ProjectWatcher } from '../index/watcher.ts';
 import { Bgem3Embedder } from '../embedding/bge-m3.ts';
 import { MockEmbedder } from '../embedding/mock.ts';
-import { AnthropicLLM } from '../llm/anthropic.ts';
-import { MockLLM } from '../llm/mock.ts';
+import { buildDefaultLLM } from '../llm/factory.ts';
+import { RunsWriter } from '../runs/writer.ts';
 import type { Embedder } from '../embedding/types.ts';
 import type { LLM } from '../llm/types.ts';
 import type { ResolvedConfig } from '../config.ts';
 
 export type RuntimeOptions = {
+  /** Source: anydocs project (pages/ + navigation/). */
   projectRoot: string;
+  /** Runtime: index.db + runs/ + answer-cache/. Always lives under
+   *  `<workspace>/state/<projectId>/` (ARCH §16.1 双根分离). */
+  stateRoot: string;
   config: ResolvedConfig;
   /** Override embedder (tests inject MockEmbedder). */
   embedder?: Embedder;
@@ -51,10 +55,12 @@ export type RuntimeStartResult = {
 
 export class Runtime {
   readonly projectRoot: string;
+  readonly stateRoot: string;
   readonly config: ResolvedConfig;
   readonly db: DbHandle;
   readonly embedder: Embedder;
   readonly indexer: Indexer;
+  readonly runs: RunsWriter;
   private watcher: ProjectWatcher | null = null;
   private warmFlag = false;
   private startedAt: number | null = null;
@@ -71,8 +77,9 @@ export class Runtime {
 
   constructor(opts: RuntimeOptions) {
     this.projectRoot = resolve(opts.projectRoot);
+    this.stateRoot = resolve(opts.stateRoot);
     this.config = opts.config;
-    this.db = opts.db ?? openDatabase({ projectRoot: this.projectRoot });
+    this.db = opts.db ?? openDatabase({ stateRoot: this.stateRoot });
     this.embedder = opts.embedder ?? buildDefaultEmbedder(opts.config);
     if (opts.llm) {
       this.llmInstance = opts.llm;
@@ -84,6 +91,12 @@ export class Runtime {
       db: this.db,
       embedder: this.embedder,
       projectRoot: this.projectRoot,
+    });
+    this.runs = new RunsWriter({
+      stateRoot: this.stateRoot,
+      enabled: opts.config.runs.enabled,
+      truncateQueryChars: opts.config.runs.truncateQueryChars,
+      truncateAnswerChars: opts.config.runs.truncateAnswerChars,
     });
     if (!opts.skipWatcher) {
       this.watcher = new ProjectWatcher({
@@ -182,33 +195,3 @@ function buildDefaultEmbedder(config: ResolvedConfig): Embedder {
   return new MockEmbedder();
 }
 
-function buildDefaultLLM(config: ResolvedConfig): LLM {
-  if (config.llm.provider === 'mock') {
-    return new MockLLM({ model: config.llm.model });
-  }
-  if (config.llm.provider === 'anthropic') {
-    // Pick credentials in order of precedence:
-    //   1. Custom env var named in config (apiKeyEnv) — always honored
-    //   2. Native Anthropic env vars (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN)
-    // Bearer-token gateways set ANTHROPIC_AUTH_TOKEN; the official Anthropic
-    // service uses ANTHROPIC_API_KEY (sent as x-api-key). Either is enough.
-    const apiKey = process.env[config.llm.apiKeyEnv] ?? process.env.ANTHROPIC_API_KEY;
-    const authToken = process.env.ANTHROPIC_AUTH_TOKEN;
-    const baseURL = process.env.ANTHROPIC_BASE_URL;
-    if (!apiKey && !authToken) {
-      throw new Error(
-        `LLM provider 'anthropic' requires either '${config.llm.apiKeyEnv}' / 'ANTHROPIC_API_KEY' or 'ANTHROPIC_AUTH_TOKEN' env var. ` +
-          `For internal Anthropic-compatible gateways set ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL.`,
-      );
-    }
-    // Model id is already env-resolved by applyEnvOverrides() during
-    // loadConfig — config.llm.model is the canonical value here.
-    return new AnthropicLLM({
-      model: config.llm.model,
-      ...(apiKey ? { apiKey } : {}),
-      ...(authToken ? { authToken } : {}),
-      ...(baseURL ? { baseURL } : {}),
-    });
-  }
-  throw new Error(`LLM provider '${config.llm.provider}' is not supported in v1`);
-}

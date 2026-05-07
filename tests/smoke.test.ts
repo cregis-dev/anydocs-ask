@@ -56,12 +56,15 @@ async function makeRuntime(): Promise<{
   runtime: Runtime;
   cleanup: () => Promise<void>;
   projectRoot: string;
+  stateRoot: string;
 }> {
   const { root, cleanup: rmTmp } = await buildProject();
+  const stateRoot = await fs.mkdtemp(join(tmpdir(), 'anydocs-smoke-state-'));
   const { config } = await loadConfig(root);
   const db = openDatabase({ dbPath: ':memory:' });
   const runtime = new Runtime({
     projectRoot: root,
+    stateRoot,
     config,
     db,
     embedder: new MockEmbedder(),
@@ -71,9 +74,11 @@ async function makeRuntime(): Promise<{
   return {
     runtime,
     projectRoot: root,
+    stateRoot,
     cleanup: async () => {
       await runtime.stop();
       await rmTmp();
+      await fs.rm(stateRoot, { recursive: true, force: true });
     },
   };
 }

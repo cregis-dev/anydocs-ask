@@ -56,12 +56,38 @@ const RRF_K = 60;
  */
 const VECTOR_OVERFETCH = 4;
 
+/**
+ * Trace metadata from the retrieve step — exposed by retrieveWithTrace() for
+ * runs jsonl persistence (ARCH §16.4). Per-path rank is 1-based; missing
+ * means the chunk wasn't in that path's top-K (rank null in the run record).
+ */
+export type RetrievalTrace = {
+  vecRanks: Map<number, number>;
+  bm25Ranks: Map<number, number>;
+};
+
 export function retrieve(db: DbHandle, opts: RetrieveOptions): RetrievedChunk[] {
+  return retrieveWithTrace(db, opts).chunks;
+}
+
+export function retrieveWithTrace(
+  db: DbHandle,
+  opts: RetrieveOptions,
+): { chunks: RetrievedChunk[]; trace: RetrievalTrace } {
   const perPathK = opts.perPathK ?? DEFAULT_PER_PATH_K;
   const finalK = opts.finalK ?? DEFAULT_FINAL_K;
 
   const vectorIds = vectorPath(db, opts.queryVector, perPathK, opts.scopeId);
   const bm25Ids = opts.ftsQuery ? bm25Path(db, opts.ftsQuery, perPathK, opts.scopeId) : [];
+
+  const vecRanks = new Map<number, number>();
+  vectorIds.forEach((id, idx) => {
+    if (!vecRanks.has(id)) vecRanks.set(id, idx + 1);
+  });
+  const bm25Ranks = new Map<number, number>();
+  bm25Ids.forEach((id, idx) => {
+    if (!bm25Ranks.has(id)) bm25Ranks.set(id, idx + 1);
+  });
 
   // RRF fusion. Each list provides a rank (1-based); chunks present in only
   // one list get the other's rank as Infinity, contributing 0.
@@ -77,7 +103,7 @@ export function retrieve(db: DbHandle, opts: RetrieveOptions): RetrievedChunk[] 
     .sort((a, b) => b[1] - a[1])
     .slice(0, finalK);
 
-  if (ranked.length === 0) return [];
+  if (ranked.length === 0) return { chunks: [], trace: { vecRanks, bm25Ranks } };
 
   const idList = ranked.map(([id]) => id);
   const rows = fetchChunkRows(db, idList);
@@ -89,7 +115,7 @@ export function retrieve(db: DbHandle, opts: RetrieveOptions): RetrievedChunk[] 
     if (!r) continue; // boundary check kicked it; shouldn't happen since we already filtered
     out.push({ ...r, rrf_score: score });
   }
-  return out;
+  return { chunks: out, trace: { vecRanks, bm25Ranks } };
 }
 
 // ---------------------------------------------------------------------------

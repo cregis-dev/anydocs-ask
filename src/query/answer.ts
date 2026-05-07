@@ -27,7 +27,7 @@ import type { DocsLang } from '../anydocs/types.ts';
 import type { BreadcrumbNode } from '../db/schema.ts';
 import { detectLangFromText, langFromScopeId } from './lang.ts';
 import { sanitizeFtsQuery } from './sanitize.ts';
-import { retrieve, type RetrievedChunk } from './retrieval.ts';
+import { retrieveWithTrace, type RetrievalTrace, type RetrievedChunk } from './retrieval.ts';
 import { rerank, lookupSubtreeRoot, type RerankedChunk } from './rerank.ts';
 import { aggregate, TOP_K_FOR_AGGREGATION, type AggregateOutcome, type SubtreeShare } from './aggregate.ts';
 import { buildPrompt, detectFormatHint } from './prompt.ts';
@@ -44,29 +44,78 @@ export type AskDeps = {
   llm: LLM;
 };
 
+/**
+ * Diagnostic trace captured alongside the result. Persisted to runs.jsonl
+ * (ARCH §16.4) but never sent on /v1/ask responses. v1.5 §15 §16.6 analyze
+ * commands read this back to compute recall-failure / latency / etc. metrics.
+ */
+export type AskTrace = {
+  /** Reranked chunks (sorted descending by final_score). Empty on early-error
+   *  paths (validation / invalid_scope). */
+  fused: AskTraceFusedChunk[];
+  /** True when aggregate decided to fire a clarify (subtree-aggregation ask). */
+  subtree_ask_triggered: boolean;
+  /** Top final_score from rerank — v1 uses this as a confidence proxy. */
+  top_final_score: number;
+  /** LLM token counts when the provider exposes them. v1 leaves these null;
+   *  later stages can set them when the LLM interface is widened. */
+  tokens_in: number | null;
+  tokens_out: number | null;
+};
+
+export type AskTraceFusedChunk = {
+  chunk_id: number;
+  page_id: string;
+  rrf_score: number;
+  final_score: number;
+  vec_rank: number | null;
+  bm25_rank: number | null;
+  nav_index: number | null;
+  /** Same formula as rerank.ts navIndexBoostFor. Captured here so analyze can
+   *  inspect "why did this chunk win" without re-running the math. */
+  nav_index_boost: number;
+};
+
 export async function ask(deps: AskDeps, req: AskRequest): Promise<AskResult> {
+  return (await askWithTrace(deps, req)).result;
+}
+
+export async function askWithTrace(
+  deps: AskDeps,
+  req: AskRequest,
+): Promise<{ result: AskResult; trace: AskTrace }> {
   const t0 = performance.now();
+  const emptyTrace = (): AskTrace => ({
+    fused: [],
+    subtree_ask_triggered: false,
+    top_final_score: 0,
+    tokens_in: null,
+    tokens_out: null,
+  });
 
   // 1. Input validation.
   const question = (req.question ?? '').trim();
   if (question.length === 0) {
-    return errorResult('invalid_question', 'question must not be empty');
+    return {
+      result: errorResult('invalid_question', 'question must not be empty'),
+      trace: emptyTrace(),
+    };
   }
   if (question.length > MAX_QUESTION_CHARS) {
-    return errorResult(
-      'invalid_question',
-      `question exceeds ${MAX_QUESTION_CHARS} characters`,
-    );
+    return {
+      result: errorResult('invalid_question', `question exceeds ${MAX_QUESTION_CHARS} characters`),
+      trace: emptyTrace(),
+    };
   }
 
   const scopeId = req.context?.scope_id ?? null;
   if (scopeId !== null) {
     const valid = isValidScopeId(deps.db, scopeId);
     if (!valid) {
-      return errorResult(
-        'invalid_scope',
-        `scope_id '${scopeId}' is not a published subtree`,
-      );
+      return {
+        result: errorResult('invalid_scope', `scope_id '${scopeId}' is not a published subtree`),
+        trace: emptyTrace(),
+      };
     }
   }
 
@@ -76,7 +125,7 @@ export async function ask(deps: AskDeps, req: AskRequest): Promise<AskResult> {
   // 3. Hybrid retrieve.
   const queryVector = (await deps.embedder.embed([question]))[0]!.vector;
   const ftsQuery = sanitizeFtsQuery(question);
-  const retrieved = retrieve(deps.db, {
+  const { chunks: retrieved, trace: retrievalTrace } = retrieveWithTrace(deps.db, {
     queryVector,
     ftsQuery,
     scopeId,
@@ -88,14 +137,23 @@ export async function ask(deps: AskDeps, req: AskRequest): Promise<AskResult> {
     : null;
   const reranked = rerank(retrieved, { queryLang, currentSubtreeRoot });
 
+  const fusedTrace = buildFusedTrace(reranked, retrievalTrace);
+  const top_final_score = reranked[0]?.final_score ?? 0;
+
   // 5. Aggregate.
   const outcome = aggregate(reranked, { queryLang });
 
   if (outcome.kind === 'clarify') {
-    return buildClarifyResult({
-      answerLang: queryLang,
-      shares: outcome.topSubtrees,
-    });
+    return {
+      result: buildClarifyResult({ answerLang: queryLang, shares: outcome.topSubtrees }),
+      trace: {
+        fused: fusedTrace,
+        subtree_ask_triggered: true,
+        top_final_score,
+        tokens_in: null,
+        tokens_out: null,
+      },
+    };
   }
 
   // 6 + 7. Generate + postprocess.
@@ -122,16 +180,48 @@ export async function ask(deps: AskDeps, req: AskRequest): Promise<AskResult> {
   });
 
   return {
-    type: 'answer',
-    answer_id: makeAnswerId(),
-    answer_lang: queryLang,
-    answer_md: post.answer_md,
-    translation_notice: isCrossLang ? translationNoticeFor(queryLang) : null,
-    citations: post.citations,
-    used_chunks: post.used_chunks,
-    model: llmOutput.modelUsed,
-    latency_ms: Math.round(performance.now() - t0),
+    result: {
+      type: 'answer',
+      answer_id: makeAnswerId(),
+      answer_lang: queryLang,
+      answer_md: post.answer_md,
+      translation_notice: isCrossLang ? translationNoticeFor(queryLang) : null,
+      citations: post.citations,
+      used_chunks: post.used_chunks,
+      model: llmOutput.modelUsed,
+      latency_ms: Math.round(performance.now() - t0),
+    },
+    trace: {
+      fused: fusedTrace,
+      subtree_ask_triggered: false,
+      top_final_score,
+      tokens_in: null,
+      tokens_out: null,
+    },
   };
+}
+
+function buildFusedTrace(
+  reranked: RerankedChunk[],
+  retrievalTrace: RetrievalTrace,
+): AskTraceFusedChunk[] {
+  return reranked.map((c) => ({
+    chunk_id: c.chunk_id,
+    page_id: c.page_id,
+    rrf_score: c.rrf_score,
+    final_score: c.final_score,
+    vec_rank: retrievalTrace.vecRanks.get(c.chunk_id) ?? null,
+    bm25_rank: retrievalTrace.bm25Ranks.get(c.chunk_id) ?? null,
+    nav_index: c.nav_index,
+    nav_index_boost: navIndexBoostForTrace(c.nav_index),
+  }));
+}
+
+function navIndexBoostForTrace(navIndex: number | null): number {
+  // Mirrors rerank.ts navIndexBoostFor (kept as a sibling to avoid leaking
+  // the internal helper through rerank.ts's public surface).
+  if (navIndex === null) return 0;
+  return 0.1 * (1 / Math.log(navIndex + 2));
 }
 
 // ---------------------------------------------------------------------------
