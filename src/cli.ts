@@ -8,11 +8,31 @@
  *   status  <projectRoot>
  *
  * v1 keeps the parser minimal — no commander/yargs dependency.
+ *
+ * Environment variables: each command tries to load `.env` files in order
+ * (cwd/.env, then <projectRoot>/.env). Missing files are silently skipped.
+ * Existing process.env entries are NOT overridden — explicit > file > nothing.
  */
 
+import { existsSync } from 'node:fs';
+import { resolve, join } from 'node:path';
 import { runServe } from './commands/serve.ts';
 import { runReindex } from './commands/reindex.ts';
 import { runStatus } from './commands/status.ts';
+
+function tryLoadEnvFile(path: string): boolean {
+  if (!existsSync(path)) return false;
+  // process.loadEnvFile is stable in Node 21.7+. We don't override existing
+  // process.env entries (loadEnvFile's documented behavior), which is exactly
+  // what we want: shell-exported vars beat .env beat nothing.
+  try {
+    process.loadEnvFile(path);
+    return true;
+  } catch (err) {
+    process.stderr.write(`[ask] warning: failed to read ${path}: ${(err as Error).message}\n`);
+    return false;
+  }
+}
 
 type ParsedArgs = {
   command: string | undefined;
@@ -74,6 +94,22 @@ async function main(): Promise<number> {
     process.stderr.write(`error: missing <projectRoot>\n\n`);
     printHelp();
     return 2;
+  }
+
+  // Load .env files BEFORE constructing the runtime so AnthropicLLM /
+  // gateway credentials are visible. cwd first (developer-machine .env),
+  // then projectRoot/.env (per-project gateway pin) — projectRoot wins
+  // because it's loaded second and process.loadEnvFile leaves existing
+  // values untouched, but new keys land.
+  const cwdEnv = resolve(process.cwd(), '.env');
+  const projEnv = join(resolve(projectRoot), '.env');
+  const cwdLoaded = tryLoadEnvFile(cwdEnv);
+  const projLoaded = projEnv !== cwdEnv ? tryLoadEnvFile(projEnv) : false;
+  if (cwdLoaded || projLoaded) {
+    const sources = [cwdLoaded ? cwdEnv : null, projLoaded ? projEnv : null]
+      .filter(Boolean)
+      .join(', ');
+    process.stdout.write(`anydocs-ask: loaded env from ${sources}\n`);
   }
 
   switch (command) {

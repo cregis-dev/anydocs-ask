@@ -187,13 +187,26 @@ function buildDefaultLLM(config: ResolvedConfig): LLM {
     return new MockLLM({ model: config.llm.model });
   }
   if (config.llm.provider === 'anthropic') {
-    const apiKey = process.env[config.llm.apiKeyEnv];
-    if (!apiKey) {
+    // Pick credentials in order of precedence:
+    //   1. Custom env var named in config (apiKeyEnv) — always honored
+    //   2. Native Anthropic env vars (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN)
+    // Bearer-token gateways set ANTHROPIC_AUTH_TOKEN; the official Anthropic
+    // service uses ANTHROPIC_API_KEY (sent as x-api-key). Either is enough.
+    const apiKey = process.env[config.llm.apiKeyEnv] ?? process.env.ANTHROPIC_API_KEY;
+    const authToken = process.env.ANTHROPIC_AUTH_TOKEN;
+    const baseURL = process.env.ANTHROPIC_BASE_URL;
+    if (!apiKey && !authToken) {
       throw new Error(
-        `LLM provider 'anthropic' requires environment variable '${config.llm.apiKeyEnv}' to be set`,
+        `LLM provider 'anthropic' requires either '${config.llm.apiKeyEnv}' / 'ANTHROPIC_API_KEY' or 'ANTHROPIC_AUTH_TOKEN' env var. ` +
+          `For internal Anthropic-compatible gateways set ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL.`,
       );
     }
-    return new AnthropicLLM({ model: config.llm.model, apiKey });
+    return new AnthropicLLM({
+      model: config.llm.model,
+      ...(apiKey ? { apiKey } : {}),
+      ...(authToken ? { authToken } : {}),
+      ...(baseURL ? { baseURL } : {}),
+    });
   }
   throw new Error(`LLM provider '${config.llm.provider}' is not supported in v1`);
 }
