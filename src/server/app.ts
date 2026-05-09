@@ -239,22 +239,10 @@ function extractFilters(req: AskRequest): Record<string, unknown> {
 
 function citationsForRun(citations: Citation[]): RunCitation[] {
   return citations.map((c) => ({
-    chunk_id: chunkIdFromCitationId(c.citation_id),
+    chunk_id: c.chunk_id,
     page: c.page_id,
     quote: c.snippet,
   }));
-}
-
-/**
- * Citation ids are formatted "c<chunk_id>:..." in v1 — see postprocess.ts.
- * We pull the numeric chunk id back out so runs records match the trace.
- * Returns null on any unexpected shape (forward-compat).
- */
-function chunkIdFromCitationId(citationId: string): number | null {
-  const m = /^c(\d+)/.exec(citationId);
-  if (!m || !m[1]) return null;
-  const n = Number(m[1]);
-  return Number.isFinite(n) ? n : null;
 }
 
 function appendRun(
@@ -317,7 +305,7 @@ function appendRun(
       answer_id: answerId,
       md,
       citations,
-      confidence: trace.top_final_score,
+      confidence: trace.confidence,
       latency_ms: args.latencyMs,
       tokens_in: trace.tokens_in,
       tokens_out: trace.tokens_out,

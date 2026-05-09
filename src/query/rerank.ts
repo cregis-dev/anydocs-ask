@@ -1,7 +1,8 @@
 /**
  * Structural rerank — ARCH §6 step 4.
  *
- *   final_score = rrf_score × (1 + lang_boost + same_subtree_boost + nav_index_boost)
+ *   final_score = rrf_score × (1 + lang_boost + same_subtree_boost
+ *                                + nav_index_boost + title_match_boost)
  *
  *     lang_boost          = +0.30 when chunk.lang == query_lang (PRD §4.8)
  *     same_subtree_boost  = +0.20 when chunk's page shares subtree_root with
@@ -15,6 +16,17 @@
  *                           intent.
  *     nav_index_boost     = +0.10 × (1 / log(nav_index + 2))
  *                           (anydocs nav order ≈ author intent priority)
+ *     title_match_boost   = +0.30 when query contains chunk.page_title
+ *                           (case-insensitive, word-aligned for ASCII; CJK
+ *                           plain substring). Suppressed when another
+ *                           matching page has a strictly longer title that
+ *                           contains this title. Editorial-intent signal
+ *                           consistent with PRD §4.1 — the author chose the
+ *                           page title; a query containing it is a strong
+ *                           pointer at that page. Not on the §4.1 v1.5
+ *                           schedule (which lists nav.weight / page.priority);
+ *                           added 2026-05-08 to address title-spread failures
+ *                           seen in the first eval baseline.
  *
  * The result is a ranked list, sorted by descending final_score.
  */
@@ -31,16 +43,23 @@ export type RerankOptions = {
   queryLang: DocsLang;
   /** Subtree root of the user's current page. Pass null if unknown. */
   currentSubtreeRoot: string | null;
+  /** Raw user query — used for title_match_boost. */
+  query: string;
 };
 
 const LANG_BOOST = 0.3;
 const SAME_SUBTREE_BOOST = 0.2;
 const NAV_INDEX_BOOST = 0.1;
+const TITLE_MATCH_BOOST = 0.3;
+/** Page titles below this length don't get title-match boost — they're too
+ *  short to discriminate ("TTS", "Skins", common 3-4 letter tokens). */
+const TITLE_MATCH_MIN_LEN = 5;
 
 export function rerank(
   chunks: RetrievedChunk[],
   opts: RerankOptions,
 ): RerankedChunk[] {
+  const titleMatchedPageIds = computeTitleMatches(chunks, opts.query);
   return chunks
     .map((c) => {
       const langBoost = c.lang === opts.queryLang ? LANG_BOOST : 0;
@@ -49,8 +68,9 @@ export function rerank(
           ? SAME_SUBTREE_BOOST
           : 0;
       const navIdxBoost = navIndexBoostFor(c.nav_index);
+      const titleBoost = titleMatchedPageIds.has(c.page_id) ? TITLE_MATCH_BOOST : 0;
       const final_score =
-        c.rrf_score * (1 + langBoost + sameSubtreeBoost + navIdxBoost);
+        c.rrf_score * (1 + langBoost + sameSubtreeBoost + navIdxBoost + titleBoost);
       return { ...c, final_score };
     })
     .sort((a, b) => b.final_score - a.final_score);
@@ -61,6 +81,68 @@ function navIndexBoostFor(navIndex: number | null): number {
   // log here is natural log. nav_index=0 → 0.10/log(2) ≈ 0.144; nav_index=10
   // → 0.10/log(12) ≈ 0.040; the curve flattens fast as you go deeper.
   return NAV_INDEX_BOOST * (1 / Math.log(navIndex + 2));
+}
+
+/**
+ * Set of page_ids whose title appears in the query. Two-pass:
+ *
+ *   1. Find all (page_id, title) candidates whose title is contained in
+ *      the query — word-aligned for ASCII titles, plain substring for
+ *      titles containing non-ASCII chars (CJK has no word boundaries).
+ *   2. Suppress shadowed matches: if matched titles {A, B} where B's title
+ *      strictly contains A's title (e.g. "Installation" inside "Installation
+ *      on Termux"), drop A — the longer title is the more specific match.
+ *
+ * Both pages can still get the boost if the query mentions both titles
+ * independently and neither contains the other.
+ */
+function computeTitleMatches(chunks: RetrievedChunk[], query: string): Set<string> {
+  if (!query) return new Set();
+  const queryLower = query.toLowerCase();
+
+  // Unique (page_id, title) pairs from the candidate chunks.
+  const titlesByPage = new Map<string, string>();
+  for (const c of chunks) {
+    if (!titlesByPage.has(c.page_id)) titlesByPage.set(c.page_id, c.page_title);
+  }
+
+  type Match = { pageId: string; titleLower: string };
+  const matches: Match[] = [];
+  for (const [pageId, title] of titlesByPage) {
+    if (!title) continue;
+    if (title.length < TITLE_MATCH_MIN_LEN) continue;
+    const titleLower = title.toLowerCase();
+    if (!hitsQuery(queryLower, titleLower)) continue;
+    matches.push({ pageId, titleLower });
+  }
+  if (matches.length === 0) return new Set();
+
+  // Suppress shadowed matches — if some other matched title strictly contains
+  // this title as a substring, drop the shorter one.
+  const out = new Set<string>();
+  for (const m of matches) {
+    const shadowed = matches.some(
+      (other) =>
+        other.pageId !== m.pageId &&
+        other.titleLower.length > m.titleLower.length &&
+        other.titleLower.includes(m.titleLower),
+    );
+    if (!shadowed) out.add(m.pageId);
+  }
+  return out;
+}
+
+const ASCII_ONLY = /^[\x00-\x7f]+$/;
+function hitsQuery(queryLower: string, titleLower: string): boolean {
+  if (ASCII_ONLY.test(titleLower)) {
+    // Word-aligned match: avoid pumping "Installation" page when query says
+    // "preinstallation" but no actual install context.
+    const escaped = titleLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\b${escaped}\\b`).test(queryLower);
+  }
+  // Non-ASCII titles (CJK etc.) — no word boundaries; plain substring is the
+  // only sensible match.
+  return queryLower.includes(titleLower);
 }
 
 /**

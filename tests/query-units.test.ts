@@ -173,6 +173,51 @@ test('rerank: nav_index_boost decays with depth', () => {
   assert.ok(shallow.final_score > deep.final_score, 'lower nav_index ranks higher');
 });
 
+test('rerank: title_match_boost +0.30 when query contains page_title (word-aligned)', () => {
+  const out = rerank(
+    [
+      fakeRetrieved({ chunk_id: 1, page_id: 'home-assistant', page_title: 'Home Assistant', rrf_score: 0.04, nav_index: 1000 }),
+      fakeRetrieved({ chunk_id: 2, page_id: 'mattermost', page_title: 'Mattermost', rrf_score: 0.045, nav_index: 1000 }),
+    ],
+    { queryLang: 'en', currentSubtreeRoot: null, query: 'How do I integrate Home Assistant?' },
+  );
+  const ha = out.find((c) => c.chunk_id === 1)!;
+  const mm = out.find((c) => c.chunk_id === 2)!;
+  // ha: 0.04 × (1+0.3 lang+0.3 title+~0 nav) = 0.064
+  // mm: 0.045 × (1+0.3 lang) = 0.0585  → ha wins
+  assert.ok(ha.final_score > mm.final_score, 'title-matched chunk wins despite lower rrf');
+});
+
+test('rerank: title_match_boost suppressed when longer matched title contains shorter', () => {
+  // Both "Installation" and "Installation on Termux" appear in query;
+  // only the longer-titled page should keep the boost.
+  const out = rerank(
+    [
+      fakeRetrieved({ chunk_id: 1, page_id: 'install', page_title: 'Installation', rrf_score: 0.10, nav_index: 1000 }),
+      fakeRetrieved({ chunk_id: 2, page_id: 'install-termux', page_title: 'Installation on Termux', rrf_score: 0.10, nav_index: 1000 }),
+    ],
+    { queryLang: 'en', currentSubtreeRoot: null, query: 'tell me about Installation on Termux please' },
+  );
+  const generic = out.find((c) => c.chunk_id === 1)!;
+  const specific = out.find((c) => c.chunk_id === 2)!;
+  assert.ok(specific.final_score > generic.final_score, 'specific (longer) title wins, generic suppressed');
+});
+
+test('rerank: title_match_boost skipped for titles below min length', () => {
+  // Title "TTS" (3 chars) is below TITLE_MATCH_MIN_LEN; no boost even on exact match.
+  const out = rerank(
+    [
+      fakeRetrieved({ chunk_id: 1, page_id: 'tts', page_title: 'TTS', rrf_score: 0.05, nav_index: 1000 }),
+      fakeRetrieved({ chunk_id: 2, page_id: 'voice', page_title: 'Voice', rrf_score: 0.05, nav_index: 1000 }),
+    ],
+    { queryLang: 'en', currentSubtreeRoot: null, query: 'how does TTS work' },
+  );
+  const tts = out.find((c) => c.chunk_id === 1)!;
+  const voice = out.find((c) => c.chunk_id === 2)!;
+  // No title-match boost on either; final_scores tie or differ only on lang_boost.
+  assert.equal(tts.final_score, voice.final_score, 'short titles get no title boost');
+});
+
 test('rerank: sorted descending by final_score', () => {
   const out = rerank(
     [
@@ -180,7 +225,7 @@ test('rerank: sorted descending by final_score', () => {
       fakeRetrieved({ chunk_id: 2, rrf_score: 0.20 }),
       fakeRetrieved({ chunk_id: 3, rrf_score: 0.10 }),
     ],
-    { queryLang: 'zh', currentSubtreeRoot: null },
+    { queryLang: 'zh', currentSubtreeRoot: null, query: '' },
   );
   for (let i = 1; i < out.length; i++) {
     assert.ok(out[i - 1]!.final_score >= out[i]!.final_score);
@@ -317,6 +362,40 @@ test('postprocess: citation URL appends heading anchor when in_page_path encodes
   ]);
   const out = postprocess({ answerLang: 'zh', rawAnswer: '... [cit_1]', chunkById });
   assert.equal(out.citations[0]!.url, '/frontend/auth#bearer-token');
+});
+
+test('postprocess: cit_N markers renumbered to 1..K matching citations[] order', () => {
+  // Prompt put 5 chunks in chunkById; LLM cited cit_4, cit_5, cit_4 (out of order
+  // and with a duplicate). Output must have cit_1, cit_2 and citations[0/1].
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ chunk_id: 11 })],
+    ['cit_2', fakeReranked({ chunk_id: 22 })],
+    ['cit_3', fakeReranked({ chunk_id: 33 })],
+    ['cit_4', fakeReranked({ chunk_id: 44 })],
+    ['cit_5', fakeReranked({ chunk_id: 55 })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer: 'See [cit_4] and [cit_5] but not [cit_4] again.',
+    chunkById,
+  });
+  assert.match(out.answer_md, /\[cit_1\]/);
+  assert.match(out.answer_md, /\[cit_2\]/);
+  assert.doesNotMatch(out.answer_md, /\[cit_4\]/);
+  assert.doesNotMatch(out.answer_md, /\[cit_5\]/);
+  assert.equal(out.citations.length, 2);
+  assert.equal(out.citations[0]!.citation_id, 'cit_1');
+  assert.equal(out.citations[0]!.chunk_id, 44);
+  assert.equal(out.citations[1]!.citation_id, 'cit_2');
+  assert.equal(out.citations[1]!.chunk_id, 55);
+});
+
+test('postprocess: chunk_id propagates from RerankedChunk into Citation', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ chunk_id: 7 })],
+  ]);
+  const out = postprocess({ answerLang: 'zh', rawAnswer: 'X [cit_1]', chunkById });
+  assert.equal(out.citations[0]!.chunk_id, 7);
 });
 
 test('postprocess: truncation appends locale-specific notice', () => {

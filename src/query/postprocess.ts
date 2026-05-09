@@ -45,34 +45,41 @@ const CITATION_MARKER = /\[(cit_\d+)\]/g;
 
 export function postprocess(input: PostprocessInput): PostprocessOutput {
   // 1. Parse citation markers, drop any that don't join back to a known chunk.
-  const referencedIds = new Set<string>();
-  const cleanedAnswer = input.rawAnswer.replace(CITATION_MARKER, (match, id) => {
-    if (input.chunkById.has(id)) {
-      referencedIds.add(id);
-      return match;
-    }
-    return ''; // strip illegal citation
-  });
-
-  // 2. Hallucination filter: code-fenced blocks + backticked identifiers.
-  const filteredAnswer = filterHallucinations(cleanedAnswer, [...referencedIds].map(
-    (id) => input.chunkById.get(id)!.text,
-  ));
-
-  // 3. Truncation.
-  const finalAnswer = truncateForLang(filteredAnswer, input.answerLang);
-
-  // 4. Build citations from referenced chunks, preserving the order they
-  //    appeared in the answer text.
+  //    Build orderedIds = unique referenced markers in first-appearance order;
+  //    this defines the public 1..K numbering the consumer will see.
   const orderedIds: string[] = [];
   for (const m of input.rawAnswer.matchAll(CITATION_MARKER)) {
     const id = m[1]!;
-    if (referencedIds.has(id) && !orderedIds.includes(id)) {
+    if (input.chunkById.has(id) && !orderedIds.includes(id)) {
       orderedIds.push(id);
     }
   }
-  const citations: Citation[] = orderedIds.map((id) =>
-    citationFromChunk(id, input.chunkById.get(id)!, input.answerLang),
+  const renumber = new Map<string, string>();
+  orderedIds.forEach((oldId, idx) => {
+    renumber.set(oldId, `cit_${idx + 1}`);
+  });
+
+  // 2. Rewrite answer markers: legal -> renumbered cit_N (1..K, matches
+  //    citations[N-1]); illegal -> stripped. Renumbering means the consumer
+  //    can resolve `[cit_N]` by 1-based index into the citations array
+  //    without knowing the prompt's original cit ordering.
+  const cleanedAnswer = input.rawAnswer.replace(CITATION_MARKER, (match, id) => {
+    const next = renumber.get(id);
+    return next ? `[${next}]` : ''; // strip illegal citation
+  });
+
+  // 3. Hallucination filter: code-fenced blocks + backticked identifiers.
+  const filteredAnswer = filterHallucinations(
+    cleanedAnswer,
+    orderedIds.map((id) => input.chunkById.get(id)!.text),
+  );
+
+  // 4. Truncation.
+  const finalAnswer = truncateForLang(filteredAnswer, input.answerLang);
+
+  // 5. Build citations using renumbered ids, in the same order as orderedIds.
+  const citations: Citation[] = orderedIds.map((oldId, idx) =>
+    citationFromChunk(`cit_${idx + 1}`, input.chunkById.get(oldId)!, input.answerLang),
   );
 
   return { answer_md: finalAnswer, citations, used_chunks: citations.length };
@@ -90,6 +97,7 @@ function citationFromChunk(
   const isCrossLang = chunk.lang !== answerLang;
   return {
     citation_id: citationId,
+    chunk_id: chunk.chunk_id,
     page_id: chunk.page_id,
     lang: chunk.lang,
     source_lang: isCrossLang ? chunk.lang : null,

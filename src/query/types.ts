@@ -24,7 +24,10 @@ export type AskRequest = {
 };
 
 export type Citation = {
+  /** 1-indexed marker matching `[cit_N]` in answer_md after postprocess renumber. */
   citation_id: string;
+  /** Numeric chunk row id; lets runs / eval join back to retrieval trace. */
+  chunk_id: number;
   page_id: string;
   lang: DocsLang;
   /** Filled only when lang !== answer_lang (PRD §4.8 cross-lang fallback). */

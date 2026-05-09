@@ -52,7 +52,7 @@ export type RunAnswer = {
   /** Markdown body (answer) or clarify message; null on error. */
   md: string | null;
   citations: RunCitation[];
-  /** Top final_score from rerank — v1 confidence proxy (ARCH §16.4 note). */
+  /** Normalized top-1 share of top-5 final_score sum, in [0,1]. ARCH §16.4. */
   confidence: number;
   latency_ms: number;
   tokens_in: number | null;

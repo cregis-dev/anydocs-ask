@@ -55,8 +55,13 @@ export type AskTrace = {
   fused: AskTraceFusedChunk[];
   /** True when aggregate decided to fire a clarify (subtree-aggregation ask). */
   subtree_ask_triggered: boolean;
-  /** Top final_score from rerank — v1 uses this as a confidence proxy. */
+  /** Top final_score from rerank — raw RRF + nav-boost output. Kept for
+   *  analyze diagnostics; not the value persisted as `answer.confidence`. */
   top_final_score: number;
+  /** Normalized confidence: top1.final_score / sum(top-K.final_score), K=5.
+   *  In [0,1]; `1.0` when only one candidate, `0` when no candidates.
+   *  This is what runs.jsonl `answer.confidence` carries (ARCH §16.4). */
+  confidence: number;
   /** LLM token counts when the provider exposes them. v1 leaves these null;
    *  later stages can set them when the LLM interface is widened. */
   tokens_in: number | null;
@@ -89,6 +94,7 @@ export async function askWithTrace(
     fused: [],
     subtree_ask_triggered: false,
     top_final_score: 0,
+    confidence: 0,
     tokens_in: null,
     tokens_out: null,
   });
@@ -135,10 +141,11 @@ export async function askWithTrace(
   const currentSubtreeRoot = req.context?.current_page_id
     ? lookupSubtreeRoot(deps.db, req.context.current_page_id, queryLang)
     : null;
-  const reranked = rerank(retrieved, { queryLang, currentSubtreeRoot });
+  const reranked = rerank(retrieved, { queryLang, currentSubtreeRoot, query: question });
 
   const fusedTrace = buildFusedTrace(reranked, retrievalTrace);
   const top_final_score = reranked[0]?.final_score ?? 0;
+  const confidence = computeConfidence(reranked);
 
   // 5. Aggregate.
   const outcome = aggregate(reranked, { queryLang });
@@ -150,6 +157,7 @@ export async function askWithTrace(
         fused: fusedTrace,
         subtree_ask_triggered: true,
         top_final_score,
+        confidence,
         tokens_in: null,
         tokens_out: null,
       },
@@ -195,10 +203,28 @@ export async function askWithTrace(
       fused: fusedTrace,
       subtree_ask_triggered: false,
       top_final_score,
+      confidence,
       tokens_in: null,
       tokens_out: null,
     },
   };
+}
+
+/**
+ * Confidence proxy: share of top-1 within the top-K (K=5) reranked pool.
+ * Bounded [0,1]; clarify gating still uses aggregate's subtree thresholds —
+ * this number is for downstream eval / display only.
+ */
+const CONFIDENCE_TOP_K = 5;
+function computeConfidence(reranked: RerankedChunk[]): number {
+  if (reranked.length === 0) return 0;
+  const top1 = reranked[0]!.final_score;
+  if (reranked.length === 1) return top1 > 0 ? 1 : 0;
+  let sum = 0;
+  for (let i = 0; i < Math.min(CONFIDENCE_TOP_K, reranked.length); i++) {
+    sum += reranked[i]!.final_score;
+  }
+  return sum > 0 ? top1 / sum : 0;
 }
 
 function buildFusedTrace(
