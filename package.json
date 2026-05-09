@@ -23,6 +23,7 @@
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "PRD.md",
     "ARCHITECTURE.md"
   ],

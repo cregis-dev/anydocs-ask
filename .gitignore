@@ -12,6 +12,9 @@ dist/
 .env.local
 *.tsbuildinfo
 
+# npm pack tarballs — built on-demand, never committed
+*.tgz
+
 # Editors / OS
 .vscode/
 .idea/
