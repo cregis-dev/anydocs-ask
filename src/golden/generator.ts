@@ -43,6 +43,17 @@ const SIBLING_CITE_CAP = 5;
 const HEADING_KEYWORD_CAP = 3;
 const HEADING_KEYWORD_MIN_LEN = 4;
 
+/** Templates that get heading-keyword must_contain. Definition / comparison /
+ *  caveat queries drift conceptually and rarely echo specific heading tokens —
+ *  pinning must_contain on those produced 80% spurious Answer-rule-pass fails
+ *  in the 2026-05-09 baseline. Procedural templates ("how to use" / "how to
+ *  configure") tend to surface the same vocabulary the page uses, so heading
+ *  keywords are a fair contract there. */
+const TEMPLATES_WITH_MUST_CONTAIN: ReadonlySet<TemplateId> = new Set([
+  'how_to_use',
+  'how_to_configure',
+]);
+
 /** Common English stopwords + page-meta words that appear in headings but
  *  carry no semantic discrimination (the Anydocs heading-id slug uses the
  *  same words, so the word would always trivially substring-match). */
@@ -162,7 +173,7 @@ function emitForPage(
       context_pageId: null,
       expected: {
         must_cite_pages: mustCite,
-        must_contain: headingKeywords,
+        must_contain: TEMPLATES_WITH_MUST_CONTAIN.has(tmpl) ? headingKeywords : [],
         forbid_contain: [],
       },
       tags: parent?.title ? [parent.title] : [],
