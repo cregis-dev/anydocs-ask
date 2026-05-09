@@ -17,19 +17,28 @@ import { resolve } from 'node:path';
 import { loadConfig } from '../config.ts';
 import { loadProject } from '../anydocs/loader.ts';
 import { generateFromStructure } from '../golden/generator.ts';
+import { generateFromRuns } from '../golden/generator-from-runs.ts';
 import { rewriteCandidatesWithLLM } from '../golden/llm-rewrite.ts';
 import { reviewCandidates } from '../golden/reviewer.ts';
-import { goldenPaths, writeCandidates } from '../golden/store.ts';
+import { goldenPaths, readApproved, writeCandidates } from '../golden/store.ts';
 import { buildDefaultLLM } from '../llm/factory.ts';
+import { iterateRunsSince } from '../runs/writer.ts';
+import { parseSince } from './runs.ts';
+import type { RunRecord, RunsLine } from '../runs/types.ts';
 
 export type GoldenGenerateOptions = {
   projectRoot: string;
   stateRoot: string;
   from: 'structure' | 'runs' | 'inbox';
   limit?: number;
+  /** --since flag for `--from runs`. Parsed via runs.ts:parseSince.
+   *  Default 14d (PRD §12.4). */
+  since?: string;
   llmRewrite: boolean;
   force: boolean;
 };
+
+const FROM_RUNS_DEFAULT_SINCE = '14d';
 
 export async function runGoldenGenerate(opts: GoldenGenerateOptions): Promise<number> {
   const projectRoot = resolve(opts.projectRoot);
@@ -45,12 +54,16 @@ export async function runGoldenGenerate(opts: GoldenGenerateOptions): Promise<nu
     return 1;
   }
 
-  if (opts.from === 'runs' || opts.from === 'inbox') {
+  if (opts.from === 'inbox') {
     process.stderr.write(
-      `error: --from ${opts.from} is not implemented yet (PRD §12.4 phases 2-3); ` +
-        `v1 ships --from structure only.\n`,
+      `error: --from inbox is v1.5 (depends on §15 feedback inbox); ` +
+        `use --from structure or --from runs in v1.\n`,
     );
     return 2;
+  }
+
+  if (opts.from === 'runs') {
+    return await runFromRuns(projectRoot, stateRoot, opts);
   }
 
   const project = await loadProject(projectRoot);
@@ -96,6 +109,72 @@ export async function runGoldenGenerate(opts: GoldenGenerateOptions): Promise<nu
   process.stdout.write(
     `anydocs-ask golden generate: wrote ${candidates.length} candidates to ${written}\n` +
       `  next: edit decision: "approved" / "rejected" inline, then run 'anydocs-ask golden review ${opts.projectRoot}'.\n`,
+  );
+  return 0;
+}
+
+async function runFromRuns(
+  projectRoot: string,
+  stateRoot: string,
+  opts: GoldenGenerateOptions,
+): Promise<number> {
+  const sinceArg = opts.since ?? FROM_RUNS_DEFAULT_SINCE;
+  const sinceMs = parseSince(sinceArg);
+  if (sinceMs === null) {
+    process.stderr.write(
+      `invalid --since '${sinceArg}'; expected ISO date or duration (7d / 48h / 30m).\n`,
+    );
+    return 2;
+  }
+
+  // Collect run records from the window (drop feedback-update tails).
+  const records: RunRecord[] = [];
+  for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
+    if ('type' in line && line.type === 'feedback-update') continue;
+    records.push(line as RunRecord);
+  }
+  if (records.length === 0) {
+    process.stderr.write(
+      `error: no runs since ${sinceArg}. serve the project, answer ≥1 query, ` +
+        `then retry — or pass --since 30d to widen.\n`,
+    );
+    return 1;
+  }
+
+  const { rows: existingCases } = readApproved(stateRoot);
+  process.stdout.write(
+    `anydocs-ask golden generate --from runs: ${records.length} runs since ${sinceArg}, ` +
+      `${existingCases.length} approved cases for dedup\n`,
+  );
+
+  const { candidates, stats } = generateFromRuns(records, {
+    ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+    existingCases,
+  });
+
+  process.stdout.write(
+    `  filter: total=${stats.total} ` +
+      `non-answer=${stats.droppedNonAnswer} ` +
+      `low-conf=${stats.droppedLowConf} ` +
+      `long-answer=${stats.droppedLongAnswer} ` +
+      `reasked=${stats.droppedReask}\n` +
+      `  cluster: ${stats.clusters} clusters, ${stats.droppedDuplicate} dropped as dup of existing cases\n`,
+  );
+
+  if (candidates.length === 0) {
+    process.stderr.write(
+      `(no candidates produced; loosen --since or check that runs have confidence ≥0.7 ` +
+        `and answer.md ≤600 chars.)\n`,
+    );
+    return 0;
+  }
+
+  const written = writeCandidates(stateRoot, candidates);
+  process.stdout.write(
+    `anydocs-ask golden generate: wrote ${candidates.length} candidates to ${written}\n` +
+      `  next: edit decision: "approved"/"rejected" inline (verify must_cite_pages — ` +
+      `they reflect what the system did, not necessarily what was correct), then ` +
+      `'anydocs-ask golden review ${opts.projectRoot}'.\n`,
   );
   return 0;
 }

@@ -180,7 +180,9 @@ test('golden generate --force overwrites existing candidate file', async () => {
   }
 });
 
-test('golden generate --from runs returns 2 with not-implemented hint', async () => {
+test('golden generate --from runs returns 1 when no runs file exists', async () => {
+  // --from runs is implemented; with an empty state dir it should report
+  // "no runs since ..." and exit 1.
   const { root, cleanup } = await buildProject();
   try {
     const { promise, reset } = captureIo(() =>
@@ -188,8 +190,23 @@ test('golden generate --from runs returns 2 with not-implemented hint', async ()
     );
     const code = await promise;
     const { err } = reset();
+    assert.equal(code, 1);
+    assert.match(err, /no runs since/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('golden generate --from inbox still gated as v1.5', async () => {
+  const { root, cleanup } = await buildProject();
+  try {
+    const { promise, reset } = captureIo(() =>
+      runGoldenGenerate({ projectRoot: root, stateRoot: root, from: 'inbox', llmRewrite: false, force: false }),
+    );
+    const code = await promise;
+    const { err } = reset();
     assert.equal(code, 2);
-    assert.match(err, /not implemented/);
+    assert.match(err, /v1\.5/);
   } finally {
     await cleanup();
   }

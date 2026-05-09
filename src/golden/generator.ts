@@ -164,6 +164,9 @@ function emitForPage(
   const mustCite = uniqueOrdered([page.slug, ...siblingSlugs]);
 
   for (const tmpl of TEMPLATE_IDS) {
+    // 'from_runs' is reserved for the runs-source generator; structure
+    // never emits it.
+    if (tmpl === 'from_runs') continue;
     const query = renderTemplate(tmpl, page, lang, parent, siblings);
     if (query === null) continue;
     out.push({
@@ -263,6 +266,7 @@ function renderTemplate(
   parent: SectionFrame | null,
   siblings: PageRef[],
 ): string | null {
+  if (tmpl === 'from_runs') return null; // not produced by structure source
   if (tmpl === 'compare_siblings') {
     if (siblings.length === 0 || parent === null) return null;
     const sib = [...siblings].sort((a, b) => a.slug.localeCompare(b.slug))[0]!;

@@ -103,8 +103,8 @@ Usage:
   anydocs-ask status           <projectRoot>
   anydocs-ask runs tail        <projectRoot> [--n 50]
   anydocs-ask runs export      <projectRoot> --since <when> [--format jsonl|csv]
-  anydocs-ask golden generate  <projectRoot> [--from structure] [--limit N]
-                                             [--no-llm-rewrite] [--force]
+  anydocs-ask golden generate  <projectRoot> [--from structure|runs] [--limit N]
+                                             [--since 14d] [--no-llm-rewrite] [--force]
   anydocs-ask golden review    <projectRoot> [--reviewer <name>]
   anydocs-ask eval             <projectRoot> [--baseline <path>]
   anydocs-ask analyze runs     <projectRoot> [--since 7d]
@@ -305,11 +305,13 @@ async function main(): Promise<number> {
         // --no-llm-rewrite parses as flags['no-llm-rewrite'] === true.
         const llmRewrite = flags['no-llm-rewrite'] !== true;
         const force = flags.force === true;
+        const since = typeof flags.since === 'string' ? flags.since : undefined;
         return await runGoldenGenerate({
           projectRoot,
           stateRoot,
           from: fromRaw,
           ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
+          ...(since !== undefined ? { since } : {}),
           llmRewrite,
           force,
         });

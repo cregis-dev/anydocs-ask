@@ -56,5 +56,8 @@ export const TEMPLATE_IDS = [
   'compare_siblings',
   'how_to_configure',
   'caveats',
+  /** Synthetic id used by `golden generate --from runs`. Real user queries
+   *  don't fit a template; this label keeps analytics + dedup hints typed. */
+  'from_runs',
 ] as const;
 export type TemplateId = (typeof TEMPLATE_IDS)[number];
