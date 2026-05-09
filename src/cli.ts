@@ -38,6 +38,7 @@ import { runStatus } from './commands/status.ts';
 import { runWorkspaceInit, runWorkspaceLs } from './commands/workspace.ts';
 import { runRunsExport, runRunsTail } from './commands/runs.ts';
 import { runGoldenGenerate, runGoldenReview } from './commands/golden.ts';
+import { runEval } from './commands/eval.ts';
 import {
   assertProjectRoot,
   ensureStateRoot,
@@ -104,6 +105,7 @@ Usage:
   anydocs-ask golden generate  <projectRoot> [--from structure] [--limit N]
                                              [--no-llm-rewrite] [--force]
   anydocs-ask golden review    <projectRoot> [--reviewer <name>]
+  anydocs-ask eval             <projectRoot> [--baseline <path>]
   anydocs-ask workspace init
   anydocs-ask workspace ls
   anydocs-ask --help
@@ -306,6 +308,14 @@ async function main(): Promise<number> {
         projectRoot,
         stateRoot,
         ...(reviewer !== undefined ? { reviewer } : {}),
+      });
+    }
+    case 'eval': {
+      const baseline = typeof flags.baseline === 'string' ? flags.baseline : undefined;
+      return await runEval({
+        projectRoot,
+        stateRoot,
+        ...(baseline !== undefined ? { baselinePath: baseline } : {}),
       });
     }
     default:
