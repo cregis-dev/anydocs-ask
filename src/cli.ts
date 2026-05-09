@@ -39,6 +39,7 @@ import { runWorkspaceInit, runWorkspaceLs } from './commands/workspace.ts';
 import { runRunsExport, runRunsTail } from './commands/runs.ts';
 import { runGoldenGenerate, runGoldenReview } from './commands/golden.ts';
 import { runEval } from './commands/eval.ts';
+import { runAnalyzeRuns } from './commands/analyze.ts';
 import {
   assertProjectRoot,
   ensureStateRoot,
@@ -106,6 +107,7 @@ Usage:
                                              [--no-llm-rewrite] [--force]
   anydocs-ask golden review    <projectRoot> [--reviewer <name>]
   anydocs-ask eval             <projectRoot> [--baseline <path>]
+  anydocs-ask analyze runs     <projectRoot> [--since 7d]
   anydocs-ask workspace init
   anydocs-ask workspace ls
   anydocs-ask --help
@@ -162,6 +164,7 @@ async function main(): Promise<number> {
   // both shift positional indices by 1.
   let runsAction: 'tail' | 'export' | null = null;
   let goldenAction: 'generate' | 'review' | null = null;
+  let analyzeAction: 'runs' | null = null;
   let projectArg: string | undefined;
   if (command === 'runs') {
     const action = positional[0];
@@ -171,6 +174,15 @@ async function main(): Promise<number> {
       return 2;
     }
     runsAction = action;
+    projectArg = positional[1];
+  } else if (command === 'analyze') {
+    const action = positional[0];
+    if (action !== 'runs') {
+      process.stderr.write(`error: 'analyze' requires an action (runs)\n\n`);
+      printHelp();
+      return 2;
+    }
+    analyzeAction = action;
     projectArg = positional[1];
   } else if (command === 'golden') {
     const action = positional[0];
@@ -316,6 +328,17 @@ async function main(): Promise<number> {
         projectRoot,
         stateRoot,
         ...(baseline !== undefined ? { baselinePath: baseline } : {}),
+      });
+    }
+    case 'analyze': {
+      // Only 'runs' action exists in v1; future actions (e.g. analyze golden)
+      // would land here. analyzeAction is non-null per the dispatch above.
+      void analyzeAction;
+      const since = typeof flags.since === 'string' ? flags.since : undefined;
+      return await runAnalyzeRuns({
+        projectRoot,
+        stateRoot,
+        ...(since !== undefined ? { since } : {}),
       });
     }
     default:

@@ -61,6 +61,15 @@ export type RunsConfig = {
   truncateAnswerChars: number | null;
 };
 
+export type AnalyzeConfig = {
+  /** Default --since window when caller passes nothing. */
+  lookbackDays: number;
+  /** D2 fires when latency_ms exceeds this (ms). */
+  latencyP95Threshold: number;
+  /** D1 confidence floor — runs at-or-below count as low-confidence. */
+  confidenceFloor: number;
+};
+
 export type ResolvedConfig = {
   embedding: EmbeddingConfig;
   llm: LLMConfig;
@@ -69,6 +78,7 @@ export type ResolvedConfig = {
   server: ServerConfig;
   indexing: IndexingConfig;
   runs: RunsConfig;
+  analyze: AnalyzeConfig;
 };
 
 export type LoadConfigResult = {
@@ -117,6 +127,11 @@ const DEFAULTS: ResolvedConfig = {
     rotation: 'weekly',
     truncateQueryChars: null,
     truncateAnswerChars: null,
+  },
+  analyze: {
+    lookbackDays: 7,
+    latencyP95Threshold: 3000,
+    confidenceFloor: 0.4,
   },
 };
 
@@ -180,7 +195,26 @@ function mergeWithDefaults(
   applyServer(user.server, out.server, warnings);
   applySection(user.indexing, out.indexing, 'indexing', warnings);
   applyRuns(user.runs, out.runs, warnings);
+  applyAnalyze(user.analyze, out.analyze, warnings);
   return out;
+}
+
+function applyAnalyze(value: unknown, target: AnalyzeConfig, warnings: string[]): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'analyze' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  for (const key of ['lookbackDays', 'latencyP95Threshold', 'confidenceFloor'] as const) {
+    if (obj[key] === undefined) continue;
+    const v = obj[key];
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) {
+      target[key] = v;
+    } else {
+      warnings.push(`anydocs.ask.json: analyze.${key} must be a non-negative number; using default`);
+    }
+  }
 }
 
 function applyRuns(value: unknown, target: RunsConfig, warnings: string[]): void {
