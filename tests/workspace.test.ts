@@ -19,6 +19,7 @@ import {
   resolveProjectRoot,
   resolveStateRoot,
   resolveWorkspace,
+  scanProjects,
 } from '../src/workspace.ts';
 
 async function withTmpDir(): Promise<{ path: string; cleanup: () => Promise<void> }> {
@@ -267,6 +268,101 @@ test('ensureStateRoot: creates state/<id>/ idempotently', async () => {
     // second call is a no-op
     const again = ensureStateRoot(ws, 'hermes-docs');
     assert.equal(again, stateRoot);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('scanProjects: returns [] for missing projects/ dir', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    assert.deepEqual(scanProjects(ws), []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('scanProjects: empty workspace lists nothing', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    ensureWorkspace(ws);
+    assert.deepEqual(scanProjects(ws), []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('scanProjects: surfaces valid / invalid / id / indexed', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    ensureWorkspace(ws);
+    const projects = join(ws, 'projects');
+
+    // (a) valid project with config.projectId === dir name, not yet indexed
+    await makeValidProject(join(projects, 'docs-zh'));
+    await fs.writeFile(
+      join(projects, 'docs-zh', 'anydocs.config.json'),
+      JSON.stringify({ version: 1, projectId: 'docs-zh' }),
+    );
+
+    // (b) valid project with id-rename + indexed (touch index.db)
+    await makeValidProject(join(projects, 'hermes-docs'));
+    await fs.writeFile(
+      join(projects, 'hermes-docs', 'anydocs.config.json'),
+      JSON.stringify({ version: 1, projectId: 'hermes-canonical' }),
+    );
+    await fs.mkdir(join(ws, 'state', 'hermes-canonical'), { recursive: true });
+    await fs.writeFile(join(ws, 'state', 'hermes-canonical', 'index.db'), '');
+
+    // (c) invalid project (missing navigation/)
+    await fs.mkdir(join(projects, 'broken', 'pages'), { recursive: true });
+
+    const out = scanProjects(ws);
+    assert.equal(out.length, 3);
+    // Sorted by name: broken, docs-zh, hermes-docs
+    assert.deepEqual(
+      out.map((p) => p.name),
+      ['broken', 'docs-zh', 'hermes-docs'],
+    );
+
+    const broken = out[0]!;
+    assert.equal(broken.valid, false);
+    assert.deepEqual(broken.missing, ['navigation/']);
+    assert.equal(broken.projectId, null);
+    assert.equal(broken.indexed, false);
+
+    const docs = out[1]!;
+    assert.equal(docs.valid, true);
+    assert.equal(docs.projectId, 'docs-zh');
+    assert.equal(docs.indexed, false);
+    assert.equal(docs.path, join(projects, 'docs-zh'));
+
+    const hermes = out[2]!;
+    assert.equal(hermes.valid, true);
+    assert.equal(hermes.projectId, 'hermes-canonical');
+    assert.equal(hermes.indexed, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('scanProjects: skips files and missing config.json gracefully', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    ensureWorkspace(ws);
+    const projects = join(ws, 'projects');
+    // valid project but no anydocs.config.json
+    await makeValidProject(join(projects, 'orphan'));
+    // a stray file at projects/ level (should be ignored)
+    await fs.writeFile(join(projects, 'README.txt'), 'hi');
+
+    const out = scanProjects(ws);
+    assert.equal(out.length, 1);
+    const p = out[0]!;
+    assert.equal(p.name, 'orphan');
+    assert.equal(p.valid, true);
+    assert.equal(p.projectId, null);
+    assert.equal(p.indexed, false);
   } finally {
     await cleanup();
   }
