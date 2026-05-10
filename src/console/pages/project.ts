@@ -23,6 +23,8 @@ import type { EvalTabSnapshot } from '../eval-state.ts';
 import type { IndexSnapshot } from '../index-state.ts';
 import type { TrafficWindow } from '../traffic-state.ts';
 import { computeNextAction, type NextAction } from '../next-action.ts';
+import { renderConfigDrawer } from './config-drawer.ts';
+import type { ConfigViewModel } from '../config-state.ts';
 
 export type ProjectViewModel = {
   project: ProjectListing;
@@ -39,6 +41,8 @@ export type ProjectViewModel = {
   indexSnapshot?: IndexSnapshot;
   /** Traffic tab 7-day rolling window. */
   trafficWindow?: TrafficWindow;
+  /** Config drawer view model (env / .console.json / anydocs.ask.json). */
+  configView?: ConfigViewModel;
 };
 
 export function renderProject(vm: ProjectViewModel): Html {
@@ -73,7 +77,12 @@ export function renderProject(vm: ProjectViewModel): Html {
     <script type="module">${raw(BOOTSTRAP_SCRIPT)}</script>
   `;
 
-  return layout({ title: project.name, body, nav: vm.nav });
+  return layout({
+    title: project.name,
+    body,
+    nav: vm.nav,
+    ...(vm.configView ? { configDrawer: renderConfigDrawer(vm.configView) } : {}),
+  });
 }
 
 function nextActionBanner(na: NextAction): Html {

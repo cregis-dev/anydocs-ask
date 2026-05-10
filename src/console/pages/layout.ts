@@ -26,6 +26,9 @@ export function layout(args: {
   title: string;
   body: Html | Html[];
   nav?: NavContext;
+  /** Pre-rendered config drawer fragment (with its own JS hooks). Optional;
+   *  pages can omit if they don't want gear. */
+  configDrawer?: Html;
 }): Html {
   return html`<!DOCTYPE html>
 <html lang="zh">
@@ -36,23 +39,43 @@ export function layout(args: {
     <style>${BASE_CSS}</style>
   </head>
   <body>
-    ${header(args.nav)}
+    ${header(args.nav, args.configDrawer !== undefined)}
     <main class="main">${args.body}</main>
+    ${args.configDrawer ?? ''}
+    ${args.configDrawer ? drawerScript() : ''}
     ${footer(args.nav)}
   </body>
 </html>`;
 }
 
-function header(nav?: NavContext): Html {
+function drawerScript(): Html {
+  return html`<script>(function(){
+    var btn = document.getElementById('header-gear');
+    var drawer = document.getElementById('config-drawer');
+    var close = document.getElementById('config-close');
+    if (!btn || !drawer) return;
+    function open(){ drawer.hidden = false; document.body.style.overflow = 'hidden'; }
+    function shut(){ drawer.hidden = true; document.body.style.overflow = ''; }
+    btn.addEventListener('click', function(e){ e.stopPropagation(); if (drawer.hidden) open(); else shut(); });
+    if (close) close.addEventListener('click', shut);
+    document.addEventListener('keydown', function(e){ if (e.key === 'Escape' && !drawer.hidden) shut(); });
+    document.addEventListener('click', function(e){
+      if (!drawer.hidden && !drawer.contains(e.target) && e.target !== btn) shut();
+    });
+  })();</script>`;
+}
+
+function header(nav?: NavContext, withGear = false): Html {
   return html`
     <header class="hdr">
       <a class="brand" href="/">
-        <span class="brand-mark">⚙</span>
+        <span class="brand-mark">◆</span>
         <span class="brand-text">anydocs-ask <span class="muted">/ console</span></span>
       </a>
       ${nav ? projectSwitcher(nav) : ''}
       <span class="hdr-spacer"></span>
       <span class="hdr-hint mono muted">127.0.0.1:${nav?.consolePort ?? ''}</span>
+      ${withGear ? html`<button id="header-gear" class="header-gear" title="config (esc to close)">⚙</button>` : ''}
     </header>
   `;
 }

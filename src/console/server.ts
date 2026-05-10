@@ -38,6 +38,7 @@ import {
 import { loadIndexSnapshot, type ChildIndexStatus } from './index-state.ts';
 import { loadTrafficWindow } from './traffic-state.ts';
 import { loadProjectHomeStats, summarizeWorkspace } from './home-state.ts';
+import { loadConsoleConfigView } from './config-state.ts';
 
 export type ConsoleAppDeps = {
   workspacePath: string;
@@ -115,6 +116,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         running,
         projectStats,
         workspaceSummary,
+        configView: loadConsoleConfigView(deps.workspacePath, null),
       }),
     );
   });
@@ -199,6 +201,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         latestEvalReportBody,
         ...(indexSnapshot ? { indexSnapshot } : {}),
         ...(trafficWindow ? { trafficWindow } : {}),
+        configView: loadConsoleConfigView(deps.workspacePath, project.valid ? project.path : null),
       }),
     );
   });

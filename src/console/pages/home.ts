@@ -9,6 +9,8 @@ import type { ProjectListing } from '../../workspace.ts';
 import type { RegisteredProcess } from '../registry.ts';
 import { layout, type Html, type NavContext } from './layout.ts';
 import type { ProjectHomeStats, WorkspaceSummary } from '../home-state.ts';
+import { renderConfigDrawer } from './config-drawer.ts';
+import type { ConfigViewModel } from '../config-state.ts';
 
 export type HomeViewModel = {
   workspacePath: string;
@@ -20,6 +22,8 @@ export type HomeViewModel = {
   projectStats?: Map<string, ProjectHomeStats>;
   /** Workspace-level rollup for the top strip. */
   workspaceSummary?: WorkspaceSummary;
+  /** Config drawer (workspace-only context — no project anydocs.ask.json). */
+  configView?: ConfigViewModel;
 };
 
 export function renderHome(vm: HomeViewModel): Html {
@@ -42,7 +46,12 @@ export function renderHome(vm: HomeViewModel): Html {
     ${vm.workspaceSummary && vm.projects.length > 0 ? workspaceStrip(vm.workspaceSummary) : ''}
     ${vm.projects.length === 0 ? emptyState(vm.workspacePath) : projectGrid(vm)}
   `;
-  return layout({ title: 'projects', body, nav });
+  return layout({
+    title: 'projects',
+    body,
+    nav,
+    ...(vm.configView ? { configDrawer: renderConfigDrawer(vm.configView) } : {}),
+  });
 }
 
 function workspaceStrip(s: WorkspaceSummary): Html {
