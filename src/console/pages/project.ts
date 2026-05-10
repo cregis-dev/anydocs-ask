@@ -51,12 +51,29 @@ export function renderProject(vm: ProjectViewModel): Html {
       <h2>actions</h2>
       ${actionButtons(project.name, live, project.valid)}
 
-      <h2>ask · eval · reports</h2>
-      <p class="muted">v1 待实现（Commits D / E）。</p>
+      ${project.valid ? askPanel(project.name) : ''}
+
+      <h2>eval · reports</h2>
+      <p class="muted">待实现（Commit E）。</p>
 
       <script>${actionScript(project.name)}</script>
     `,
   });
+}
+
+function askPanel(name: string): Html {
+  return html`
+    <h2>ask 体验台 <span class="muted" style="font-size: 12px;">(dry-run · 不写 runs)</span></h2>
+    <p>
+      <textarea id="ask-q" rows="3" style="width: 100%; font-family: inherit; font-size: 13px;"
+                placeholder="提一个问题，例如：JWT 怎么续期"></textarea>
+    </p>
+    <p>
+      <button id="btn-ask">ask</button>
+      <span id="ask-status" class="muted"></span>
+    </p>
+    <pre id="ask-out" class="mono" style="background: #f5f5f522; padding: 10px; border-radius: 4px; max-height: 480px; overflow: auto; white-space: pre-wrap; word-break: break-word;"></pre>
+  `;
 }
 
 function actionButtons(name: string, running: boolean, valid: boolean): Html {
@@ -104,6 +121,37 @@ function actionScript(name: string): Html {
       }
       bind('btn-start', 'start');
       bind('btn-stop', 'stop');
+
+      var askBtn = document.getElementById('btn-ask');
+      var askQ = document.getElementById('ask-q');
+      var askOut = document.getElementById('ask-out');
+      var askStatus = document.getElementById('ask-status');
+      if (askBtn && askQ && askOut && askStatus) {
+        askBtn.addEventListener('click', async function () {
+          var question = askQ.value.trim();
+          if (!question) { askStatus.textContent = '请输入问题'; return; }
+          askBtn.disabled = true;
+          askStatus.textContent = 'asking...';
+          askOut.textContent = '';
+          var t0 = Date.now();
+          try {
+            var res = await fetch('/api/projects/' + encodeURIComponent(name) + '/ask', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ question: question })
+            });
+            var text = await res.text();
+            var pretty;
+            try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (e) { pretty = text; }
+            askOut.textContent = pretty;
+            askStatus.textContent = 'http ' + res.status + ' · ' + (Date.now() - t0) + 'ms';
+          } catch (e) {
+            askStatus.textContent = 'network error: ' + (e && e.message ? e.message : e);
+          } finally {
+            askBtn.disabled = false;
+          }
+        });
+      }
     })();
   `;
 }

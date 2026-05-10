@@ -363,3 +363,200 @@ test('POST /api/projects/:name/stop: returns stopped=false when not running', as
     await cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Ask 体验台 reverse proxy (ARCH §17.3.2 / §17.3.3)
+// ---------------------------------------------------------------------------
+
+type ProxyCall = { url: string; method: string; body: string };
+
+function makeStubFetch(
+  capture: ProxyCall[],
+  respond: (call: ProxyCall) => { status: number; body: unknown },
+): typeof globalThis.fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const call: ProxyCall = {
+      url: typeof input === 'string' ? input : (input as URL).toString(),
+      method: init?.method ?? 'GET',
+      body: typeof init?.body === 'string' ? init.body : '',
+    };
+    capture.push(call);
+    const { status, body } = respond(call);
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }) as typeof globalThis.fetch;
+}
+
+test('POST /api/projects/:name/ask: lazy-spawns + proxies with dry_run=1', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const calls: ProxyCall[] = [];
+    const fetchFn = makeStubFetch(calls, () => ({
+      status: 200,
+      body: { type: 'answer', answer_md: 'A.', citations: [], _dry_run: true },
+    }));
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      fetchFn,
+    });
+    const res = await app.request('/api/projects/docs-zh/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'JWT 续期' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { type: string; _dry_run: boolean };
+    assert.equal(body.type, 'answer');
+    assert.equal(body._dry_run, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.url, 'http://127.0.0.1:4101/v1/ask?dry_run=1');
+    assert.equal(calls[0]!.method, 'POST');
+    assert.equal(calls[0]!.body, JSON.stringify({ question: 'JWT 续期' }));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/ask: reuses already-running child without re-spawn', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const registry = makeRegistry();
+    await registry.start('docs-zh'); // already running on 4101
+    const calls: ProxyCall[] = [];
+    const fetchFn = makeStubFetch(calls, () => ({
+      status: 200,
+      body: { type: 'answer', _dry_run: true },
+    }));
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry,
+      fetchFn,
+    });
+    const res = await app.request('/api/projects/docs-zh/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Q' }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(calls[0]!.url, 'http://127.0.0.1:4101/v1/ask?dry_run=1');
+    // still only one running entry; no extra spawn
+    assert.equal(registry.list().length, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/ask: 404 unknown project', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await fs.mkdir(join(ws, 'projects'), { recursive: true });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      fetchFn: makeStubFetch([], () => ({ status: 200, body: {} })),
+    });
+    const res = await app.request('/api/projects/nope/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(res.status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/ask: mirrors child error status (400) + body', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const calls: ProxyCall[] = [];
+    const fetchFn = makeStubFetch(calls, () => ({
+      status: 400,
+      body: { type: 'error', code: 'invalid_scope', _dry_run: true },
+    }));
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      fetchFn,
+    });
+    const res = await app.request('/api/projects/docs-zh/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Q' }),
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { code: string; _dry_run: boolean };
+    assert.equal(body.code, 'invalid_scope');
+    assert.equal(body._dry_run, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/ask: 502 when proxy fetch throws', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const fetchFn = (async () => {
+      throw new Error('connect ECONNREFUSED');
+    }) as unknown as typeof globalThis.fetch;
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      fetchFn,
+    });
+    const res = await app.request('/api/projects/docs-zh/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(res.status, 502);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    assert.equal(body.ok, false);
+    assert.match(body.error, /proxy failed/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/ask: touches lastUsedAt to defer reap', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const registry = makeRegistry();
+    await registry.start('docs-zh');
+    // simulate baseline lastUsedAt by reading list
+    const before = registry.list()[0]!.lastUsedAt;
+    await new Promise((r) => setTimeout(r, 5));
+    const fetchFn = makeStubFetch([], () => ({
+      status: 200,
+      body: { type: 'answer', _dry_run: true },
+    }));
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry,
+      fetchFn,
+    });
+    await app.request('/api/projects/docs-zh/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    const after = registry.list()[0]!.lastUsedAt;
+    assert.ok(after > before, `expected lastUsedAt to advance: before=${before} after=${after}`);
+  } finally {
+    await cleanup();
+  }
+});
