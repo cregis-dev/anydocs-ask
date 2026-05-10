@@ -22,6 +22,7 @@ import { renderTrafficTab } from './project-traffic-tab.ts';
 import type { EvalTabSnapshot } from '../eval-state.ts';
 import type { IndexSnapshot } from '../index-state.ts';
 import type { TrafficWindow } from '../traffic-state.ts';
+import { computeNextAction, type NextAction } from '../next-action.ts';
 
 export type ProjectViewModel = {
   project: ProjectListing;
@@ -45,12 +46,22 @@ export function renderProject(vm: ProjectViewModel): Html {
   const live = running !== null && !running.exited;
   const autostartFlag = vm.autostart ? 'true' : 'false';
 
+  const nextAction = computeNextAction({
+    indexSnapshot: vm.indexSnapshot,
+    evalSnapshot: vm.evalSnapshot,
+    trafficWindow: vm.trafficWindow,
+    childLive: live,
+    projectValid: project.valid,
+  });
+
   const body = html`
     <div class="pagehead">
       <span class="crumb mono"><a href="/">projects</a> /</span>
       <h1 class="mono">${project.name}</h1>
       ${statusPill(live, running)}
     </div>
+
+    ${nextAction ? nextActionBanner(nextAction) : ''}
 
     ${project.valid
       ? html`<div class="grid-2">${sidebar(project, live, running, vm.reports)} ${mainCol(project, live, vm.evalSnapshot, vm.latestEvalReportBody, vm.indexSnapshot, vm.trafficWindow)}</div>`
@@ -63,6 +74,24 @@ export function renderProject(vm: ProjectViewModel): Html {
   `;
 
   return layout({ title: project.name, body, nav: vm.nav });
+}
+
+function nextActionBanner(na: NextAction): Html {
+  const bgVar = na.level === 'err' ? 'var(--err-bg)' : na.level === 'warn' ? 'var(--warn-bg)' : 'var(--run-bg)';
+  const fgVar = na.level === 'err' ? 'var(--err)' : na.level === 'warn' ? 'var(--warn)' : 'var(--run)';
+  const icon = na.level === 'err' ? '⚠' : na.level === 'warn' ? '💡' : '👉';
+  return html`
+    <div class="next-action" style="background: ${bgVar}; border-left: 3px solid ${fgVar}; padding: 10px 14px; border-radius: 6px; margin: 0 0 14px; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;">
+      <span style="font-size: 16px;">${icon}</span>
+      <div style="flex: 1; min-width: 240px;">
+        <div style="font-weight: 600; color: ${fgVar};">${na.title}</div>
+        ${na.detail
+          ? html`<div class="muted" style="font-size: 12.5px; margin-top: 2px;">${na.detail}</div>`
+          : ''}
+      </div>
+      <a href="#${na.cta.targetTab}" class="btn btn-primary" style="background: ${fgVar}; border-color: ${fgVar};">${na.cta.label} →</a>
+    </div>
+  `;
 }
 
 function statusPill(live: boolean, running: RegisteredProcess | null): Html {
@@ -508,6 +537,13 @@ const initialTab = (location.hash || '').replace('#', '');
 if (['ask', 'index', 'eval', 'traffic'].includes(initialTab)) {
   setProjectTab(initialTab);
 }
+// In-page <a href="#tab"> links (e.g. next-action banner CTA) also switch tabs.
+window.addEventListener('hashchange', () => {
+  const t = (location.hash || '').replace('#', '');
+  if (['ask', 'index', 'eval', 'traffic'].includes(t)) {
+    setProjectTab(t);
+  }
+});
 
 // ------------------------------------------------------------------
 // Index tab: reindex button (reverse-proxy to child /v1/index/rebuild)
