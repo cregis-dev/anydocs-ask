@@ -6,7 +6,7 @@
  * D / E.
  */
 
-import { html } from 'hono/html';
+import { html, raw } from 'hono/html';
 import type { ProjectListing } from '../../workspace.ts';
 import type { RegisteredProcess } from '../registry.ts';
 import type { ReportListing } from '../ops.ts';
@@ -138,8 +138,10 @@ function actionButtons(name: string, running: boolean, valid: boolean): Html {
 function actionScript(name: string): Html {
   // Vanilla JS — under 30 lines per ARCH §17.4. Buttons fire fetch() then
   // reload on success; on failure, surface the server error inline.
-  // `name` is interpolated as a JSON string to be safe inside the script.
-  const safeName = JSON.stringify(name);
+  // `name` is interpolated as a JSON string; raw() prevents hono's html
+  // tag from escaping the surrounding double quotes (browsers don't HTML-
+  // decode <script> contents, so &quot; would produce a JS SyntaxError).
+  const safeName = raw(JSON.stringify(name));
   return html`
     (function () {
       var name = ${safeName};
