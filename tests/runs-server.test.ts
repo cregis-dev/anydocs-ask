@@ -180,3 +180,91 @@ test('two /v1/ask calls produce two lines in the same week file', async () => {
     await cleanup();
   }
 });
+
+test('/v1/ask?dry_run=1: response carries _dry_run, runs/ never created', async () => {
+  // ARCH §17.3.3: dev console default. Skips RunsWriter + answer-cache.
+  const { runtime, cleanup, stateRoot } = await setup({ runsEnabled: true });
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask?dry_run=1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { type: string; _dry_run?: boolean };
+    assert.equal(body.type, 'answer');
+    assert.equal(body._dry_run, true);
+
+    // No runs file — RunsWriter was never invoked, so the dir isn't created.
+    assert.equal(existsSync(join(stateRoot, 'runs')), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('/v1/ask?dry_run=1: error response also carries _dry_run, no runs', async () => {
+  const { runtime, cleanup, stateRoot } = await setup({ runsEnabled: true });
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask?dry_run=1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '鉴权', context: { scope_id: 'bogus' } }),
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { type: string; code?: string; _dry_run?: boolean };
+    assert.equal(body.type, 'error');
+    assert.equal(body.code, 'invalid_scope');
+    assert.equal(body._dry_run, true);
+    assert.equal(existsSync(join(stateRoot, 'runs')), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('/v1/ask without dry_run still appends; mixing dry+real keeps only the real one', async () => {
+  const { runtime, cleanup, stateRoot } = await setup({ runsEnabled: true });
+  try {
+    const app = createApp({ runtime });
+    // dry-run: must not write
+    await app.request('/v1/ask?dry_run=1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'dry-Q' }),
+    });
+    // real: must write
+    await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'real-Q' }),
+    });
+    const file = findRunsFile(stateRoot);
+    assert.ok(file);
+    const lines = readFileSync(file!, 'utf8').trim().split('\n');
+    assert.equal(lines.length, 1);
+    assert.equal((JSON.parse(lines[0]!) as RunRecord).query, 'real-Q');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('/v1/ask?dry_run=0 (or absent value) is NOT treated as dry-run', async () => {
+  // We accept exactly '1'; everything else is a regular call.
+  const { runtime, cleanup, stateRoot } = await setup({ runsEnabled: true });
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask?dry_run=0', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Q' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { _dry_run?: boolean };
+    assert.equal(body._dry_run, undefined);
+    const file = findRunsFile(stateRoot);
+    assert.ok(file, 'expected runs file');
+  } finally {
+    await cleanup();
+  }
+});

@@ -53,6 +53,11 @@ export function createApp(deps: AppDeps): Hono {
     if (!runtime.warm) {
       return c.json({ type: 'error', code: 'warming', message: 'service is warming up' }, 503);
     }
+    // dry_run=1 short-circuits both runs.jsonl append and answer-cache
+    // persist. Used by the v1 dev console (ARCH §17.3.3) so author dogfood
+    // queries don't pollute analytics or feedback identity. response gets
+    // `_dry_run: true` so the client UI can disable feedback affordances.
+    const dryRun = c.req.query('dry_run') === '1';
     let body: unknown;
     try {
       body = await c.req.json();
@@ -89,27 +94,32 @@ export function createApp(deps: AppDeps): Hono {
     );
 
     // Persist + log to runs.jsonl regardless of outcome — analyze needs
-    // visibility into errors / clarifies / answers alike.
-    const requestId = randomUUID();
-    const latencyMs =
-      result.type === 'answer' ? result.latency_ms : Math.round(performance.now() - t0);
-    appendRun(runtime, {
-      requestId,
-      query: req.question ?? '',
-      filters: extractFilters(req),
-      contextPageId: req.context?.current_page_id ?? null,
-      result,
-      trace,
-      latencyMs,
-    });
+    // visibility into errors / clarifies / answers alike. Skipped for dry_run.
+    if (!dryRun) {
+      const requestId = randomUUID();
+      const latencyMs =
+        result.type === 'answer' ? result.latency_ms : Math.round(performance.now() - t0);
+      appendRun(runtime, {
+        requestId,
+        query: req.question ?? '',
+        filters: extractFilters(req),
+        contextPageId: req.context?.current_page_id ?? null,
+        result,
+        trace,
+        latencyMs,
+      });
+    }
 
+    const body_out = dryRun ? { ...result, _dry_run: true as const } : result;
     if (result.type === 'error') {
-      const status = result.code === 'invalid_scope' ? 400 : 400;
-      return c.json(result, status);
+      return c.json(body_out, 400);
     }
     // Persist for feedback join (v1 doesn't dedupe; every call is its own row).
-    persistAnswer(runtime.db, result, req.question);
-    return c.json(result, 200);
+    // Skipped for dry_run — answer has no persistent identity in the cache.
+    if (!dryRun) {
+      persistAnswer(runtime.db, result, req.question);
+    }
+    return c.json(body_out, 200);
   });
 
   // -----------------------------------------------------------------------
