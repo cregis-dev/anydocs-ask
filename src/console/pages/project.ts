@@ -581,17 +581,25 @@ function bindBaselineActions() {
 }
 bindBaselineActions();
 
+// Ask 体验台 inner tabs (answer / citations / meta). Scoped to
+// #ask-result so the selector doesn't bleed into the outer project
+// tabs (Ask / Eval / Activity), which use the same [role=tab] +
+// .tab-panel pattern but a distinct data-project-tab attribute.
+const askResultEl = $('ask-result');
 function setActiveTab(name) {
-  document.querySelectorAll('[role=tab]').forEach((b) => {
+  if (!askResultEl) return;
+  askResultEl.querySelectorAll('[role=tab]').forEach((b) => {
     b.setAttribute('aria-selected', b.dataset.tab === name ? 'true' : 'false');
   });
-  document.querySelectorAll('.tab-panel').forEach((p) => {
+  askResultEl.querySelectorAll('.tab-panel').forEach((p) => {
     p.hidden = p.dataset.tab !== name;
   });
 }
-document.querySelectorAll('[role=tab]').forEach((b) => {
-  b.addEventListener('click', () => setActiveTab(b.dataset.tab));
-});
+if (askResultEl) {
+  askResultEl.querySelectorAll('[role=tab]').forEach((b) => {
+    b.addEventListener('click', () => setActiveTab(b.dataset.tab));
+  });
+}
 
 // persist toggle — defaults OFF every page load (no localStorage / cookie
 // per PRD §13 decision: avoid accidentally leaving runs on for days).

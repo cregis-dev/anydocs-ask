@@ -240,6 +240,36 @@ test('GET /p/:name: running project disables start, enables stop, shows pid+port
   }
 });
 
+test('GET /p/:name: project tabs (Ask/Eval/Activity) + scoped JS handler so they do not collide with Ask sub-tabs', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    const body = await res.text();
+    // three project tabs present
+    assert.match(body, /data-project-tab="ask"/);
+    assert.match(body, /data-project-tab="eval"/);
+    assert.match(body, /data-project-tab="activity"/);
+    // Ask sub-tab handler MUST be scoped to #ask-result so it can't
+    // accidentally hide outer project panels when user clicks them.
+    // (Regression: previous build used unscoped `document.querySelectorAll
+    // ('[role=tab]')` which collided with the outer tabs.)
+    assert.match(body, /askResultEl\.querySelectorAll/);
+    assert.equal(
+      /document\.querySelectorAll\('\[role=tab\]'\)/.test(body),
+      false,
+      'unscoped [role=tab] selector would re-introduce the cross-talk bug',
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test('GET /p/:name: invalid project hides action buttons', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
