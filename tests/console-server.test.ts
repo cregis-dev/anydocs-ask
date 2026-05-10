@@ -732,6 +732,190 @@ test('POST /api/projects/:name/eval: invokes ops.eval with state path', async ()
   }
 });
 
+test('POST /api/projects/:name/eval: body.baseline_path resolved to absolute report path', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    // Write a baseline report so the pointer can resolve.
+    const reportsDir = join(ws, 'state', 'docs-zh', 'reports');
+    await fs.mkdir(reportsDir, { recursive: true });
+    await fs.writeFile(join(reportsDir, '2026-05-08-eval.md'), '# baseline\n');
+    let receivedBaseline: string | undefined;
+    const fakeOps = {
+      eval: async (opts: { projectRoot: string; stateRoot: string; baselinePath?: string }) => {
+        receivedBaseline = opts.baselinePath;
+        return { ok: true as const, message: 'ok' };
+      },
+      analyzeRuns: async () => ({ ok: true as const, message: 'ok' }),
+      goldenGenerate: async () => ({ ok: true as const, message: 'ok' }),
+    };
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      ops: fakeOps,
+    });
+    const res = await app.request('/api/projects/docs-zh/eval', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseline_path: '2026-05-08-eval.md' }),
+    });
+    assert.equal(res.status, 200);
+    assert.ok(receivedBaseline);
+    assert.ok(receivedBaseline.endsWith('state/docs-zh/reports/2026-05-08-eval.md'));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/eval: invalid baseline filename rejected', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/eval', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseline_path: '../../etc/passwd' }),
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string };
+    assert.match(body.error, /invalid baseline/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/eval: pinned baseline used when body omits baseline_path', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const stateRoot = join(ws, 'state', 'docs-zh');
+    const reportsDir = join(stateRoot, 'reports');
+    const goldenDir = join(stateRoot, 'golden');
+    await fs.mkdir(reportsDir, { recursive: true });
+    await fs.mkdir(goldenDir, { recursive: true });
+    await fs.writeFile(join(reportsDir, '2026-05-08-eval.md'), '# pinned baseline\n');
+    await fs.writeFile(
+      join(goldenDir, 'eval-baseline.json'),
+      JSON.stringify({ filename: '2026-05-08-eval.md', pinnedAt: '2026-05-09T00:00:00.000Z' }),
+    );
+    let receivedBaseline: string | undefined;
+    const fakeOps = {
+      eval: async (opts: { projectRoot: string; stateRoot: string; baselinePath?: string }) => {
+        receivedBaseline = opts.baselinePath;
+        return { ok: true as const, message: 'ok' };
+      },
+      analyzeRuns: async () => ({ ok: true as const, message: 'ok' }),
+      goldenGenerate: async () => ({ ok: true as const, message: 'ok' }),
+    };
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      ops: fakeOps,
+    });
+    const res = await app.request('/api/projects/docs-zh/eval', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(res.status, 200);
+    assert.ok(receivedBaseline?.endsWith('reports/2026-05-08-eval.md'));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/eval/pin-baseline: writes pointer to state/golden/eval-baseline.json', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const reportsDir = join(ws, 'state', 'docs-zh', 'reports');
+    await fs.mkdir(reportsDir, { recursive: true });
+    await fs.writeFile(join(reportsDir, '2026-05-08-eval.md'), '# r\n');
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/eval/pin-baseline', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: '2026-05-08-eval.md' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean; pinned: { filename: string } };
+    assert.equal(body.ok, true);
+    assert.equal(body.pinned.filename, '2026-05-08-eval.md');
+    // file actually exists
+    const pinFile = join(ws, 'state', 'docs-zh', 'golden', 'eval-baseline.json');
+    const content = JSON.parse(await fs.readFile(pinFile, 'utf8')) as { filename: string };
+    assert.equal(content.filename, '2026-05-08-eval.md');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/eval/pin-baseline: missing report → 400', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/eval/pin-baseline', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: '2099-12-31-eval.md' }),
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string };
+    assert.match(body.error, /report not found/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('DELETE /api/projects/:name/eval/pin-baseline: removes pointer file', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const goldenDir = join(ws, 'state', 'docs-zh', 'golden');
+    await fs.mkdir(goldenDir, { recursive: true });
+    await fs.writeFile(
+      join(goldenDir, 'eval-baseline.json'),
+      JSON.stringify({ filename: '2026-05-08-eval.md', pinnedAt: '2026-05-09' }),
+    );
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/eval/pin-baseline', {
+      method: 'DELETE',
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean; cleared: boolean };
+    assert.equal(body.ok, true);
+    assert.equal(body.cleared, true);
+    // file gone
+    const stillExists = await fs
+      .stat(join(goldenDir, 'eval-baseline.json'))
+      .then(() => true)
+      .catch(() => false);
+    assert.equal(stillExists, false);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('POST /api/projects/:name/eval: 500 with op error on failure', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {

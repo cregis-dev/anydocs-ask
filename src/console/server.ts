@@ -29,6 +29,12 @@ import { renderProject } from './pages/project.ts';
 import { renderReport } from './pages/report.ts';
 import { renderRuns } from './pages/runs.ts';
 import { getStaticAsset } from './static.ts';
+import {
+  clearPinnedBaseline,
+  loadEvalSnapshot,
+  readReportBody,
+  writePinnedBaseline,
+} from './eval-state.ts';
 
 export type ConsoleAppDeps = {
   workspacePath: string;
@@ -138,8 +144,21 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const stateRoot = projectStateRoot(deps.workspacePath, project);
     const reports = stateRoot ? listReports(stateRoot) : [];
     const autostart = c.req.query('autostart') === '1';
+    const evalSnapshot = stateRoot ? loadEvalSnapshot(stateRoot) : undefined;
+    const latestEvalReportBody =
+      stateRoot && evalSnapshot?.latest
+        ? readReportBody(stateRoot, evalSnapshot.latest.filename)
+        : null;
     return c.html(
-      renderProject({ project, running, reports, autostart, nav: buildNav(name) }),
+      renderProject({
+        project,
+        running,
+        reports,
+        autostart,
+        nav: buildNav(name),
+        ...(evalSnapshot ? { evalSnapshot } : {}),
+        latestEvalReportBody,
+      }),
     );
   });
 
@@ -349,8 +368,69 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   app.post('/api/projects/:name/eval', async (c) => {
     const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
     if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
-    const r = await ops.eval({ projectRoot: ctx.projectRoot, stateRoot: ctx.stateRoot });
+    // Optional baseline override. Two sources, in priority order:
+    //   1. body.baseline_path (UI dropdown — filename within state/reports/)
+    //   2. pinned baseline pointer (state/.../golden/eval-baseline.json)
+    //   3. CLI default (latest prior eval report)
+    let baselinePath: string | undefined;
+    try {
+      const body = (await c.req.json().catch(() => null)) as
+        | { baseline_path?: string }
+        | null;
+      if (body && typeof body.baseline_path === 'string' && body.baseline_path.length > 0) {
+        // UI passes just the filename; resolve to absolute path within reports/.
+        if (!/^\d{4}-\d{2}-\d{2}-eval\.md$/.test(body.baseline_path)) {
+          return c.json(
+            { ok: false, error: `invalid baseline filename: ${body.baseline_path}` },
+            400,
+          );
+        }
+        baselinePath = join(ctx.stateRoot, 'reports', body.baseline_path);
+      }
+    } catch {
+      // ignore — no body or non-JSON; fall through
+    }
+    if (!baselinePath) {
+      // Check pin.
+      const snap = loadEvalSnapshot(ctx.stateRoot);
+      if (snap.pinned) {
+        baselinePath = join(ctx.stateRoot, 'reports', snap.pinned.filename);
+      }
+    }
+    const r = await ops.eval({
+      projectRoot: ctx.projectRoot,
+      stateRoot: ctx.stateRoot,
+      ...(baselinePath ? { baselinePath } : {}),
+    });
     return c.json(r, r.ok ? 200 : 500);
+  });
+
+  // pin / unpin baseline — ARCH §17.8 baseline 钉固。
+  app.post('/api/projects/:name/eval/pin-baseline', async (c) => {
+    const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
+    if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
+    let body: { filename?: string } | null = null;
+    try {
+      body = (await c.req.json()) as { filename?: string };
+    } catch {
+      return c.json({ ok: false, error: 'invalid JSON body' }, 400);
+    }
+    if (!body || typeof body.filename !== 'string') {
+      return c.json({ ok: false, error: 'body.filename (string) required' }, 400);
+    }
+    try {
+      const pin = writePinnedBaseline(ctx.stateRoot, body.filename);
+      return c.json({ ok: true, pinned: pin });
+    } catch (err) {
+      return c.json({ ok: false, error: (err as Error).message }, 400);
+    }
+  });
+
+  app.delete('/api/projects/:name/eval/pin-baseline', (c) => {
+    const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
+    if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
+    const cleared = clearPinnedBaseline(ctx.stateRoot);
+    return c.json({ ok: true, cleared });
   });
 
   app.post('/api/projects/:name/analyze', async (c) => {

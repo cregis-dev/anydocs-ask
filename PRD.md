@@ -667,9 +667,17 @@ Golden case schema（jsonl，每行）：
 
 #### 13.4.3 测评批跑
 
-- 三个按钮，分别触发 `eval` / `analyze runs` / `golden generate`，参数（since / limit / from-source）以表单暴露。
-- 任务异步跑（不阻塞 UI），完成后跳转到落盘报告（点链接打开 `<workspace>/state/<projectId>/reports/<date>-*.md`）。
-- 实现上**直接调用既有 CLI 内部函数**，不 fork shell；统一 progress / log 流回 UI。
+- 项目页右主区有三个 tab：**Ask**（默认 dogfood）/ **Eval**（独立 workflow）/ **Activity**（runs / reports 入口）
+- **Eval tab**（2026-05-11 提升为一级 feature）：
+  - golden 题集状态：n cases / 按 lang / tag / created_by 分布 / 最近编辑时间
+  - 三指标卡：latest eval + baseline 对比，Δ 用颜色（绿涨红跌）标注
+  - **baseline pin**：history 表每行 `pin` 按钮可钉一份历史报告作"金准"，后续 eval 默认对比它（不只对比上一份）；UI Unpin 一键清；落盘 `state/<id>/golden/eval-baseline.json`
+  - Run eval：dropdown 选对比目标（previous / pinned / 任一历史报告），按钮触发；结果落 `state/<id>/reports/<date>-eval.md`，自动刷新视图
+  - 最近报告 markdown inline 渲染（同 reports 页面）
+  - history 表：所有 eval 报告 + R@5 / Cit / Ans 三列 + sparkline 趋势（≥3 报告时显示，unicode block 零依赖）
+- **数据收集** side card：保留 analyze runs / golden ← structure / golden ← runs 三个按钮（这些不是日常主路径）
+- 实现上**直接调用既有 CLI 内部函数**，不 fork shell；eval CLI 协议**未改**——pin baseline 只是 console 端读指针文件，转译成 `--baseline <path>` 传给 `runEval()`。
+- 详 ARCH §17.3.4。
 
 #### 13.4.4 报告 / runs 查看
 

@@ -16,6 +16,8 @@ import type { ProjectListing } from '../../workspace.ts';
 import type { RegisteredProcess } from '../registry.ts';
 import type { ReportListing } from '../ops.ts';
 import { layout, type Html, type NavContext } from './layout.ts';
+import { renderEvalTab } from './project-eval-tab.ts';
+import type { EvalTabSnapshot } from '../eval-state.ts';
 
 export type ProjectViewModel = {
   project: ProjectListing;
@@ -24,6 +26,10 @@ export type ProjectViewModel = {
   /** ?autostart=1 → page-load JS POSTs /start once before user interaction. */
   autostart?: boolean;
   nav?: NavContext;
+  /** Eval workflow snapshot — golden stats + report history + pin state. */
+  evalSnapshot?: EvalTabSnapshot;
+  /** Latest eval report markdown body (or null). */
+  latestEvalReportBody?: string | null;
 };
 
 export function renderProject(vm: ProjectViewModel): Html {
@@ -39,7 +45,7 @@ export function renderProject(vm: ProjectViewModel): Html {
     </div>
 
     ${project.valid
-      ? html`<div class="grid-2">${sidebar(project, live, running, vm.reports)} ${mainCol(project, live)}</div>`
+      ? html`<div class="grid-2">${sidebar(project, live, running, vm.reports)} ${mainCol(project, live, vm.evalSnapshot, vm.latestEvalReportBody)}</div>`
       : invalidNotice(project)}
 
     <script>${raw(`
@@ -123,9 +129,8 @@ function lifecycleCard(live: boolean): Html {
 function opsCard(): Html {
   return html`
     <div class="card">
-      <h2>测评 · golden</h2>
+      <h2>数据收集</h2>
       <div class="btn-row">
-        <button id="btn-eval">run eval</button>
         <button id="btn-analyze">analyze runs · 7d</button>
       </div>
       <div class="btn-row" style="margin-top: 8px;">
@@ -134,7 +139,8 @@ function opsCard(): Html {
       </div>
       <p id="op-status" class="status muted" style="margin-top: 10px; font-size: 12px; min-height: 16px;"></p>
       <p class="muted" style="font-size: 11.5px; margin-top: 6px;">
-        默认无 LLM 改写；要 <code>--llm-rewrite</code> 走命令行 <code class="mono">anydocs-ask golden generate</code>。
+        eval workflow 在右侧 <strong>Eval</strong> tab。<br />
+        golden 默认无 LLM 改写；要 <code>--llm-rewrite</code> 走命令行 <code class="mono">anydocs-ask golden generate</code>。
       </p>
     </div>
   `;
@@ -184,21 +190,47 @@ function groupByKind(reports: ReportListing[]): Record<string, ReportListing[]> 
   return out;
 }
 
-function mainCol(project: ProjectListing, live: boolean): Html {
+function mainCol(
+  project: ProjectListing,
+  live: boolean,
+  evalSnapshot: EvalTabSnapshot | undefined,
+  latestEvalReportBody: string | null | undefined,
+): Html {
   return html`
     <div>
-      ${askCard(live)}
-      <div class="card">
-        <h2>activity</h2>
-        <p>
-          <a href="/p/${project.name}/runs">查看最近 runs →</a>
-        </p>
-        <p class="muted" style="font-size: 12px;">
-          ask 体验台默认 <code>?dry_run=1</code>，本页发起的提问 <strong>不会</strong> 写入 runs。<br />
-          想看真实流量，去 Reader 直调 <code>/v1/ask</code>，或在 v1.5 用"灌真实流量"开关。
-        </p>
+      <div class="tabs project-tabs" role="tablist">
+        <button role="tab" data-project-tab="ask" aria-selected="true">Ask</button>
+        <button role="tab" data-project-tab="eval">Eval</button>
+        <button role="tab" data-project-tab="activity">Activity</button>
+      </div>
+      <div id="ptab-ask" class="tab-panel" data-project-tab="ask">
+        ${askCard(live)}
+      </div>
+      <div id="ptab-eval" class="tab-panel" data-project-tab="eval" hidden>
+        ${evalSnapshot
+          ? renderEvalTab({
+              projectName: project.name,
+              snapshot: evalSnapshot,
+              latestReportBody: latestEvalReportBody ?? null,
+            })
+          : html`<div class="card"><p class="empty">eval 状态不可用。</p></div>`}
+      </div>
+      <div id="ptab-activity" class="tab-panel" data-project-tab="activity" hidden>
+        <div class="card">
+          <h2>activity</h2>
+          <p>
+            <a href="/p/${project.name}/runs">查看最近 runs →</a>
+          </p>
+          <p class="muted" style="font-size: 12px;">
+            ask 体验台默认 <code>?dry_run=1</code>，本页发起的提问 <strong>不会</strong> 写入 runs。<br />
+            打开右上 <strong>persist</strong> 开关后单次提问写 runs，<code>source=console</code> 标记。
+          </p>
+        </div>
       </div>
     </div>
+    <style>
+      .project-tabs { margin: -2px 0 14px 0; padding: 0; border-bottom: 1px solid var(--bd); }
+    </style>
   `;
 }
 
@@ -434,10 +466,120 @@ function bindOp(id, path) {
     }
   });
 }
-bindOp('btn-eval', '/eval');
 bindOp('btn-analyze', '/analyze');
 bindOp('btn-golden-structure', '/golden/generate?from=structure');
 bindOp('btn-golden-runs', '/golden/generate?from=runs');
+
+// ------------------------------------------------------------------
+// Project-page tabs (Ask / Eval / Activity)
+// ------------------------------------------------------------------
+function setProjectTab(name) {
+  document.querySelectorAll('[data-project-tab]').forEach((el) => {
+    if (el.getAttribute('role') === 'tab') {
+      el.setAttribute('aria-selected', el.dataset.projectTab === name ? 'true' : 'false');
+    } else {
+      el.hidden = el.dataset.projectTab !== name;
+    }
+  });
+  if (location.hash !== '#' + name) {
+    history.replaceState({}, '', location.pathname + '#' + name);
+  }
+}
+document.querySelectorAll('[role=tab][data-project-tab]').forEach((b) => {
+  b.addEventListener('click', () => setProjectTab(b.dataset.projectTab));
+});
+// Deep-link via hash on initial load.
+const initialTab = (location.hash || '').replace('#', '');
+if (['ask', 'eval', 'activity'].includes(initialTab)) {
+  setProjectTab(initialTab);
+}
+
+// ------------------------------------------------------------------
+// Eval tab: Run + pin/unpin baseline
+// ------------------------------------------------------------------
+function bindEvalRun() {
+  const btn = $('btn-run-eval');
+  const sel = $('eval-baseline-select');
+  const status = $('eval-run-status');
+  if (!btn || !sel || !status) return;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    status.textContent = 'running... (10–30s typical)';
+    status.className = 'status muted';
+    const t0 = Date.now();
+    const baseline = sel.value || null;
+    try {
+      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/eval', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(baseline ? { baseline_path: baseline } : {}),
+      });
+      const body = await res.json();
+      const dt = Date.now() - t0;
+      if (!res.ok || body.ok === false) {
+        status.textContent = 'failed (' + dt + 'ms): ' + (body.error || res.statusText);
+        status.className = 'status err';
+      } else {
+        status.textContent = 'done (' + dt + 'ms) — reloading';
+        status.className = 'status ok';
+        setTimeout(() => location.reload(), 500);
+      }
+    } catch (e) {
+      status.textContent = 'network error: ' + (e && e.message ? e.message : e);
+      status.className = 'status err';
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+bindEvalRun();
+
+function bindBaselineActions() {
+  document.querySelectorAll('[data-pin-filename]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/eval/pin-baseline', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: b.dataset.pinFilename }),
+        });
+        const body = await res.json();
+        if (!res.ok || body.ok === false) {
+          alert((body && body.error) || res.statusText);
+          b.disabled = false;
+          return;
+        }
+        location.reload();
+      } catch (e) {
+        alert('network error: ' + (e && e.message ? e.message : e));
+        b.disabled = false;
+      }
+    });
+  });
+  const unpin = $('btn-unpin-baseline');
+  if (unpin) {
+    unpin.addEventListener('click', async () => {
+      unpin.disabled = true;
+      try {
+        const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/eval/pin-baseline', {
+          method: 'DELETE',
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          alert((body && body.error) || res.statusText);
+          unpin.disabled = false;
+          return;
+        }
+        location.reload();
+      } catch (e) {
+        alert('network error: ' + (e && e.message ? e.message : e));
+        unpin.disabled = false;
+      }
+    });
+  }
+}
+bindBaselineActions();
 
 function setActiveTab(name) {
   document.querySelectorAll('[role=tab]').forEach((b) => {

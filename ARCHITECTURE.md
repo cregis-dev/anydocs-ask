@@ -1495,7 +1495,7 @@ ProcessRegistry {
 | 路由 | 内容 |
 |---|---|
 | `GET /` | 项目选择器（卡片网格） |
-| `GET /p/:name` | 项目详情：状态卡 + Ask 体验台 + 操作按钮 + 报告/runs 列表 |
+| `GET /p/:name` | 项目详情：左 sidebar（status / lifecycle / 数据收集 / reports）+ 右主区 **三 tab** （Ask / Eval / Activity）。tab 由 hash `#tab` 持久化、刷新保留。详 §17.3.4 |
 | `GET /p/:name/reports/:file` | 渲染 `state/<projectId>/reports/<file>.md` |
 | `GET /p/:name/runs` | 分页 jsonl 查看（最近 50，可过滤 query/confidence/latency） |
 
@@ -1507,7 +1507,9 @@ ProcessRegistry {
 | `POST /api/projects/:name/start` | lazy spawn；返回 `{ port }` |
 | `POST /api/projects/:name/stop` | SIGTERM child，registry 删 entry |
 | `POST /api/projects/:name/ask` | 默认反代到 child `/v1/ask?dry_run=1`；body 含 `{persist: true}` 时改走 `/v1/ask?source=console`，child 落 runs 时打 `source="console"`。`persist` 字段被代理消费、不转发给 child |
-| `POST /api/projects/:name/eval` | in-process 调用 `eval()`；返回报告路径 |
+| `POST /api/projects/:name/eval` | in-process 调用 `eval()`；body 可选 `{ baseline_path: "<YYYY-MM-DD-eval.md>" }` 覆盖对比基线；未传时优先用 pin 文件，无 pin 则走 CLI 默认 |
+| `POST /api/projects/:name/eval/pin-baseline` | body `{ filename }` → 写 `state/<id>/golden/eval-baseline.json` |
+| `DELETE /api/projects/:name/eval/pin-baseline` | 删 pin 指针文件 |
 | `POST /api/projects/:name/analyze` | in-process 调用 `analyzeRuns()` |
 | `POST /api/projects/:name/golden/generate` | in-process 调用 `goldenGenerate({ from: 'structure'\|'runs' })` |
 | `POST /api/projects/:name/reindex` | 反代到 child `/v1/admin/reindex`（v1 已有） |
@@ -1532,6 +1534,26 @@ ProcessRegistry {
 - `body.persist === true` → `?source=console`，child 写 runs `source: "console"`，response 由 console 端补 `_persisted: true` / `_source: "console"` 后返给 UI
 
 这是对 v1 ask 的**最小侵入**——一条分支、一个字段，无 schema 变化。CLI / Reader 默认行为不变。
+
+#### 17.3.4 Eval tab（2026-05-11 加入）
+
+项目页右主区从 \"Ask 体验台 + activity\" 升级为三 tab 结构：
+
+| Tab | 内容 |
+|---|---|
+| **Ask** | 现有 Ask 体验台（dry-run / persist toggle / Answer-Citations-Meta 子 tab） |
+| **Eval** | golden 题集概览 + 三指标卡 + baseline pin/unpin + Run eval + 最近报告 markdown 渲染 + history 表 + sparkline 趋势 |
+| **Activity** | runs / reports 入口（保留兼容；后续可吸收为 tab 内嵌） |
+
+**Eval tab 完整工作流**：
+1. 题集状态：从 `<state>/golden/cases.jsonl` 读 # cases，按 lang / tag / created_by 分桶（unicode bar chart，零依赖）
+2. 最新 eval：解析最近一份 `<state>/reports/<YYYY-MM-DD>-eval.md` 的 `<!-- EVAL_SUMMARY {...} -->` 注释拿三指标；与 pin 的 baseline 对比给 Δ
+3. baseline pin：`<state>/golden/eval-baseline.json` 是个 \"指针文件\"（schema `{ filename, pinnedAt }`），eval CLI **不需要改**——console POST `/eval` 时读 pin 文件，把指向的报告路径作为 `baselinePath` 传给 `runEval()`。CLI 用户无 pin 仍走默认 \"latest prior eval\" 行为。
+4. Run eval：UI dropdown 选 \"previous eval (default) / pinned / 任一历史报告\"，console 反代到 `POST /api/projects/:name/eval` 带 `baseline_path` body
+5. 最近报告：浏览器侧 marked 渲染 `<state>/reports/<date>-eval.md`（与 §17.4 markdown 共用）
+6. history 表：列所有 eval 报告 + 每行 pin 按钮 + sparkline（`▁▂▄▅▆▇` unicode block，趋势 ≥3 报告时显示）
+
+**console-side 零状态原则不破**：pin 文件落 `<state>/<id>/golden/`（项目侧 state），不在 console 进程内存或 console-side 配置。删 console 进程或 cwd 不影响 pin 状态。
 
 ### 17.4 前端形态
 
