@@ -37,6 +37,7 @@ import {
 } from './eval-state.ts';
 import { loadIndexSnapshot, type ChildIndexStatus } from './index-state.ts';
 import { loadTrafficWindow } from './traffic-state.ts';
+import { loadProjectHomeStats, summarizeWorkspace } from './home-state.ts';
 
 export type ConsoleAppDeps = {
   workspacePath: string;
@@ -93,6 +94,18 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   app.get('/', (c) => {
     const projects = scanProjects(deps.workspacePath);
     const running = runningMap(deps.registry.list());
+    const projectStats = new Map<string, ReturnType<typeof loadProjectHomeStats>>();
+    for (const p of projects) {
+      projectStats.set(p.name, loadProjectHomeStats(deps.workspacePath, p));
+    }
+    const runningSet = new Set<string>();
+    for (const [n, r] of running) if (!r.exited) runningSet.add(n);
+    const workspaceSummary = summarizeWorkspace(
+      deps.workspacePath,
+      projects,
+      runningSet,
+      projectStats,
+    );
     return c.html(
       renderHome({
         workspacePath: deps.workspacePath,
@@ -100,6 +113,8 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         idleTimeoutMin,
         projects,
         running,
+        projectStats,
+        workspaceSummary,
       }),
     );
   });
