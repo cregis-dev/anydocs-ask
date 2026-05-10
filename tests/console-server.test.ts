@@ -240,7 +240,7 @@ test('GET /p/:name: running project disables start, enables stop, shows pid+port
   }
 });
 
-test('GET /p/:name: project tabs (Ask/Eval/Activity) + scoped JS handler so they do not collide with Ask sub-tabs', async () => {
+test('GET /p/:name: project tabs (Ask/Index/Eval/Traffic) + scoped JS handler so they do not collide with Ask sub-tabs', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -251,10 +251,11 @@ test('GET /p/:name: project tabs (Ask/Eval/Activity) + scoped JS handler so they
     });
     const res = await app.request('/p/docs-zh');
     const body = await res.text();
-    // three project tabs present
+    // four project tabs present
     assert.match(body, /data-project-tab="ask"/);
+    assert.match(body, /data-project-tab="index"/);
     assert.match(body, /data-project-tab="eval"/);
-    assert.match(body, /data-project-tab="activity"/);
+    assert.match(body, /data-project-tab="traffic"/);
     // Ask sub-tab handler MUST be scoped to #ask-result so it can't
     // accidentally hide outer project panels when user clicks them.
     // (Regression: previous build used unscoped `document.querySelectorAll

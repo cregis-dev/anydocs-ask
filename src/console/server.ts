@@ -36,6 +36,7 @@ import {
   writePinnedBaseline,
 } from './eval-state.ts';
 import { loadIndexSnapshot, type ChildIndexStatus } from './index-state.ts';
+import { loadTrafficWindow } from './traffic-state.ts';
 
 export type ConsoleAppDeps = {
   workspacePath: string;
@@ -171,6 +172,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         }
       }
     }
+    const trafficWindow = stateRoot ? loadTrafficWindow(stateRoot, 7) : undefined;
     return c.html(
       renderProject({
         project,
@@ -181,6 +183,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         ...(evalSnapshot ? { evalSnapshot } : {}),
         latestEvalReportBody,
         ...(indexSnapshot ? { indexSnapshot } : {}),
+        ...(trafficWindow ? { trafficWindow } : {}),
       }),
     );
   });

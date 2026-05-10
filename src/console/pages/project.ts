@@ -18,8 +18,10 @@ import type { ReportListing } from '../ops.ts';
 import { layout, type Html, type NavContext } from './layout.ts';
 import { renderEvalTab } from './project-eval-tab.ts';
 import { renderIndexTab } from './project-index-tab.ts';
+import { renderTrafficTab } from './project-traffic-tab.ts';
 import type { EvalTabSnapshot } from '../eval-state.ts';
 import type { IndexSnapshot } from '../index-state.ts';
+import type { TrafficWindow } from '../traffic-state.ts';
 
 export type ProjectViewModel = {
   project: ProjectListing;
@@ -34,6 +36,8 @@ export type ProjectViewModel = {
   latestEvalReportBody?: string | null;
   /** Index tab snapshot (pages, navigation, validation). */
   indexSnapshot?: IndexSnapshot;
+  /** Traffic tab 7-day rolling window. */
+  trafficWindow?: TrafficWindow;
 };
 
 export function renderProject(vm: ProjectViewModel): Html {
@@ -49,7 +53,7 @@ export function renderProject(vm: ProjectViewModel): Html {
     </div>
 
     ${project.valid
-      ? html`<div class="grid-2">${sidebar(project, live, running, vm.reports)} ${mainCol(project, live, vm.evalSnapshot, vm.latestEvalReportBody, vm.indexSnapshot)}</div>`
+      ? html`<div class="grid-2">${sidebar(project, live, running, vm.reports)} ${mainCol(project, live, vm.evalSnapshot, vm.latestEvalReportBody, vm.indexSnapshot, vm.trafficWindow)}</div>`
       : invalidNotice(project)}
 
     <script>${raw(`
@@ -202,6 +206,7 @@ function mainCol(
   evalSnapshot: EvalTabSnapshot | undefined,
   latestEvalReportBody: string | null | undefined,
   indexSnapshot: IndexSnapshot | undefined,
+  trafficWindow: TrafficWindow | undefined,
 ): Html {
   return html`
     <div>
@@ -209,7 +214,7 @@ function mainCol(
         <button role="tab" data-project-tab="ask" aria-selected="true">Ask</button>
         <button role="tab" data-project-tab="index">Index</button>
         <button role="tab" data-project-tab="eval">Eval</button>
-        <button role="tab" data-project-tab="activity">Activity</button>
+        <button role="tab" data-project-tab="traffic">Traffic</button>
       </div>
       <div id="ptab-ask" class="tab-panel" data-project-tab="ask">
         ${askCard(live)}
@@ -232,18 +237,10 @@ function mainCol(
             })
           : html`<div class="card"><p class="empty">eval 状态不可用。</p></div>`}
       </div>
-      <div id="ptab-activity" class="tab-panel" data-project-tab="activity" hidden>
-        <div class="card">
-          <h2>activity</h2>
-          <p>
-            <a href="/p/${project.name}/runs">查看最近 runs →</a>
-          </p>
-          <p class="muted" style="font-size: 12px;">
-            ask 体验台默认 <code>?dry_run=1</code>，本页发起的提问 <strong>不会</strong> 写入 runs。<br />
-            打开右上 <strong>persist</strong> 开关后单次提问写 runs，<code>source=console</code> 标记。<br />
-            <em>Traffic tab（健康度 / 筛选 / Re-ask）即将上线，先用此处入口跳转。</em>
-          </p>
-        </div>
+      <div id="ptab-traffic" class="tab-panel" data-project-tab="traffic" hidden>
+        ${trafficWindow
+          ? renderTrafficTab({ projectName: project.name, window: trafficWindow })
+          : html`<div class="card"><p class="empty">traffic 状态不可用。</p></div>`}
       </div>
     </div>
     <style>
@@ -508,7 +505,7 @@ document.querySelectorAll('[role=tab][data-project-tab]').forEach((b) => {
 });
 // Deep-link via hash on initial load.
 const initialTab = (location.hash || '').replace('#', '');
-if (['ask', 'index', 'eval', 'activity'].includes(initialTab)) {
+if (['ask', 'index', 'eval', 'traffic'].includes(initialTab)) {
   setProjectTab(initialTab);
 }
 
