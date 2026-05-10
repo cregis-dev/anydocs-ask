@@ -32,6 +32,9 @@ importers:
       hono:
         specifier: ^4.12.17
         version: 4.12.17
+      marked:
+        specifier: ^18.0.3
+        version: 18.0.3
       sqlite-vec:
         specifier: ^0.1.6
         version: 0.1.9
@@ -374,6 +377,11 @@ packages:
 
   long@5.3.2:
     resolution: {integrity: sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==}
+
+  marked@18.0.3:
+    resolution: {integrity: sha512-7VT90JOkDeaRWpfjOReRGPEKn0ecdARBkDGL+tT1wZY0efPPqkUxLUSmzy/C7TIylQYJC9STISEsCHrqb/7VIA==}
+    engines: {node: '>= 20'}
+    hasBin: true
 
   matcher@4.0.0:
     resolution: {integrity: sha512-S6x5wmcDmsDRRU/c2dkccDwQPXoFczc5+HpQ2lON8pnvHlnvHAHj5WlLVvw6n6vNyHuVugYrFohYxbS+pvFpKQ==}
@@ -807,6 +815,8 @@ snapshots:
       ts-algebra: 2.0.0
 
   long@5.3.2: {}
+
+  marked@18.0.3: {}
 
   matcher@4.0.0:
     dependencies:

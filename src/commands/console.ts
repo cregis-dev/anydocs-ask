@@ -77,6 +77,7 @@ export async function runConsole(opts: ConsoleOptions): Promise<number> {
   const app = createConsoleApp({
     workspacePath: workspace.path,
     consolePort: config.port,
+    idleTimeoutMin: config.idleTimeoutMin,
     registry,
   });
 

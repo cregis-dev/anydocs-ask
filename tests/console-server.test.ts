@@ -96,13 +96,16 @@ test('GET /: lists valid + invalid projects with status tags', async () => {
     const body = await res.text();
     assert.match(body, /docs-zh/);
     assert.match(body, /broken/);
-    // valid + stopped tags present
-    assert.match(body, /tag ok[^>]*>valid/);
-    assert.match(body, /tag err[^>]*>invalid/);
-    assert.match(body, /tag[^>]*>stopped/);
-    // open link only for valid project
-    assert.match(body, /href="\/p\/docs-zh"/);
+    // valid card vs invalid card distinguishable
+    assert.match(body, /class="card proj-card"[\s\S]*docs-zh/);
+    assert.match(body, /class="card proj-card invalid"[\s\S]*broken/);
+    assert.match(body, /missing:[^<]*navigation/);
+    // idle pill on stopped project
+    assert.match(body, /pill[^>]*>[\s\S]*?idle/);
+    // open link only for valid project (autostart variant or live variant)
+    assert.match(body, /href="\/p\/docs-zh(\?autostart=1)?"/);
     assert.equal(body.includes('href="/p/broken"'), false);
+    assert.equal(body.includes('href="/p/broken?autostart=1"'), false);
   } finally {
     await cleanup();
   }
@@ -203,7 +206,7 @@ test('GET /p/:name: stopped project shows start button enabled, stop disabled', 
     const res = await app.request('/p/docs-zh');
     assert.equal(res.status, 200);
     const body = await res.text();
-    assert.match(body, /<h1>docs-zh<\/h1>/);
+    assert.match(body, /<h1[^>]*>docs-zh<\/h1>/);
     assert.match(body, /id="btn-start"(?![^>]*disabled)/);
     assert.match(body, /id="btn-stop"[^>]*disabled/);
     assert.match(body, /tag[^>]*>stopped/);
@@ -227,8 +230,11 @@ test('GET /p/:name: running project disables start, enables stop, shows pid+port
     const body = await res.text();
     assert.match(body, /id="btn-start"[^>]*disabled/);
     assert.match(body, /id="btn-stop"(?![^>]*disabled)/);
-    assert.match(body, /port=4101/);
-    assert.match(body, /tag run[^>]*>running/);
+    // pagehead pill carries the live status text
+    assert.match(body, /pill[^>]*>[\s\S]*?running · :4101/);
+    // status card shows port + pid
+    assert.match(body, /tag run[^>]*>:4101</);
+    assert.match(body, /pid [0-9]/);
   } finally {
     await cleanup();
   }

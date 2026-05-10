@@ -1515,14 +1515,15 @@ dry_run=1 时：
 
 ### 17.4 前端形态
 
-**SSR + Hono JSX**，零前端构建链：
+**SSR + Hono `html` 模板**，零前端构建链：
 
-- 路由处理函数返回 `c.html(<Page />)`；`<Page />` 是 TSX 组件、Hono 内置 JSX runtime 渲染。
-- 极少量交互（提交 ask、轮询任务状态、过滤 runs 列表）走原生 `<form>` + `fetch()` + 少量 vanilla JS（每个页面 < 30 行）。
-- 静态资源（CSS）打到 `dist/console/static/` 随包发；图标走 emoji / unicode（避免引入图标库）。
-- **无 React / Vue / Svelte / Vite**。
+- 路由处理函数返回 `c.html(...)`；模板用 Hono 内置 `html\`...\`` tagged literal（不是 JSX/TSX）。
+- 交互（提交 ask、tab 切换、runs 过滤、autostart）走原生 `fetch()` + vanilla JS。每页 inline 脚本 ≤ 200 行；不引入构建链、不引入 React/Vue/Svelte。
+- 浏览器侧 markdown 渲染由 `marked` 提供（v18，作为 `dependencies`）；console 自身在 `GET /console/static/marked.esm.js` 反代 `require.resolve('marked')` 的 ESM 入口，无 CDN、无外网依赖。
+- 静态资源 CSS 内联在 layout 模板里（`dist/` 即 dist，不需要单独 copy）；图标走 emoji / unicode（不引入图标库）。
+- **无 React / Vue / Svelte / Vite / Webpack / TSX 构建**。
 
-理由：交互复杂度低（3 个主页面，每页 < 5 个交互），SPA 收益不抵工程蛀虫。如未来需要实时 trace stream 等富交互，再评审升级（§17.8 留口子）。
+理由：作者本机 dogfood 工具，交互复杂度可控（home/project/runs/report 四视图），SPA 收益不抵工程负担。`marked` 是唯一例外——markdown 手写正则在 ask answer / 报告渲染上回报太低、错误代价高（cite 锚点错位会误导评测判断）。如未来要实时 trace stream / 富交互，再评审升级（§17.8 留口子）。
 
 ### 17.5 与现有模块的依赖关系
 

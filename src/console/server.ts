@@ -28,10 +28,13 @@ import { renderHome } from './pages/home.ts';
 import { renderProject } from './pages/project.ts';
 import { renderReport } from './pages/report.ts';
 import { renderRuns } from './pages/runs.ts';
+import { getStaticAsset } from './static.ts';
 
 export type ConsoleAppDeps = {
   workspacePath: string;
   consolePort: number;
+  /** Used by the layout footer/nav; default 15 keeps test surface stable. */
+  idleTimeoutMin?: number;
   registry: ProcessRegistry;
   /**
    * fetch implementation used to reverse-proxy ask calls into child
@@ -56,6 +59,28 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   const app = new Hono();
   const fetchFn = deps.fetchFn ?? globalThis.fetch;
   const ops = deps.ops ?? defaultOps;
+  const idleTimeoutMin = deps.idleTimeoutMin ?? 15;
+
+  function buildNav(current: string | null): {
+    projects: ProjectListing[];
+    current: string | null;
+    running: Set<string>;
+    consolePort: number;
+    idleTimeoutMin: number;
+  } {
+    const projects = scanProjects(deps.workspacePath);
+    const liveSet = new Set<string>();
+    for (const e of deps.registry.list()) {
+      if (!e.exited) liveSet.add(e.name);
+    }
+    return {
+      projects,
+      current,
+      running: liveSet,
+      consolePort: deps.consolePort,
+      idleTimeoutMin,
+    };
+  }
 
   app.get('/', (c) => {
     const projects = scanProjects(deps.workspacePath);
@@ -64,10 +89,24 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       renderHome({
         workspacePath: deps.workspacePath,
         consolePort: deps.consolePort,
+        idleTimeoutMin,
         projects,
         running,
       }),
     );
+  });
+
+  app.get('/console/static/:name', (c) => {
+    const name = c.req.param('name');
+    const asset = getStaticAsset(name);
+    if (!asset) return c.text(`unknown asset: ${name}`, 404);
+    return new Response(asset.body, {
+      status: 200,
+      headers: {
+        'Content-Type': asset.contentType,
+        'Cache-Control': 'no-cache',
+      },
+    });
   });
 
   app.get('/api/projects', (c) => {
@@ -98,7 +137,10 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const running = deps.registry.list().find((e) => e.name === name && !e.exited) ?? null;
     const stateRoot = projectStateRoot(deps.workspacePath, project);
     const reports = stateRoot ? listReports(stateRoot) : [];
-    return c.html(renderProject({ project, running, reports }));
+    const autostart = c.req.query('autostart') === '1';
+    return c.html(
+      renderProject({ project, running, reports, autostart, nav: buildNav(name) }),
+    );
   });
 
   app.get('/p/:name/reports/:file', (c) => {
@@ -112,7 +154,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const path = join(stateRoot, 'reports', file);
     if (!existsSync(path)) return c.text(`not found: ${file}`, 404);
     const body = readFileSync(path, 'utf8');
-    return c.html(renderReport({ projectName: name, filename: file, body }));
+    return c.html(renderReport({ projectName: name, filename: file, body, nav: buildNav(name) }));
   });
 
   app.get('/p/:name/runs', (c) => {
@@ -124,7 +166,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const limitRaw = c.req.query('limit');
     const limit = limitRaw !== undefined ? Math.max(1, Math.min(500, Number(limitRaw) || 50)) : 50;
     const lines = tailRuns({ stateRoot, count: limit });
-    return c.html(renderRuns({ projectName: name, lines, limit }));
+    return c.html(renderRuns({ projectName: name, lines, limit, nav: buildNav(name) }));
   });
 
   app.get('/api/projects/:name/runs', (c) => {

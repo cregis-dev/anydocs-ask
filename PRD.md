@@ -678,7 +678,7 @@ Golden case schema（jsonl，每行）：
 - **状态**：console 进程**自身无持久化状态**——所有"配置"读 anydocs.ask.json，所有"数据"读 `<workspace>/state/<projectId>/`。重启 console 不丢任何东西。
 - **认证**：v1 不做 token / 登录——基于 127.0.0.1 + 本机 dev tool 假设。后续如果对外开放，重新评审。
 - **打包**：随 `@anydocs/ask` 同包发布；前端构建产物（如有）打进 dist。无独立 npm 包。
-- **依赖**：console 不引入新核心运行时依赖（Hono / SQLite 已在）；前端走 Hono `html` 模板（零 JSX、零构建链）。
+- **依赖**：后端复用既有依赖（Hono / SQLite / better-sqlite3），不再加新核心运行时依赖。前端走 Hono `html` 模板 SSR，零构建链；浏览器侧仅引入 `marked`（作为运行时依赖，由 console 自身的 `/console/static/marked.esm.js` 端点反代 `node_modules/marked` 的 ESM 入口提供——无 CDN、无外网依赖、与 `127.0.0.1` 内部 dev tool 假设一致）。
 
 ### 13.5.1 已知 v1 约束（操作时心里有数）
 

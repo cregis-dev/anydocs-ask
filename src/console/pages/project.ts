@@ -1,238 +1,508 @@
 /**
  * Per-project page — ARCH §17.3.1 GET /p/:name.
  *
- * v1 scope (Commit C): status card + start/stop buttons. Ask 体验台 +
- * eval/analyze/golden triggers + reports/runs viewer arrive in Commits
- * D / E.
+ * Two-column layout:
+ *   left  · status + lifecycle (start/stop) + reports + ops triggers
+ *   right · ask 体验台 (Answer / Citations / Meta tabs) + activity link
+ *
+ * The ask response is rendered via the browser-side marked module loaded
+ * from /console/static/marked.esm.js. Retrieval trace (fused top-5) is
+ * NOT included by the v1 ask response — that arrives with v1.5 ?debug=1
+ * (PRD §13.6 / ARCH §17.8). Citations + meta cover what's available.
  */
 
 import { html, raw } from 'hono/html';
 import type { ProjectListing } from '../../workspace.ts';
 import type { RegisteredProcess } from '../registry.ts';
 import type { ReportListing } from '../ops.ts';
-import { layout, type Html } from './layout.ts';
+import { layout, type Html, type NavContext } from './layout.ts';
 
 export type ProjectViewModel = {
   project: ProjectListing;
   running: RegisteredProcess | null;
   reports: ReportListing[];
+  /** ?autostart=1 → page-load JS POSTs /start once before user interaction. */
+  autostart?: boolean;
+  nav?: NavContext;
 };
 
 export function renderProject(vm: ProjectViewModel): Html {
   const { project, running } = vm;
   const live = running !== null && !running.exited;
+  const autostartFlag = vm.autostart ? 'true' : 'false';
 
-  return layout({
-    title: project.name,
-    body: html`
-      <p class="mono"><a href="/">← projects</a></p>
-      <h1>${project.name}</h1>
+  const body = html`
+    <div class="pagehead">
+      <span class="crumb mono"><a href="/">projects</a> /</span>
+      <h1 class="mono">${project.name}</h1>
+      ${statusPill(live, running)}
+    </div>
 
-      <table>
-        <tbody>
-          <tr><th>path</th><td class="mono">${project.path}</td></tr>
-          <tr><th>projectId</th><td class="mono">${project.projectId ?? '—'}</td></tr>
-          <tr><th>valid</th><td>${
-            project.valid
-              ? html`<span class="tag ok">yes</span>`
-              : html`<span class="tag err">missing: ${project.missing.join(', ')}</span>`
-          }</td></tr>
-          <tr><th>indexed</th><td>${
-            project.indexed
-              ? html`<span class="tag ok">yes</span>`
-              : html`<span class="tag">no</span>`
-          }</td></tr>
-          <tr><th>process</th><td>${
-            live
-              ? html`<span class="tag run">running</span> <span class="mono muted">pid=${running!.pid} port=${running!.port}</span>`
-              : html`<span class="tag">stopped</span>`
-          }</td></tr>
-        </tbody>
-      </table>
+    ${project.valid
+      ? html`<div class="grid-2">${sidebar(project, live, running, vm.reports)} ${mainCol(project, live)}</div>`
+      : invalidNotice(project)}
 
-      <h2>actions</h2>
-      ${actionButtons(project.name, live, project.valid)}
+    <script>${raw(`
+      window.__CONSOLE__ = { name: ${JSON.stringify(project.name)}, valid: ${project.valid}, live: ${live}, autostart: ${autostartFlag} };
+    `)}</script>
+    <script type="module">${raw(BOOTSTRAP_SCRIPT)}</script>
+  `;
 
-      ${project.valid ? askPanel(project.name) : ''}
+  return layout({ title: project.name, body, nav: vm.nav });
+}
 
-      ${project.valid ? evalPanel(project.name) : ''}
+function statusPill(live: boolean, running: RegisteredProcess | null): Html {
+  if (live && running) {
+    return html`<span class="pill"><span class="dot run"></span>running · :${running.port} · pid ${running.pid}</span>`;
+  }
+  return html`<span class="pill"><span class="dot idle"></span>idle</span>`;
+}
 
-      <h2>reports</h2>
-      ${vm.reports.length === 0
-        ? html`<p class="muted">尚无报告。点上方按钮跑 eval / analyze 即可生成。</p>`
-        : reportsList(project.name, vm.reports)}
+function invalidNotice(project: ProjectListing): Html {
+  return html`
+    <div class="card">
+      <h2 style="color: var(--err);">project invalid</h2>
+      <p>missing: <code>${project.missing.join(', ')}</code></p>
+      <p class="muted">补齐 <code>pages/</code> 与 <code>navigation/</code>，刷新页面即可。</p>
+      <dl class="kv">
+        <dt>path</dt><dd class="mono">${project.path}</dd>
+        <dt>projectId</dt><dd class="mono">${project.projectId ?? '—'}</dd>
+      </dl>
+    </div>
+  `;
+}
 
-      <h2>runs</h2>
-      <p><a href="/p/${project.name}/runs">查看最近 runs →</a></p>
+function sidebar(
+  project: ProjectListing,
+  live: boolean,
+  running: RegisteredProcess | null,
+  reports: ReportListing[],
+): Html {
+  return html`
+    <div>
+      ${statusCard(project, live, running)}
+      ${lifecycleCard(live)}
+      ${opsCard()}
+      ${reportsCard(project.name, reports)}
+    </div>
+  `;
+}
 
-      <script>${actionScript(project.name)}</script>
-    `,
+function statusCard(
+  project: ProjectListing,
+  live: boolean,
+  running: RegisteredProcess | null,
+): Html {
+  return html`
+    <div class="card">
+      <h2>status</h2>
+      <dl class="kv">
+        <dt>path</dt><dd class="mono">${project.path}</dd>
+        <dt>projectId</dt><dd class="mono">${project.projectId ?? '—'}</dd>
+        <dt>indexed</dt><dd>${project.indexed ? html`<span class="tag ok">yes</span>` : html`<span class="tag">no</span>`}</dd>
+        <dt>process</dt><dd>${live && running ? html`<span class="tag run">:${running.port}</span> <span class="muted mono">pid ${running.pid}</span>` : html`<span class="tag">stopped</span>`}</dd>
+      </dl>
+    </div>
+  `;
+}
+
+function lifecycleCard(live: boolean): Html {
+  return html`
+    <div class="card">
+      <h2>lifecycle</h2>
+      <div class="btn-row">
+        <button id="btn-start" class="btn-primary" ${live ? 'disabled' : ''}>start</button>
+        <button id="btn-stop" ${live ? '' : 'disabled'}>stop</button>
+      </div>
+      <p class="status muted" id="lifecycle-status" style="margin-top: 8px; font-size: 12px; min-height: 16px;"></p>
+    </div>
+  `;
+}
+
+function opsCard(): Html {
+  return html`
+    <div class="card">
+      <h2>测评 · golden</h2>
+      <div class="btn-row">
+        <button id="btn-eval">run eval</button>
+        <button id="btn-analyze">analyze runs · 7d</button>
+      </div>
+      <div class="btn-row" style="margin-top: 8px;">
+        <button id="btn-golden-structure">golden ← structure</button>
+        <button id="btn-golden-runs">golden ← runs</button>
+      </div>
+      <p id="op-status" class="status muted" style="margin-top: 10px; font-size: 12px; min-height: 16px;"></p>
+      <p class="muted" style="font-size: 11.5px; margin-top: 6px;">
+        默认无 LLM 改写；要 <code>--llm-rewrite</code> 走命令行 <code class="mono">anydocs-ask golden generate</code>。
+      </p>
+    </div>
+  `;
+}
+
+function reportsCard(name: string, reports: ReportListing[]): Html {
+  if (reports.length === 0) {
+    return html`
+      <div class="card">
+        <h2>reports</h2>
+        <p class="empty" style="padding: 8px 0;">尚无报告。</p>
+      </div>
+    `;
+  }
+  const grouped = groupByKind(reports);
+  const blocks = (['eval', 'analyze', 'golden'] as const).map((kind) => {
+    const list = grouped[kind] ?? [];
+    if (list.length === 0) return html``;
+    return html`
+      <h3>${kind} <span class="muted" style="font-size: 11px;">${list.length}</span></h3>
+      <ul style="list-style: none; padding: 0; margin: 0 0 10px;">
+        ${list.slice(0, 8).map(
+          (r) => html`
+            <li style="padding: 4px 0; display: flex; gap: 8px; align-items: baseline;">
+              <span class="mono muted" style="font-size: 11.5px;">${r.date}</span>
+              <a class="mono" href="/p/${name}/reports/${r.filename}" style="font-size: 12px;">${r.filename.replace(/^\d{4}-\d{2}-\d{2}-/, '').replace(/\.md$/, '')}</a>
+            </li>
+          `,
+        )}
+      </ul>
+    `;
+  });
+  return html`
+    <div class="card">
+      <h2>reports <span class="muted" style="font-size: 11px;">${reports.length}</span></h2>
+      ${blocks}
+    </div>
+  `;
+}
+
+function groupByKind(reports: ReportListing[]): Record<string, ReportListing[]> {
+  const out: Record<string, ReportListing[]> = {};
+  for (const r of reports) {
+    const list = out[r.kind] ?? (out[r.kind] = []);
+    list.push(r);
+  }
+  return out;
+}
+
+function mainCol(project: ProjectListing, live: boolean): Html {
+  return html`
+    <div>
+      ${askCard(live)}
+      <div class="card">
+        <h2>activity</h2>
+        <p>
+          <a href="/p/${project.name}/runs">查看最近 runs →</a>
+        </p>
+        <p class="muted" style="font-size: 12px;">
+          ask 体验台默认 <code>?dry_run=1</code>，本页发起的提问 <strong>不会</strong> 写入 runs。<br />
+          想看真实流量，去 Reader 直调 <code>/v1/ask</code>，或在 v1.5 用"灌真实流量"开关。
+        </p>
+      </div>
+    </div>
+  `;
+}
+
+function askCard(live: boolean): Html {
+  return html`
+    <div class="card">
+      <div class="card-head" style="padding: 0 0 10px; border-bottom: 1px solid var(--bd-soft); margin: -2px 0 12px;">
+        <h2 style="margin: 0;">ask 体验台</h2>
+        <span class="muted" style="font-size: 11.5px;">dry-run · 不写 runs</span>
+      </div>
+      <textarea
+        id="ask-q"
+        rows="3"
+        placeholder="试一个问题，例如：JWT 怎么续期&#10;Cmd/Ctrl + Enter 提交"
+        ${live ? '' : 'disabled'}
+      ></textarea>
+      <div class="btn-row" style="margin-top: 8px;">
+        <button id="btn-ask" class="btn-primary" ${live ? '' : 'disabled'}>ask <span class="muted" style="font-size: 11px; font-weight: normal; margin-left: 4px;">⌘↵</span></button>
+        <span id="ask-status" class="status muted"></span>
+      </div>
+
+      <div id="ask-result" hidden style="margin-top: 14px;">
+        <div class="tabs" role="tablist">
+          <button role="tab" data-tab="answer" aria-selected="true">answer</button>
+          <button role="tab" data-tab="citations">citations <span id="cit-count" class="muted" style="font-size: 11px;"></span></button>
+          <button role="tab" data-tab="meta">meta</button>
+        </div>
+        <div id="tab-answer" class="tab-panel" data-tab="answer">
+          <div id="ask-answer-md" class="md"></div>
+          <div id="ask-clarify" hidden></div>
+          <div id="ask-error" hidden style="color: var(--err);"></div>
+        </div>
+        <div id="tab-citations" class="tab-panel" data-tab="citations" hidden>
+          <div id="ask-cite-list" class="cite-list"></div>
+          <p id="ask-cite-empty" class="empty" hidden>无 citations。</p>
+        </div>
+        <div id="tab-meta" class="tab-panel" data-tab="meta" hidden>
+          <dl id="ask-meta" class="kv"></dl>
+          <h3 style="margin-top: 14px;">raw response</h3>
+          <pre id="ask-raw" class="mono" style="font-size: 11.5px; max-height: 360px;"></pre>
+          <p class="muted" style="font-size: 11.5px; margin-top: 8px;">
+            完整 retrieval trace (fused top-5 / vec_rank / bm25_rank) 留给 v1.5 <code>?debug=1</code>（ARCH §17.8）。
+          </p>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+const BOOTSTRAP_SCRIPT = `
+import { marked } from '/console/static/marked.esm.js';
+
+marked.setOptions({ breaks: true, gfm: true });
+
+const cfg = window.__CONSOLE__ || { name: '', valid: false, live: false, autostart: false };
+
+const $ = (id) => document.getElementById(id);
+
+function lifecycleClick(action) {
+  return async () => {
+    const btn = $('btn-' + action);
+    const status = $('lifecycle-status');
+    if (!btn) return;
+    btn.disabled = true;
+    status.textContent = action + '...';
+    status.className = 'status muted';
+    try {
+      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/' + action, { method: 'POST' });
+      const body = await res.json();
+      if (!res.ok || body.ok === false) {
+        status.textContent = body.error || res.statusText;
+        status.className = 'status err';
+        btn.disabled = false;
+        return;
+      }
+      status.textContent = action + ' ok';
+      status.className = 'status ok';
+      setTimeout(() => location.reload(), 350);
+    } catch (e) {
+      status.textContent = 'network error: ' + (e && e.message ? e.message : e);
+      status.className = 'status err';
+      btn.disabled = false;
+    }
+  };
+}
+
+if ($('btn-start')) $('btn-start').addEventListener('click', lifecycleClick('start'));
+if ($('btn-stop')) $('btn-stop').addEventListener('click', lifecycleClick('stop'));
+
+function bindOp(id, path) {
+  const btn = $(id);
+  const status = $('op-status');
+  if (!btn || !status) return;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    status.textContent = id.replace('btn-', '') + '...';
+    status.className = 'status muted';
+    const t0 = Date.now();
+    try {
+      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + path, { method: 'POST' });
+      const body = await res.json();
+      const dt = Date.now() - t0;
+      if (!res.ok || body.ok === false) {
+        status.textContent = 'failed (' + dt + 'ms): ' + (body.error || res.statusText);
+        status.className = 'status err';
+      } else if (body.reportPath) {
+        status.textContent = 'done (' + dt + 'ms) — reload for new report';
+        status.className = 'status ok';
+        setTimeout(() => location.reload(), 600);
+      } else {
+        status.textContent = 'done (' + dt + 'ms): ' + (body.message || 'ok');
+        status.className = 'status ok';
+        setTimeout(() => location.reload(), 600);
+      }
+    } catch (e) {
+      status.textContent = 'network error: ' + (e && e.message ? e.message : e);
+      status.className = 'status err';
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+bindOp('btn-eval', '/eval');
+bindOp('btn-analyze', '/analyze');
+bindOp('btn-golden-structure', '/golden/generate?from=structure');
+bindOp('btn-golden-runs', '/golden/generate?from=runs');
+
+function setActiveTab(name) {
+  document.querySelectorAll('[role=tab]').forEach((b) => {
+    b.setAttribute('aria-selected', b.dataset.tab === name ? 'true' : 'false');
+  });
+  document.querySelectorAll('.tab-panel').forEach((p) => {
+    p.hidden = p.dataset.tab !== name;
+  });
+}
+document.querySelectorAll('[role=tab]').forEach((b) => {
+  b.addEventListener('click', () => setActiveTab(b.dataset.tab));
+});
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]),
+  );
+}
+
+function renderAnswer(body) {
+  const result = $('ask-result');
+  const ansEl = $('ask-answer-md');
+  const clarEl = $('ask-clarify');
+  const errEl = $('ask-error');
+  ansEl.innerHTML = '';
+  clarEl.hidden = true;
+  clarEl.innerHTML = '';
+  errEl.hidden = true;
+  errEl.textContent = '';
+  result.hidden = false;
+
+  if (body && body.type === 'answer') {
+    let md = body.answer_md || '';
+    if (body.translation_notice) {
+      md = '> _translation notice:_ ' + body.translation_notice + '\\n\\n' + md;
+    }
+    ansEl.innerHTML = marked.parse(md);
+  } else if (body && body.type === 'clarify') {
+    clarEl.hidden = false;
+    let h = '<p class="muted" style="margin-bottom:8px;">需要澄清，请选一个范围：</p>';
+    h += '<p>' + escapeHtml(body.message || '') + '</p>';
+    if (Array.isArray(body.options) && body.options.length) {
+      h += '<ul style="padding-left:18px;">' + body.options.map((o) => '<li>' + escapeHtml(o.label || o.scope_id) + '</li>').join('') + '</ul>';
+    }
+    clarEl.innerHTML = h;
+  } else if (body && body.type === 'error') {
+    errEl.hidden = false;
+    errEl.textContent = (body.code || 'error') + ': ' + (body.message || '');
+  } else {
+    errEl.hidden = false;
+    errEl.textContent = 'unexpected response shape';
+  }
+}
+
+function renderCitations(body) {
+  const list = $('ask-cite-list');
+  const empty = $('ask-cite-empty');
+  const cnt = $('cit-count');
+  list.innerHTML = '';
+  if (!body || body.type !== 'answer' || !Array.isArray(body.citations) || body.citations.length === 0) {
+    empty.hidden = false;
+    cnt.textContent = '';
+    return;
+  }
+  empty.hidden = true;
+  cnt.textContent = '· ' + body.citations.length;
+  for (const c of body.citations) {
+    const div = document.createElement('div');
+    div.className = 'cite-item';
+    const crumb = Array.isArray(c.breadcrumb) ? c.breadcrumb.map((b) => b.title).join(' › ') : '';
+    const inPath = c.in_page_path || '';
+    const langTag = c.source_lang && c.source_lang !== c.lang ? ' <span class="tag warn">cross-lang ' + escapeHtml(c.source_lang) + '→' + escapeHtml(c.lang) + '</span>' : '';
+    div.innerHTML =
+      '<span class="cite">' + escapeHtml(c.citation_id || '·') + '</span>' +
+      '<div>' +
+      '  <div class="meta mono">' + escapeHtml(c.page_id || '') + (inPath ? ' · ' + escapeHtml(inPath) : '') + langTag + '</div>' +
+      '  <div style="font-weight:600; margin-bottom:4px;">' + escapeHtml(c.title || '') + '</div>' +
+      (crumb ? '<div class="muted" style="font-size:11.5px; margin-bottom:6px;">' + escapeHtml(crumb) + '</div>' : '') +
+      '  <div class="snippet">' + escapeHtml(c.snippet || '') + '</div>' +
+      '</div>';
+    list.appendChild(div);
+  }
+}
+
+function renderMeta(body, latencyMs, httpStatus) {
+  const meta = $('ask-meta');
+  const raw = $('ask-raw');
+  meta.innerHTML = '';
+  function row(k, v) {
+    const dt = document.createElement('dt');
+    dt.textContent = k;
+    const dd = document.createElement('dd');
+    dd.className = 'mono';
+    dd.textContent = v == null ? '—' : String(v);
+    meta.appendChild(dt);
+    meta.appendChild(dd);
+  }
+  row('http', httpStatus);
+  row('round-trip', latencyMs + ' ms');
+  if (body && body.type) row('type', body.type);
+  if (body && body.type === 'answer') {
+    row('latency_ms', body.latency_ms);
+    row('used_chunks', body.used_chunks);
+    row('answer_lang', body.answer_lang);
+    row('model', body.model);
+    if (body.translation_notice) row('translation', body.translation_notice);
+  }
+  row('dry_run', body && body._dry_run ? 'true' : 'false');
+  raw.textContent = JSON.stringify(body, null, 2);
+}
+
+const askBtn = $('btn-ask');
+const askQ = $('ask-q');
+const askStatus = $('ask-status');
+
+async function submitAsk() {
+  if (!askQ || !askBtn) return;
+  const question = askQ.value.trim();
+  if (!question) {
+    askStatus.textContent = '请输入问题';
+    askStatus.className = 'status err';
+    return;
+  }
+  askBtn.disabled = true;
+  askStatus.textContent = 'asking...';
+  askStatus.className = 'status muted';
+  const t0 = Date.now();
+  try {
+    const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question }),
+    });
+    const text = await res.text();
+    let body;
+    try { body = JSON.parse(text); } catch (_) { body = { type: 'error', code: 'invalid_response', message: text }; }
+    const dt = Date.now() - t0;
+    askStatus.textContent = 'http ' + res.status + ' · ' + dt + 'ms';
+    askStatus.className = res.ok ? 'status ok' : 'status err';
+    renderAnswer(body);
+    renderCitations(body);
+    renderMeta(body, dt, res.status);
+    setActiveTab('answer');
+  } catch (e) {
+    askStatus.textContent = 'network error: ' + (e && e.message ? e.message : e);
+    askStatus.className = 'status err';
+  } finally {
+    askBtn.disabled = false;
+  }
+}
+if (askBtn) askBtn.addEventListener('click', submitAsk);
+if (askQ) {
+  askQ.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      submitAsk();
+    }
   });
 }
 
-function evalPanel(name: string): Html {
-  void name;
-  return html`
-    <h2>测评 · golden</h2>
-    <p>
-      <button id="btn-eval">run eval</button>
-      <button id="btn-analyze">analyze runs (since 7d)</button>
-      <button id="btn-golden-structure">golden generate (from structure, no LLM)</button>
-      <button id="btn-golden-runs">golden generate (from runs)</button>
-      <span id="op-status" class="muted"></span>
-    </p>
-    <p class="muted" style="font-size: 12px;">
-      golden generate 默认走 --no-llm-rewrite 以避免意外费用；如需 LLM 改写，
-      用命令行 <code class="mono">anydocs-ask golden generate</code>。
-    </p>
-  `;
-}
-
-function reportsList(name: string, reports: ReportListing[]): Html {
-  const rows = reports.map(
-    (r) => html`
-      <tr>
-        <td class="mono">${r.date}</td>
-        <td><span class="tag">${r.kind}</span></td>
-        <td><a class="mono" href="/p/${name}/reports/${r.filename}">${r.filename}</a></td>
-        <td class="mono muted" style="font-size: 12px;">${r.sizeBytes}B</td>
-      </tr>
-    `,
-  );
-  return html`
-    <table>
-      <thead><tr><th>date</th><th>kind</th><th>file</th><th>size</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-  `;
-}
-
-function askPanel(name: string): Html {
-  return html`
-    <h2>ask 体验台 <span class="muted" style="font-size: 12px;">(dry-run · 不写 runs)</span></h2>
-    <p>
-      <textarea id="ask-q" rows="3" style="width: 100%; font-family: inherit; font-size: 13px;"
-                placeholder="提一个问题，例如：JWT 怎么续期"></textarea>
-    </p>
-    <p>
-      <button id="btn-ask">ask</button>
-      <span id="ask-status" class="muted"></span>
-    </p>
-    <pre id="ask-out" class="mono" style="background: #f5f5f522; padding: 10px; border-radius: 4px; max-height: 480px; overflow: auto; white-space: pre-wrap; word-break: break-word;"></pre>
-  `;
-}
-
-function actionButtons(name: string, running: boolean, valid: boolean): Html {
-  if (!valid) {
-    return html`<p class="muted">project invalid; fix <code>pages/</code> and <code>navigation/</code> first.</p>`;
-  }
-  return html`
-    <p>
-      <button id="btn-start" ${running ? 'disabled' : ''}>start</button>
-      <button id="btn-stop" ${running ? '' : 'disabled'}>stop</button>
-      <span id="status" class="muted"></span>
-    </p>
-  `;
-}
-
-function actionScript(name: string): Html {
-  // Vanilla JS — under 30 lines per ARCH §17.4. Buttons fire fetch() then
-  // reload on success; on failure, surface the server error inline.
-  // `name` is interpolated as a JSON string; raw() prevents hono's html
-  // tag from escaping the surrounding double quotes (browsers don't HTML-
-  // decode <script> contents, so &quot; would produce a JS SyntaxError).
-  const safeName = raw(JSON.stringify(name));
-  return html`
-    (function () {
-      var name = ${safeName};
-      var status = document.getElementById('status');
-      function bind(id, action) {
-        var b = document.getElementById(id);
-        if (!b) return;
-        b.addEventListener('click', async function () {
-          b.disabled = true;
-          status.textContent = action + '...';
-          try {
-            var res = await fetch('/api/projects/' + encodeURIComponent(name) + '/' + action, { method: 'POST' });
-            var body = await res.json();
-            if (!res.ok || body.ok === false) {
-              status.textContent = (body.error || res.statusText) + '';
-              b.disabled = false;
-              return;
-            }
-            location.reload();
-          } catch (e) {
-            status.textContent = 'network error: ' + (e && e.message ? e.message : e);
-            b.disabled = false;
-          }
-        });
+// Autostart: if /p/:name?autostart=1 and child is not yet live, kick off
+// /start once on page load. Idempotent — registry returns reused:true if
+// the child is already running between the request landing and JS firing.
+if (cfg.valid && cfg.autostart && !cfg.live) {
+  const status = $('lifecycle-status');
+  if (status) { status.textContent = 'auto-starting...'; status.className = 'status muted'; }
+  fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/start', { method: 'POST' })
+    .then((r) => r.json())
+    .then((body) => {
+      if (body && body.ok) {
+        if (status) { status.textContent = 'started · :' + body.port; status.className = 'status ok'; }
+        setTimeout(() => location.replace(location.pathname), 500);
+      } else if (status) {
+        status.textContent = (body && body.error) || 'autostart failed';
+        status.className = 'status err';
       }
-      bind('btn-start', 'start');
-      bind('btn-stop', 'stop');
-
-      var opStatus = document.getElementById('op-status');
-      function bindOp(id, path) {
-        var b = document.getElementById(id);
-        if (!b || !opStatus) return;
-        b.addEventListener('click', async function () {
-          b.disabled = true;
-          opStatus.textContent = id.replace('btn-', '') + '...';
-          var t0 = Date.now();
-          try {
-            var res = await fetch('/api/projects/' + encodeURIComponent(name) + path, { method: 'POST' });
-            var body = await res.json();
-            var dt = Date.now() - t0;
-            if (!res.ok || body.ok === false) {
-              opStatus.textContent = 'failed (' + dt + 'ms): ' + (body.error || res.statusText);
-            } else if (body.reportPath) {
-              opStatus.textContent = 'done (' + dt + 'ms) — reload for new report';
-              setTimeout(function () { location.reload(); }, 600);
-            } else {
-              opStatus.textContent = 'done (' + dt + 'ms): ' + (body.message || 'ok');
-              setTimeout(function () { location.reload(); }, 600);
-            }
-          } catch (e) {
-            opStatus.textContent = 'network error: ' + (e && e.message ? e.message : e);
-          } finally {
-            b.disabled = false;
-          }
-        });
-      }
-      bindOp('btn-eval', '/eval');
-      bindOp('btn-analyze', '/analyze');
-      bindOp('btn-golden-structure', '/golden/generate?from=structure');
-      bindOp('btn-golden-runs', '/golden/generate?from=runs');
-
-      var askBtn = document.getElementById('btn-ask');
-      var askQ = document.getElementById('ask-q');
-      var askOut = document.getElementById('ask-out');
-      var askStatus = document.getElementById('ask-status');
-      if (askBtn && askQ && askOut && askStatus) {
-        askBtn.addEventListener('click', async function () {
-          var question = askQ.value.trim();
-          if (!question) { askStatus.textContent = '请输入问题'; return; }
-          askBtn.disabled = true;
-          askStatus.textContent = 'asking...';
-          askOut.textContent = '';
-          var t0 = Date.now();
-          try {
-            var res = await fetch('/api/projects/' + encodeURIComponent(name) + '/ask', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ question: question })
-            });
-            var text = await res.text();
-            var pretty;
-            try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (e) { pretty = text; }
-            askOut.textContent = pretty;
-            askStatus.textContent = 'http ' + res.status + ' · ' + (Date.now() - t0) + 'ms';
-          } catch (e) {
-            askStatus.textContent = 'network error: ' + (e && e.message ? e.message : e);
-          } finally {
-            askBtn.disabled = false;
-          }
-        });
-      }
-    })();
-  `;
+    })
+    .catch((e) => {
+      if (status) { status.textContent = 'autostart err: ' + e.message; status.className = 'status err'; }
+    });
 }
+`;
