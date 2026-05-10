@@ -40,6 +40,7 @@ import { runRunsExport, runRunsTail } from './commands/runs.ts';
 import { runGoldenGenerate, runGoldenReview } from './commands/golden.ts';
 import { runEval } from './commands/eval.ts';
 import { runAnalyzeRuns } from './commands/analyze.ts';
+import { runConsole } from './commands/console.ts';
 import {
   assertProjectRoot,
   ensureStateRoot,
@@ -110,6 +111,7 @@ Usage:
   anydocs-ask analyze runs     <projectRoot> [--since 7d]
   anydocs-ask workspace init
   anydocs-ask workspace ls
+  anydocs-ask console          [--port 4100] [--idle-timeout-min 15]
   anydocs-ask --help
 
 <projectRoot> may be a filesystem path or a bare name resolved against
@@ -139,6 +141,33 @@ async function main(): Promise<number> {
 
   const workspaceFlag = typeof flags.workspace === 'string' ? flags.workspace : undefined;
   const workspace = resolveWorkspace(workspaceFlag);
+
+  // `console` is workspace-scoped (no projectRoot); special-case before
+  // the projectArg parsing below.
+  if (command === 'console') {
+    const ensured = ensureWorkspace(workspace.path);
+    if (ensured.rootCreated) {
+      process.stdout.write(`anydocs-ask: created workspace at ${workspace.path}\n`);
+    }
+    const portRaw = typeof flags.port === 'string' ? Number(flags.port) : undefined;
+    const idleRaw =
+      typeof flags['idle-timeout-min'] === 'string'
+        ? Number(flags['idle-timeout-min'])
+        : undefined;
+    if (portRaw !== undefined && !Number.isInteger(portRaw)) {
+      process.stderr.write(`error: --port must be an integer\n`);
+      return 2;
+    }
+    if (idleRaw !== undefined && (!Number.isInteger(idleRaw) || idleRaw < 1)) {
+      process.stderr.write(`error: --idle-timeout-min must be a positive integer\n`);
+      return 2;
+    }
+    return await runConsole({
+      workspace,
+      ...(portRaw !== undefined ? { port: portRaw } : {}),
+      ...(idleRaw !== undefined ? { idleTimeoutMin: idleRaw } : {}),
+    });
+  }
 
   // Workspace-management subcommand: positional[0] is the action (init / ls).
   if (command === 'workspace') {
