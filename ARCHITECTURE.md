@@ -634,6 +634,18 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
   - 实现细节：embedding_cache 的 `model` 列在量化时附 `:q8` 后缀（`Xenova/bge-m3:q8`），fp32/int8 互不污染缓存；切换 `preferQuantized` 不会静默用错维度向量
   - v1 默认仍 fp32（保留召回保真），但**生产 / VPS 场景推荐 `preferQuantized: true`**；仅在 PRD §8 召回回归测试发现明显损失才回 fp32
 
+### transformers.js 模型缓存路径（2026-05-11 修订）
+
+`@huggingface/transformers` 默认 `cacheDir` 指向 `node_modules/.pnpm/.../@huggingface/transformers/.cache/` — pnpm 任意装包 / 多 worktree 都会清空它，强制 ~2.2GB bge-m3 重下载。v1 显式接管 cacheDir，**默认落 `~/.cache/huggingface/anydocs-ask/transformers/`**，跨 worktree / 装包稳定。
+
+**解析顺序**（高优先级先）：
+
+1. env `ANYDOCS_TRANSFORMERS_CACHE`（运维 / CI 覆盖）
+2. `anydocs.ask.json` 的 `embedding.cacheDir`（项目级显式）
+3. 默认 `~/.cache/huggingface/anydocs-ask/transformers/`
+
+`Bgem3Embedder.warmUp()` 启动时 mkdir -p 此目录后再交给 transformers.js（避免 getModelFile 在缺父目录时报不透明的 "Unable to get model file path or buffer"）。`serve` 启动日志会打印 `hf-cache: <绝对路径>`，便于排查。
+
 ---
 
 ## 9. 配置
@@ -646,7 +658,8 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
     "provider": "local",
     "model": "bge-m3",
     "allowSingleLangFallback": false,
-    "preferQuantized": false
+    "preferQuantized": false,
+    "cacheDir": null
   },
   "llm": {
     "provider": "anthropic",
