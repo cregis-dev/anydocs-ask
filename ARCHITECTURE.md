@@ -1495,7 +1495,7 @@ ProcessRegistry {
 | 路由 | 内容 |
 |---|---|
 | `GET /` | 项目选择器（卡片网格） |
-| `GET /p/:name` | 项目详情：左 sidebar（status / lifecycle / 数据收集 / reports）+ 右主区 **三 tab** （Ask / Eval / Activity）。tab 由 hash `#tab` 持久化、刷新保留。详 §17.3.4 |
+| `GET /p/:name` | 项目详情：左 sidebar（status / lifecycle / Golden / Analyze / reports）+ 右主区 **三 tab** （Ask / Eval / Activity）。tab 由 hash `#tab` 持久化、刷新保留。详 §17.3.4 |
 | `GET /p/:name/reports/:file` | 渲染 `state/<projectId>/reports/<file>.md` |
 | `GET /p/:name/runs` | 分页 jsonl 查看（最近 50，可过滤 query/confidence/latency） |
 

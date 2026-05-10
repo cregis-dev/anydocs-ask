@@ -129,7 +129,7 @@ function lifecycleCard(live: boolean): Html {
 function opsCard(): Html {
   return html`
     <div class="card">
-      <h2>数据收集</h2>
+      <h2>Golden / Analyze</h2>
       <div class="btn-row">
         <button id="btn-analyze">analyze runs · 7d</button>
       </div>
@@ -139,8 +139,10 @@ function opsCard(): Html {
       </div>
       <p id="op-status" class="status muted" style="margin-top: 10px; font-size: 12px; min-height: 16px;"></p>
       <p class="muted" style="font-size: 11.5px; margin-top: 6px;">
-        eval workflow 在右侧 <strong>Eval</strong> tab。<br />
-        golden 默认无 LLM 改写；要 <code>--llm-rewrite</code> 走命令行 <code class="mono">anydocs-ask golden generate</code>。
+        Eval workflow 在右侧 <strong>Eval</strong> tab；这里是上游：<br />
+        · analyze runs 跑流量诊断报告<br />
+        · golden generate 生成回归题候选（待 <code class="mono">cases.candidate.jsonl</code> 审）<br />
+        默认无 LLM 改写；要 <code>--llm-rewrite</code> 走命令行。
       </p>
     </div>
   `;

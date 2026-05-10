@@ -675,7 +675,7 @@ Golden case schema（jsonl，每行）：
   - Run eval：dropdown 选对比目标（previous / pinned / 任一历史报告），按钮触发；结果落 `state/<id>/reports/<date>-eval.md`，自动刷新视图
   - 最近报告 markdown inline 渲染（同 reports 页面）
   - history 表：所有 eval 报告 + R@5 / Cit / Ans 三列 + sparkline 趋势（≥3 报告时显示，unicode block 零依赖）
-- **数据收集** side card：保留 analyze runs / golden ← structure / golden ← runs 三个按钮（这些不是日常主路径）
+- **Golden / Analyze** side card（Eval 上游辅助）：保留 analyze runs / golden ← structure / golden ← runs 三个按钮（这些不是日常主路径）
 - 实现上**直接调用既有 CLI 内部函数**，不 fork shell；eval CLI 协议**未改**——pin baseline 只是 console 端读指针文件，转译成 `--baseline <path>` 传给 `runEval()`。
 - 详 ARCH §17.3.4。
 
