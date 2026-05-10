@@ -35,6 +35,7 @@ import {
   readReportBody,
   writePinnedBaseline,
 } from './eval-state.ts';
+import { loadIndexSnapshot, type ChildIndexStatus } from './index-state.ts';
 
 export type ConsoleAppDeps = {
   workspacePath: string;
@@ -134,7 +135,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   // Per-project page + lifecycle endpoints (ARCH §17.3.1 / §17.3.2)
   // -----------------------------------------------------------------------
 
-  app.get('/p/:name', (c) => {
+  app.get('/p/:name', async (c) => {
     const name = c.req.param('name');
     const project = findProject(deps.workspacePath, name);
     if (!project) {
@@ -149,6 +150,27 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       stateRoot && evalSnapshot?.latest
         ? readReportBody(stateRoot, evalSnapshot.latest.filename)
         : null;
+    let indexSnapshot;
+    if (project.valid) {
+      indexSnapshot = await loadIndexSnapshot(project.path);
+      // Best-effort: ask the child for DB-side counts when it's running.
+      const port = deps.registry.getPort(name);
+      if (port !== null) {
+        try {
+          const res = await fetchFn(`http://127.0.0.1:${port}/v1/index/status`, {
+            signal: AbortSignal.timeout(800),
+          });
+          if (res.ok) {
+            indexSnapshot = {
+              ...indexSnapshot,
+              dbStatus: (await res.json()) as ChildIndexStatus,
+            };
+          }
+        } catch {
+          // child responded 503 (warming) or fetch threw — leave dbStatus null
+        }
+      }
+    }
     return c.html(
       renderProject({
         project,
@@ -158,6 +180,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         nav: buildNav(name),
         ...(evalSnapshot ? { evalSnapshot } : {}),
         latestEvalReportBody,
+        ...(indexSnapshot ? { indexSnapshot } : {}),
       }),
     );
   });
@@ -257,6 +280,38 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const name = c.req.param('name');
     const stopped = deps.registry.stop(name);
     return c.json({ ok: true, stopped });
+  });
+
+  // ---------------------------------------------------------------------
+  // Index reindex — reverse-proxy to child /v1/index/rebuild (ARCH §17.3.5)
+  // ---------------------------------------------------------------------
+  app.post('/api/projects/:name/reindex', async (c) => {
+    const name = c.req.param('name');
+    const project = findProject(deps.workspacePath, name);
+    if (!project) return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
+    const port = deps.registry.getPort(name);
+    if (port === null) {
+      return c.json(
+        { ok: false, error: 'child not running — start the project first' },
+        502,
+      );
+    }
+    deps.registry.touch(name);
+    try {
+      const res = await fetchFn(`http://127.0.0.1:${port}/v1/index/rebuild`, {
+        method: 'POST',
+      });
+      const text = await res.text();
+      return new Response(text, {
+        status: res.status,
+        headers: { 'Content-Type': res.headers.get('content-type') ?? 'application/json' },
+      });
+    } catch (err) {
+      return c.json(
+        { ok: false, error: `proxy failed: ${(err as Error).message}` },
+        502,
+      );
+    }
   });
 
   // -----------------------------------------------------------------------

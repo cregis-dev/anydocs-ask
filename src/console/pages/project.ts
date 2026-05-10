@@ -17,7 +17,9 @@ import type { RegisteredProcess } from '../registry.ts';
 import type { ReportListing } from '../ops.ts';
 import { layout, type Html, type NavContext } from './layout.ts';
 import { renderEvalTab } from './project-eval-tab.ts';
+import { renderIndexTab } from './project-index-tab.ts';
 import type { EvalTabSnapshot } from '../eval-state.ts';
+import type { IndexSnapshot } from '../index-state.ts';
 
 export type ProjectViewModel = {
   project: ProjectListing;
@@ -30,6 +32,8 @@ export type ProjectViewModel = {
   evalSnapshot?: EvalTabSnapshot;
   /** Latest eval report markdown body (or null). */
   latestEvalReportBody?: string | null;
+  /** Index tab snapshot (pages, navigation, validation). */
+  indexSnapshot?: IndexSnapshot;
 };
 
 export function renderProject(vm: ProjectViewModel): Html {
@@ -45,7 +49,7 @@ export function renderProject(vm: ProjectViewModel): Html {
     </div>
 
     ${project.valid
-      ? html`<div class="grid-2">${sidebar(project, live, running, vm.reports)} ${mainCol(project, live, vm.evalSnapshot, vm.latestEvalReportBody)}</div>`
+      ? html`<div class="grid-2">${sidebar(project, live, running, vm.reports)} ${mainCol(project, live, vm.evalSnapshot, vm.latestEvalReportBody, vm.indexSnapshot)}</div>`
       : invalidNotice(project)}
 
     <script>${raw(`
@@ -197,16 +201,27 @@ function mainCol(
   live: boolean,
   evalSnapshot: EvalTabSnapshot | undefined,
   latestEvalReportBody: string | null | undefined,
+  indexSnapshot: IndexSnapshot | undefined,
 ): Html {
   return html`
     <div>
       <div class="tabs project-tabs" role="tablist">
         <button role="tab" data-project-tab="ask" aria-selected="true">Ask</button>
+        <button role="tab" data-project-tab="index">Index</button>
         <button role="tab" data-project-tab="eval">Eval</button>
         <button role="tab" data-project-tab="activity">Activity</button>
       </div>
       <div id="ptab-ask" class="tab-panel" data-project-tab="ask">
         ${askCard(live)}
+      </div>
+      <div id="ptab-index" class="tab-panel" data-project-tab="index" hidden>
+        ${indexSnapshot
+          ? renderIndexTab({
+              projectName: project.name,
+              snapshot: indexSnapshot,
+              childLive: live,
+            })
+          : html`<div class="card"><p class="empty">index 状态不可用。</p></div>`}
       </div>
       <div id="ptab-eval" class="tab-panel" data-project-tab="eval" hidden>
         ${evalSnapshot
@@ -225,7 +240,8 @@ function mainCol(
           </p>
           <p class="muted" style="font-size: 12px;">
             ask 体验台默认 <code>?dry_run=1</code>，本页发起的提问 <strong>不会</strong> 写入 runs。<br />
-            打开右上 <strong>persist</strong> 开关后单次提问写 runs，<code>source=console</code> 标记。
+            打开右上 <strong>persist</strong> 开关后单次提问写 runs，<code>source=console</code> 标记。<br />
+            <em>Traffic tab（健康度 / 筛选 / Re-ask）即将上线，先用此处入口跳转。</em>
           </p>
         </div>
       </div>
@@ -492,9 +508,50 @@ document.querySelectorAll('[role=tab][data-project-tab]').forEach((b) => {
 });
 // Deep-link via hash on initial load.
 const initialTab = (location.hash || '').replace('#', '');
-if (['ask', 'eval', 'activity'].includes(initialTab)) {
+if (['ask', 'index', 'eval', 'activity'].includes(initialTab)) {
   setProjectTab(initialTab);
 }
+
+// ------------------------------------------------------------------
+// Index tab: reindex button (reverse-proxy to child /v1/index/rebuild)
+// ------------------------------------------------------------------
+function bindReindex() {
+  const btn = $('btn-reindex');
+  const status = $('reindex-status');
+  if (!btn || !status) return;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    status.textContent = 'reindexing...';
+    status.className = 'status muted';
+    const t0 = Date.now();
+    try {
+      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/reindex', {
+        method: 'POST',
+      });
+      const body = await res.json();
+      const dt = Date.now() - t0;
+      if (!res.ok || body.ok === false) {
+        status.textContent = 'failed (' + dt + 'ms): ' + (body.error || body.message || res.statusText);
+        status.className = 'status err';
+      } else {
+        const stats = body.stats || {};
+        const pages = stats.pages || {};
+        const chunks = stats.chunks || {};
+        status.textContent = 'done (' + dt + 'ms) — ' +
+          ((pages.inserted || 0) + (pages.updated || 0)) + ' pages, ' +
+          (chunks.totalChunks || 0) + ' chunks';
+        status.className = 'status ok';
+        setTimeout(() => location.reload(), 800);
+      }
+    } catch (e) {
+      status.textContent = 'network error: ' + (e && e.message ? e.message : e);
+      status.className = 'status err';
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+bindReindex();
 
 // ------------------------------------------------------------------
 // Eval tab: Run + pin/unpin baseline
