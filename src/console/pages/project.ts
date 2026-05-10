@@ -205,9 +205,17 @@ function mainCol(project: ProjectListing, live: boolean): Html {
 function askCard(live: boolean): Html {
   return html`
     <div class="card">
-      <div class="card-head" style="padding: 0 0 10px; border-bottom: 1px solid var(--bd-soft); margin: -2px 0 12px;">
+      <div class="card-head" style="padding: 0 0 10px; border-bottom: 1px solid var(--bd-soft); margin: -2px 0 12px; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
         <h2 style="margin: 0;">ask 体验台</h2>
-        <span class="muted" style="font-size: 11.5px;">dry-run · 不写 runs</span>
+        <label id="persist-toggle-wrap" style="display:inline-flex; align-items:center; gap:6px; font-size: 12px; cursor: pointer; user-select: none;">
+          <input type="checkbox" id="persist-toggle" style="margin: 0; accent-color: var(--err);" />
+          <span id="persist-toggle-label" class="muted">dry-run · 不写 runs</span>
+        </label>
+      </div>
+      <div id="persist-warning" hidden style="background: var(--err-bg); border: 1px solid var(--err); border-radius: 6px; padding: 8px 12px; margin-bottom: 10px; font-size: 12.5px; color: var(--err);">
+        ⚠ <strong>persist 已开启</strong>：这次提问会写入 runs jsonl，标记 source=console。
+        analyze / golden generate 默认排除，需要时 <code class="mono">--include-console</code> 显式纳入。
+        刷新页面会自动回到 dry-run。
       </div>
       <textarea
         id="ask-q"
@@ -443,6 +451,32 @@ document.querySelectorAll('[role=tab]').forEach((b) => {
   b.addEventListener('click', () => setActiveTab(b.dataset.tab));
 });
 
+// persist toggle — defaults OFF every page load (no localStorage / cookie
+// per PRD §13 decision: avoid accidentally leaving runs on for days).
+function setPersistUI(on) {
+  const label = $('persist-toggle-label');
+  const warn = $('persist-warning');
+  const btn = $('btn-ask');
+  if (on) {
+    if (label) { label.textContent = '⚠ persist · 写入 runs (source=console)'; label.className = ''; label.style.color = 'var(--err)'; label.style.fontWeight = '600'; }
+    if (warn) warn.hidden = false;
+    if (btn) { btn.style.background = 'var(--err)'; btn.style.borderColor = 'var(--err)'; }
+  } else {
+    if (label) { label.textContent = 'dry-run · 不写 runs'; label.className = 'muted'; label.style.color = ''; label.style.fontWeight = ''; }
+    if (warn) warn.hidden = true;
+    if (btn) { btn.style.background = ''; btn.style.borderColor = ''; }
+  }
+}
+const persistToggle = $('persist-toggle');
+if (persistToggle) {
+  persistToggle.checked = false;
+  persistToggle.addEventListener('change', () => setPersistUI(persistToggle.checked));
+  setPersistUI(false);
+}
+function isPersist() {
+  return !!(persistToggle && persistToggle.checked);
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]),
@@ -538,6 +572,10 @@ function renderMeta(body, latencyMs, httpStatus) {
     if (body.translation_notice) row('translation', body.translation_notice);
   }
   row('dry_run', body && body._dry_run ? 'true' : 'false');
+  if (body && body._persisted) {
+    row('persisted', 'true');
+    row('source', body._source || 'console');
+  }
   raw.textContent = JSON.stringify(body, null, 2);
 }
 
@@ -565,11 +603,13 @@ async function submitAsk() {
   askStatus.textContent = 'asking...';
   askStatus.className = 'status muted';
   const t0 = Date.now();
+  const persist = isPersist();
   try {
+    const payload = persist ? { question, persist: true } : { question };
     const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify(payload),
     });
     const text = await res.text();
     let body;
@@ -584,7 +624,8 @@ async function submitAsk() {
       pollHealth();
       return;
     }
-    askStatus.textContent = 'http ' + res.status + ' · ' + dt + 'ms';
+    const persistedTail = body && body._persisted ? ' · ✎ wrote runs (source=console)' : '';
+    askStatus.textContent = 'http ' + res.status + ' · ' + dt + 'ms' + persistedTail;
     askStatus.className = res.ok ? 'status ok' : 'status err';
     renderAnswer(body);
     renderCitations(body);

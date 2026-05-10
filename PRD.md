@@ -659,6 +659,11 @@ Golden case schema（jsonl，每行）：
 - 显示：检索 fused top-5（page / rrf_score / vec_rank / bm25_rank / nav_index_boost）、最终 answer markdown、citations、confidence、latency、model。
 - 子树反问触发时显示反问选项树（与 Reader 一致）。
 - 不提供"标记 bad"按钮（v1 不引入 feedback inbox 写入；详见 §13.6 与 v1.5 扩展点）。
+- **persist 开关**（2026-05-11 加入）：右上 checkbox，默认 **OFF**，开启时该次提交反代到 `/v1/ask?source=console`，子进程**落 runs，进 answer-cache**，`source` 字段标记 `"console"`。
+  - **不记忆**：刷新页面 / 切项目 / 切 tab 全部自动回到 dry-run，避免长期遗忘"还在灌库"。
+  - **下游 guard**：`analyze runs` / `golden generate --from runs` 默认排除 `source=="console"`，需要 `--include-console` 显式纳入。
+  - **UI 警告**：开启时按钮变红 + 顶端红条提示"将写 runs，源=console"；response 多 `_persisted: true` / `_source: "console"`。
+  - 详 ARCH §17.3.3 / §17.8。
 
 #### 13.4.3 测评批跑
 
@@ -690,7 +695,7 @@ Golden case schema（jsonl，每行）：
 
 | 项 | 理由 | 何时重评 |
 |---|---|---|
-| Ask 体验台直接落 runs（"灌真实流量"语义） | dry-run 与真实流量混淆会污染 §12.7 analyze；v1 默认走 dry-run，避免作者测试自动写库 | v1.5 加 `source: "console"` tag 后开 |
+| ~~Ask 体验台直接落 runs（"灌真实流量"语义）~~ | ~~dry-run 与真实流量混淆会污染 §12.7 analyze；v1 默认走 dry-run，避免作者测试自动写库~~ | **2026-05-11 落地**：UI 加 persist 切换（默认 OFF + 不记忆），runs 多 `source: "reader" \| "console"` 字段，analyze / golden 默认排除 console 流量，`--include-console` 显式纳入。详 §13.4.2 |
 | "标记 bad / good" 按钮 → feedback inbox | v1.5 §11 反馈回路尚未落地；过早引入会先于 β/γ 信号链 | v1.5 §11 落地时同步加 |
 | 检索 / LLM 完整 trace（prompt 全文 / token 用量 / 中间排序） | v1 ask 未埋点；要改 `/v1/ask` 协议加 `?debug=1` | v1.5 |
 | 写权限的 Golden 编辑器（候选审 / 通过 / 驳回 in-UI） | 文件优先；候选文件直接编辑 jsonl 即可，UI 化收益不抵复杂度 | 看作者真实使用频率 |
@@ -708,11 +713,12 @@ Golden case schema（jsonl，每行）：
 | 5 | 点击 "Run eval" 触发与 CLI `anydocs-ask eval <project>` **完全等价**的代码路径，输出报告位置一致 | 单元测试 + 集成对照 |
 | 6 | console 自身无 sqlite / 无落盘状态；删除 console 进程或 cwd 不影响任何项目数据 | 红队验证 |
 | 7 | 不暴露 0.0.0.0 / 不开认证：尝试从其他主机访问 4100 端口失败 | 集成测试 |
-| 8 | 同一 query 在 console Ask 体验台返回的 fused/answer/citations 与通过 Reader 直调 child `/v1/ask`（同 child 进程、同请求体）返回结果**逐字段一致**（仅 `_dry_run` 字段差异） | 集成对照 |
+| 8 | 同一 query 在 console Ask 体验台返回的 fused/answer/citations 与通过 Reader 直调 child `/v1/ask`（同 child 进程、同请求体）返回结果**逐字段一致**（仅 `_dry_run` / `_persisted` / `_source` 字段差异） | 集成对照 |
+| 9 | persist=true 时 runs jsonl 新行 `source` 字段 = `"console"`；`analyze runs` 默认排除该行；`--include-console` 显式纳入 | 单元 + 集成 |
 
 ### 13.8 v1.5 扩展点（不在本版做，仅留口子）
 
-- **Ask 体验台 → 真实流量**：增加"saved"按钮把 dry-run 结果以 `source: "console"` tag 落 runs，方便作者把高质量 dogfood query 灌进数据集。
+- ~~**Ask 体验台 → 真实流量**：增加"saved"按钮把 dry-run 结果以 `source: "console"` tag 落 runs，方便作者把高质量 dogfood query 灌进数据集。~~ **2026-05-11 落地**，详 §13.4.2 persist 段。
 - **β 标 bad → inbox**：与 v1.5 §11 一同接入；UI 仅写 `feedback/inbox/<date>-<id>.md`，不引入 DB。
 - **检索 / LLM trace 深挖**：要 `/v1/ask` 协议增 `?debug=1` 字段；console 默认带上、外部调用方仍按需。
 - **Golden 候选审**：等作者用一段时间反馈 jsonl 直编是否够用，再决定是否上 UI。

@@ -1237,6 +1237,7 @@ Baseline: 2026-04-25 (R@5=0.74, Cit=0.68, Ans=0.62)
   "query": "JWT 怎么续期",
   "filters": { "audience": "public", "version": null },
   "context_pageId": null,
+  "source": "reader",
   "retrieval": {
     "fused": [
       {
@@ -1273,6 +1274,7 @@ Baseline: 2026-04-25 (R@5=0.74, Cit=0.68, Ans=0.62)
 - `answer.confidence`：v1 用 rerank 后 `top_final_score` 作为代理；待 v1.5 引入 reranker model 后替换为模型分。
 - `answer.tokens_in / tokens_out`：v1 LLM 接口未暴露，写 `null`；后续 LLM 接口扩展时填充。schema 不变。
 - `answer.error_code`：仅 `kind='error'` 时非 null（如 `invalid_scope` / `invalid_question`）。
+- `source`：`"reader" | "console"`（2026-05-11 加入）。Reader 直调 `/v1/ask` 时填 `"reader"`；dev console persist 切换开启时填 `"console"`。**旧 jsonl 行缺此字段 → 读取时视为 `"reader"`**（`runs/types.ts:runSource()` 兜底）。`analyze` / `golden generate --from runs` 默认排除 `"console"`，`--include-console` 显式纳入。详 §17.3.3 / §17.8。
 
 **写入路径**：`server/app.ts` `/v1/ask` handler 调 `query/answer.ts:askWithTrace()` 拿到 `{ result, trace }`，末尾同步 append 一行 jsonl（`appendFileSync`；I/O 微秒级，相对 SQLite + LLM 可忽略；失败仅 stderr，不阻塞响应）。
 
@@ -1504,7 +1506,7 @@ ProcessRegistry {
 | `GET /api/projects` | 同 `workspace ls`，附 `running: bool` / `port?: number` |
 | `POST /api/projects/:name/start` | lazy spawn；返回 `{ port }` |
 | `POST /api/projects/:name/stop` | SIGTERM child，registry 删 entry |
-| `POST /api/projects/:name/ask` | 反代到 child `/v1/ask?dry_run=1`，**不**记录到 console 自身（无 console-side runs） |
+| `POST /api/projects/:name/ask` | 默认反代到 child `/v1/ask?dry_run=1`；body 含 `{persist: true}` 时改走 `/v1/ask?source=console`，child 落 runs 时打 `source="console"`。`persist` 字段被代理消费、不转发给 child |
 | `POST /api/projects/:name/eval` | in-process 调用 `eval()`；返回报告路径 |
 | `POST /api/projects/:name/analyze` | in-process 调用 `analyzeRuns()` |
 | `POST /api/projects/:name/golden/generate` | in-process 调用 `goldenGenerate({ from: 'structure'\|'runs' })` |
@@ -1512,17 +1514,22 @@ ProcessRegistry {
 | `GET /api/projects/:name/runs?limit=50&since=...` | 直读 `state/<projectId>/runs/*.jsonl`（不经 child） |
 | `GET /api/projects/:name/reports` | 列 `state/<projectId>/reports/*.md` |
 
-#### 17.3.3 `dry_run` 协议（v1 ask 增量）
+#### 17.3.3 `dry_run` / `source` 协议（v1 ask 增量）
 
-`POST /v1/ask` 增加可选 query parameter `dry_run`（boolean，默认 false）。
+`POST /v1/ask` 接受两个可选 query parameter：
 
-```
-dry_run=1 时：
-  - 跳过 RunsWriter.append() 调用（不写 runs jsonl）
-  - 跳过 answer-cache 读写
-  - 其余检索 / LLM 路径完全一致
-  - response 增加 _dry_run: true 字段（便于 console UI 标记）
-```
+| 参数 | 类型 / 默认 | 行为 |
+|---|---|---|
+| `dry_run` | `"1"` \| 缺省 | 缺省 = 正常路径；`=1` 时跳过 `RunsWriter.append()` 与 answer-cache 读写；response 增加 `_dry_run: true` |
+| `source` | `"reader"` \| `"console"` \| 缺省 | 缺省 = `"reader"`；未知值 → 400 invalid_request。`RunRecord.source` 字段以此标记。**dry_run=1 时 source 被忽略**（不写 runs 也就无 source 落地） |
+
+**优先级**：`dry_run` 胜过 `source`。同时传 `?dry_run=1&source=console` → 不写 runs。
+
+**为什么 source 不放 body**：与 `dry_run` 同位置；child 的 `AskRequest` schema 保持不变（向后兼容 Reader），proxy 与 CLI 都不需要扩 schema。
+
+**console 反代映射**（ARCH §17.3.2 路由）：
+- `body.persist !== true` → `?dry_run=1`（默认）
+- `body.persist === true` → `?source=console`，child 写 runs `source: "console"`，response 由 console 端补 `_persisted: true` / `_source: "console"` 后返给 UI
 
 这是对 v1 ask 的**最小侵入**——一条分支、一个字段，无 schema 变化。CLI / Reader 默认行为不变。
 
@@ -1575,7 +1582,7 @@ console 是 workspace 级 meta 层，配置文件落 **`<workspace>/.console.jso
 §16.9 "Web 评测面板"原条目语义收敛为两条：
 
 1. **对外 Web 评测面板** / **替代文件流的 Web 审核面板** —— 仍否决（与 v1.5 §11 决策 #3 一致）。
-2. **内部作者本机的 dev console** —— **解禁**，限定形态：(a) 既有 CLI 的可视化壳；(b) 零独立状态（无 DB / 无落盘 console-side 配置）；(c) 不写 runs（dry-run 默认）；(d) 仅 127.0.0.1。
+2. **内部作者本机的 dev console** —— **解禁**，限定形态：(a) 既有 CLI 的可视化壳；(b) 零独立状态（无 DB / 无落盘 console-side 配置）；(c) **dry-run 默认**——`persist` 切换可显式写 runs，但 `source="console"` 隔离、UI 不记忆该状态、`analyze` / `golden` 下游默认排除（2026-05-11 第 1 条 v1.5 §17.8 落地）；(d) 仅 127.0.0.1。
 
 任何要把 console 推向"可对外 / 多用户 / 替代 inbox 文件" 的提议视为破边界，需重新评审。
 
@@ -1583,7 +1590,7 @@ console 是 workspace 级 meta 层，配置文件落 **`<workspace>/.console.jso
 
 | 能力 | 接入点 | 备注 |
 |---|---|---|
-| Ask 体验台落 runs（"灌真实流量"） | `/api/projects/:name/ask` body 新增 `persist: true` → 反代时不带 `?dry_run=1`；child 落 runs 时附 `source: "console"` tag | runs schema 加 `source` 字段（向后兼容） |
+| ~~Ask 体验台落 runs（"灌真实流量"）~~ | ~~`/api/projects/:name/ask` body 新增 `persist: true` → 反代时不带 `?dry_run=1`；child 落 runs 时附 `source: "console"` tag~~ | **2026-05-11 落地**：runs schema `RunRecord.source?: "reader"\|"console"`（缺省视为 reader 向后兼容）；`runSource()` helper 统一访问；console UI checkbox 默认 OFF + 不记忆；analyze / golden `--include-console` flag |
 | β 标 bad → inbox | `/api/projects/:name/feedback` POST → 直接写 `state/<projectId>/feedback/inbox/<date>-<id>.md`（与 v1.5 §15.5 文件格式一致） | 不引入 DB |
 | 检索 / LLM trace L2 | `/v1/ask` 协议增 `?debug=1` 返回 `_trace`（向量召回 / BM25 / RRF 中间态 / prompt 摘要） | 与 §16.4 runs trace 字段对齐扩展 |
 | Golden 候选 in-UI 审 | 新增 `/p/:name/golden/candidates` 路由，读写 `cases.candidate.jsonl` | 看作者用 jsonl 直编是否够用 |

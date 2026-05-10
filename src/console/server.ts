@@ -241,13 +241,18 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   });
 
   // -----------------------------------------------------------------------
-  // Ask 体验台 — reverse proxy with dry_run (ARCH §17.3.2 / §17.3.3)
+  // Ask 体验台 — reverse proxy with dry_run by default (ARCH §17.3.2 /
+  // §17.3.3 / §17.8).
   // -----------------------------------------------------------------------
   //
-  // Ensures the child is running (lazy spawn), touches lastUsedAt so idle
-  // reap doesn't preempt active dogfood sessions, and forwards POST to
-  // child /v1/ask?dry_run=1. Response is mirrored verbatim — its status
-  // and body (which now carries `_dry_run: true`) flow back to the UI.
+  // Default forwards POST to child /v1/ask?dry_run=1 (response carries
+  // `_dry_run: true`). When the body contains `{ "persist": true }` the
+  // proxy instead forwards to `/v1/ask?source=console` — child writes
+  // runs jsonl with source="console", which downstream analyze / golden
+  // generate exclude by default (--include-console reverses).
+  //
+  // `persist` is consumed by the proxy and stripped before forwarding so
+  // the child's AskRequest schema stays untouched.
 
   app.post('/api/projects/:name/ask', async (c) => {
     const name = c.req.param('name');
@@ -271,20 +276,39 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     }
     deps.registry.touch(name);
 
-    let body: string;
+    let rawBody: string;
     try {
-      body = await c.req.text();
+      rawBody = await c.req.text();
     } catch (err) {
       return c.json({ ok: false, error: `read body failed: ${(err as Error).message}` }, 400);
     }
+    // Parse the incoming JSON to extract `persist`; fall through on failure
+    // and let the child surface the malformed-body error.
+    let persist = false;
+    let forwardBody = rawBody;
+    if (rawBody.length > 0) {
+      try {
+        const parsed = JSON.parse(rawBody) as Record<string, unknown>;
+        if (parsed && typeof parsed === 'object' && parsed.persist === true) {
+          persist = true;
+          const { persist: _drop, ...rest } = parsed;
+          void _drop;
+          forwardBody = JSON.stringify(rest);
+        }
+      } catch {
+        // ignore — child returns proper invalid_request error on malformed JSON.
+      }
+    }
 
-    const upstream = `http://127.0.0.1:${port}/v1/ask?dry_run=1`;
+    const upstream = persist
+      ? `http://127.0.0.1:${port}/v1/ask?source=console`
+      : `http://127.0.0.1:${port}/v1/ask?dry_run=1`;
     let res: Response;
     try {
       res = await fetchFn(upstream, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body,
+        body: forwardBody,
       });
     } catch (err) {
       return c.json(
@@ -293,7 +317,22 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       );
     }
     const text = await res.text();
-    return new Response(text, {
+    // When persisting we want the UI to know `_persisted: true` so the
+    // toast can confirm "wrote runs row". The child returns the answer
+    // object verbatim (no _dry_run, no _persisted), so we splice the
+    // flag in here when the body is valid JSON.
+    let outBody = text;
+    if (persist) {
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>;
+        parsed._persisted = true;
+        parsed._source = 'console';
+        outBody = JSON.stringify(parsed);
+      } catch {
+        // leave verbatim if non-JSON
+      }
+    }
+    return new Response(outBody, {
       status: res.status,
       headers: { 'Content-Type': res.headers.get('content-type') ?? 'application/json' },
     });

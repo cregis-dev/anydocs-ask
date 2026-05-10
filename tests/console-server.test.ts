@@ -500,6 +500,69 @@ test('POST /api/projects/:name/ask: lazy-spawns + proxies with dry_run=1', async
   }
 });
 
+test('POST /api/projects/:name/ask: persist:true forwards to ?source=console (no dry_run)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const calls: ProxyCall[] = [];
+    const fetchFn = makeStubFetch(calls, () => ({
+      status: 200,
+      body: { type: 'answer', answer_md: 'A.', citations: [] },
+    }));
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      fetchFn,
+    });
+    const res = await app.request('/api/projects/docs-zh/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'real Q', persist: true }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { type: string; _persisted?: boolean; _source?: string };
+    assert.equal(body.type, 'answer');
+    assert.equal(body._persisted, true);
+    assert.equal(body._source, 'console');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.url, 'http://127.0.0.1:4101/v1/ask?source=console');
+    // persist field is stripped from the forwarded body so child's AskRequest
+    // schema isn't extended.
+    const fwd = JSON.parse(calls[0]!.body) as Record<string, unknown>;
+    assert.equal(fwd.question, 'real Q');
+    assert.equal(fwd.persist, undefined);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/ask: persist:false (or missing) keeps dry_run default', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const calls: ProxyCall[] = [];
+    const fetchFn = makeStubFetch(calls, () => ({
+      status: 200,
+      body: { type: 'answer', _dry_run: true },
+    }));
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      fetchFn,
+    });
+    await app.request('/api/projects/docs-zh/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Q', persist: false }),
+    });
+    assert.equal(calls[0]!.url, 'http://127.0.0.1:4101/v1/ask?dry_run=1');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('POST /api/projects/:name/ask: reuses already-running child without re-spawn', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
