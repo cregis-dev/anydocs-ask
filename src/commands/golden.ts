@@ -24,7 +24,7 @@ import { goldenPaths, readApproved, writeCandidates } from '../golden/store.ts';
 import { buildDefaultLLM } from '../llm/factory.ts';
 import { iterateRunsSince } from '../runs/writer.ts';
 import { parseSince } from './runs.ts';
-import type { RunRecord, RunsLine } from '../runs/types.ts';
+import { runSource, type RunRecord, type RunsLine } from '../runs/types.ts';
 
 export type GoldenGenerateOptions = {
   projectRoot: string;
@@ -36,6 +36,12 @@ export type GoldenGenerateOptions = {
   since?: string;
   llmRewrite: boolean;
   force: boolean;
+  /**
+   * Include source=console runs as golden candidates. Defaults to false:
+   * author dogfood traffic shouldn't auto-promote into the regression set
+   * without explicit opt-in. ARCH §17.8.
+   */
+  includeConsole?: boolean;
 };
 
 const FROM_RUNS_DEFAULT_SINCE = '14d';
@@ -128,23 +134,36 @@ async function runFromRuns(
   }
 
   // Collect run records from the window (drop feedback-update tails).
+  // Console-origin runs are excluded by default — promoting author dogfood
+  // queries into the regression set without opt-in would let test prompts
+  // leak into golden (ARCH §17.8).
   const records: RunRecord[] = [];
+  let consoleSkipped = 0;
   for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
     if ('type' in line && line.type === 'feedback-update') continue;
-    records.push(line as RunRecord);
+    const r = line as RunRecord;
+    if (!opts.includeConsole && runSource(r) === 'console') {
+      consoleSkipped++;
+      continue;
+    }
+    records.push(r);
   }
   if (records.length === 0) {
     process.stderr.write(
       `error: no runs since ${sinceArg}. serve the project, answer ≥1 query, ` +
-        `then retry — or pass --since 30d to widen.\n`,
+        (consoleSkipped > 0
+          ? `\n       (skipped ${consoleSkipped} console runs; pass --include-console to include them)`
+          : '') +
+        `\n       then retry — or pass --since 30d to widen.\n`,
     );
     return 1;
   }
 
   const { rows: existingCases } = readApproved(stateRoot);
   process.stdout.write(
-    `anydocs-ask golden generate --from runs: ${records.length} runs since ${sinceArg}, ` +
-      `${existingCases.length} approved cases for dedup\n`,
+    `anydocs-ask golden generate --from runs: ${records.length} runs since ${sinceArg}` +
+      (consoleSkipped > 0 ? ` (excluded ${consoleSkipped} console-origin)` : '') +
+      `, ${existingCases.length} approved cases for dedup\n`,
   );
 
   const { candidates, stats } = generateFromRuns(records, {

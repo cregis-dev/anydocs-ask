@@ -106,9 +106,10 @@ Usage:
   anydocs-ask runs export      <projectRoot> --since <when> [--format jsonl|csv]
   anydocs-ask golden generate  <projectRoot> [--from structure|runs] [--limit N]
                                              [--since 14d] [--no-llm-rewrite] [--force]
+                                             [--include-console]
   anydocs-ask golden review    <projectRoot> [--reviewer <name>]
   anydocs-ask eval             <projectRoot> [--baseline <path>]
-  anydocs-ask analyze runs     <projectRoot> [--since 7d]
+  anydocs-ask analyze runs     <projectRoot> [--since 7d] [--include-console]
   anydocs-ask workspace init
   anydocs-ask workspace ls
   anydocs-ask console          [--port 4100] [--idle-timeout-min 15]
@@ -335,6 +336,7 @@ async function main(): Promise<number> {
         const llmRewrite = flags['no-llm-rewrite'] !== true;
         const force = flags.force === true;
         const since = typeof flags.since === 'string' ? flags.since : undefined;
+        const includeConsole = flags['include-console'] === true;
         return await runGoldenGenerate({
           projectRoot,
           stateRoot,
@@ -343,6 +345,7 @@ async function main(): Promise<number> {
           ...(since !== undefined ? { since } : {}),
           llmRewrite,
           force,
+          ...(includeConsole ? { includeConsole: true } : {}),
         });
       }
       // golden review
@@ -366,10 +369,12 @@ async function main(): Promise<number> {
       // would land here. analyzeAction is non-null per the dispatch above.
       void analyzeAction;
       const since = typeof flags.since === 'string' ? flags.since : undefined;
+      const includeConsole = flags['include-console'] === true;
       return await runAnalyzeRuns({
         projectRoot,
         stateRoot,
         ...(since !== undefined ? { since } : {}),
+        ...(includeConsole ? { includeConsole: true } : {}),
       });
     }
     default:

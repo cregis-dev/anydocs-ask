@@ -18,13 +18,19 @@ import { parseSince } from './runs.ts';
 import { loadProjectId } from '../workspace.ts';
 import { analyzeDimensions } from '../analyze/dimensions.ts';
 import { renderAnalyzeReport } from '../analyze/report.ts';
-import type { RunRecord, RunsLine } from '../runs/types.ts';
+import { runSource, type RunRecord, type RunsLine } from '../runs/types.ts';
 
 export type AnalyzeRunsOptions = {
   projectRoot: string;
   stateRoot: string;
   /** Raw --since flag (e.g. "7d", "2026-04-01"). Falls back to config window. */
   since?: string;
+  /**
+   * Include `source=console` runs in analysis. Defaults to false — console
+   * dogfood queries skew confidence / latency distributions and would lie
+   * to the author about real reader health. ARCH §17.8.
+   */
+  includeConsole?: boolean;
 };
 
 export async function runAnalyzeRuns(opts: AnalyzeRunsOptions): Promise<number> {
@@ -43,20 +49,35 @@ export async function runAnalyzeRuns(opts: AnalyzeRunsOptions): Promise<number> 
     return 2;
   }
 
-  // Collect run records; drop feedback-update tails (v1.5 only).
+  // Collect run records; drop feedback-update tails (v1.5 only). By default
+  // exclude console-origin runs so author dogfood doesn't pollute reader
+  // health metrics (PRD §13.6 / ARCH §17.8). --include-console reverses.
   const records: RunRecord[] = [];
+  let consoleSkipped = 0;
   for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
     if ('type' in line && line.type === 'feedback-update') continue;
-    records.push(line as RunRecord);
+    const r = line as RunRecord;
+    if (!opts.includeConsole && runSource(r) === 'console') {
+      consoleSkipped++;
+      continue;
+    }
+    records.push(r);
   }
   if (records.length === 0) {
     process.stderr.write(
       `no runs since ${sinceArg} at ${join(stateRoot, 'runs')}/.\n` +
+        (consoleSkipped > 0
+          ? `       (skipped ${consoleSkipped} console runs; pass --include-console to include them)\n`
+          : '') +
         `       serve the project and answer ≥1 query first, or widen --since.\n`,
     );
     return 1;
   }
-  process.stdout.write(`anydocs-ask analyze: ${records.length} runs since ${sinceArg}\n`);
+  process.stdout.write(
+    `anydocs-ask analyze: ${records.length} runs since ${sinceArg}` +
+      (consoleSkipped > 0 ? ` (excluded ${consoleSkipped} console-origin)` : '') +
+      `\n`,
+  );
 
   const findings = analyzeDimensions({
     runs: records,
