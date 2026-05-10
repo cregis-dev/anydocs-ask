@@ -69,6 +69,7 @@ export async function runConsole(opts: ConsoleOptions): Promise<number> {
       childPortRangeStart: config.childPortRangeStart,
       childPortRangeEnd: config.childPortRangeEnd,
       idleTimeoutMin: config.idleTimeoutMin,
+      healthTimeoutMs: config.childHealthTimeoutMs,
     },
     workspacePath: workspace.path,
   });

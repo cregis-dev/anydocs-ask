@@ -33,12 +33,13 @@ test('loadConsoleConfig: missing file → built-in defaults', async () => {
   }
 });
 
-test('loadConsoleConfig: defaults are 4100 / 4101–4199 / 15min / enabled', () => {
+test('loadConsoleConfig: defaults are 4100 / 4101–4199 / 15min / 30s health / enabled', () => {
   assert.equal(CONSOLE_DEFAULTS.enabled, true);
   assert.equal(CONSOLE_DEFAULTS.port, 4100);
   assert.equal(CONSOLE_DEFAULTS.idleTimeoutMin, 15);
   assert.equal(CONSOLE_DEFAULTS.childPortRangeStart, 4101);
   assert.equal(CONSOLE_DEFAULTS.childPortRangeEnd, 4199);
+  assert.equal(CONSOLE_DEFAULTS.childHealthTimeoutMs, 30_000);
 });
 
 test('loadConsoleConfig: partial override merges with defaults', async () => {
@@ -147,6 +148,7 @@ test('loadConsoleConfig: full custom config with non-overlapping range', async (
       idleTimeoutMin: 30,
       childPortRangeStart: 5100,
       childPortRangeEnd: 5199,
+      childHealthTimeoutMs: 60_000,
     });
     const cfg = loadConsoleConfig(ws);
     assert.deepEqual(cfg, {
@@ -155,7 +157,18 @@ test('loadConsoleConfig: full custom config with non-overlapping range', async (
       idleTimeoutMin: 30,
       childPortRangeStart: 5100,
       childPortRangeEnd: 5199,
+      childHealthTimeoutMs: 60_000,
     });
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConsoleConfig: childHealthTimeoutMs < 1000 rejected', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await writeConfig(ws, { childHealthTimeoutMs: 500 });
+    assert.throws(() => loadConsoleConfig(ws), /childHealthTimeoutMs must be ≥ 1000/);
   } finally {
     await cleanup();
   }

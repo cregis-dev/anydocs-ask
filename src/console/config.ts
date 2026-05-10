@@ -19,6 +19,14 @@ export type ConsoleConfig = {
   idleTimeoutMin: number;
   childPortRangeStart: number;
   childPortRangeEnd: number;
+  /**
+   * How long (ms) we wait for a freshly spawned child to bind its port
+   * and respond to /v1/health (200 or 503 both count). Default 30s
+   * accommodates dev mode TS strip-types load + first-run reindex; real
+   * docs may want to raise it. Lower if you want failures to surface
+   * faster.
+   */
+  childHealthTimeoutMs: number;
 };
 
 export const CONSOLE_DEFAULTS: Readonly<ConsoleConfig> = Object.freeze({
@@ -27,6 +35,7 @@ export const CONSOLE_DEFAULTS: Readonly<ConsoleConfig> = Object.freeze({
   idleTimeoutMin: 15,
   childPortRangeStart: 4101,
   childPortRangeEnd: 4199,
+  childHealthTimeoutMs: 30_000,
 });
 
 const CONFIG_FILENAME = '.console.json';
@@ -62,6 +71,14 @@ function mergeConfig(over: Record<string, unknown>, path: string): ConsoleConfig
   }
   if ('childPortRangeEnd' in over) {
     out.childPortRangeEnd = expectPort(over.childPortRangeEnd, 'childPortRangeEnd', path);
+  }
+  if ('childHealthTimeoutMs' in over) {
+    out.childHealthTimeoutMs = expectInt(
+      over.childHealthTimeoutMs,
+      'childHealthTimeoutMs',
+      path,
+      1000,
+    );
   }
   if (out.childPortRangeStart > out.childPortRangeEnd) {
     throw new Error(

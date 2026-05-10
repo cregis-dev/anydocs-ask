@@ -21,15 +21,19 @@ import type { Spawnable, Spawner, HealthProbe } from './registry.ts';
 
 export function createNodeSpawner(): Spawner {
   return ({ name, port, workspacePath }) => {
+    // Order matters: parseArgs in cli.ts treats argv[2] as the command, so
+    // `serve` must come before any --flag. Subcommand positional (the
+    // project name) immediately follows. Flags can appear in any order
+    // after that.
     const args = [
       ...process.execArgv,
       process.argv[1]!,
-      '--workspace',
-      workspacePath,
       'serve',
       name,
       '--port',
       String(port),
+      '--workspace',
+      workspacePath,
     ];
     const child = spawn(process.execPath, args, {
       stdio: ['ignore', 'inherit', 'inherit'],
@@ -78,5 +82,3 @@ export function httpHealthProbe(port: number, timeoutMs: number): Promise<boolea
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
-
-export const __tests = { sleep, wrapChild };
