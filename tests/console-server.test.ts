@@ -530,6 +530,366 @@ test('POST /api/projects/:name/ask: 502 when proxy fetch throws', async () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Eval / Analyze / Golden + reports + runs (ARCH §17.3.1 / §17.3.2 / §17.5)
+// ---------------------------------------------------------------------------
+
+import type { ConsoleOps, OpResult } from '../src/console/ops.ts';
+import type { RunRecord } from '../src/runs/types.ts';
+
+function makeStubOps(overrides: Partial<ConsoleOps> = {}): {
+  ops: ConsoleOps;
+  calls: { eval: number; analyzeRuns: number; goldenGenerate: number };
+} {
+  const calls = { eval: 0, analyzeRuns: 0, goldenGenerate: 0 };
+  const ok: OpResult = { ok: true, message: 'stub' };
+  const ops: ConsoleOps = {
+    eval: overrides.eval ??
+      (async () => {
+        calls.eval += 1;
+        return ok;
+      }),
+    analyzeRuns: overrides.analyzeRuns ??
+      (async () => {
+        calls.analyzeRuns += 1;
+        return ok;
+      }),
+    goldenGenerate: overrides.goldenGenerate ??
+      (async () => {
+        calls.goldenGenerate += 1;
+        return ok;
+      }),
+  };
+  return { ops, calls };
+}
+
+test('POST /api/projects/:name/eval: invokes ops.eval with state path', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    let sawStateRoot: string | null = null;
+    const { ops } = makeStubOps({
+      eval: async (opts) => {
+        sawStateRoot = opts.stateRoot;
+        return { ok: true, reportPath: '/tmp/fake/reports/2026-05-10-eval.md' };
+      },
+    });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      ops,
+    });
+    const res = await app.request('/api/projects/docs-zh/eval', { method: 'POST' });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean; reportPath: string };
+    assert.equal(body.ok, true);
+    assert.match(body.reportPath, /2026-05-10-eval\.md$/);
+    assert.equal(sawStateRoot, join(ws, 'state', 'docs-zh'));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/eval: 500 with op error on failure', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const { ops } = makeStubOps({
+      eval: async () => ({ ok: false, error: 'no golden cases' }),
+    });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      ops,
+    });
+    const res = await app.request('/api/projects/docs-zh/eval', { method: 'POST' });
+    assert.equal(res.status, 500);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    assert.equal(body.ok, false);
+    assert.match(body.error, /no golden cases/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/analyze: forwards ?since to ops.analyzeRuns', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    let sawSince: string | undefined;
+    const { ops } = makeStubOps({
+      analyzeRuns: async (opts) => {
+        sawSince = opts.since;
+        return { ok: true };
+      },
+    });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      ops,
+    });
+    await app.request('/api/projects/docs-zh/analyze?since=14d', { method: 'POST' });
+    assert.equal(sawSince, '14d');
+    // Without query param, since should be undefined
+    await app.request('/api/projects/docs-zh/analyze', { method: 'POST' });
+    assert.equal(sawSince, undefined);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/golden/generate: from=structure default, llmRewrite=false', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    let sawOpts: { from: string; llmRewrite: boolean; limit?: number } | null = null;
+    const { ops } = makeStubOps({
+      goldenGenerate: async (opts) => {
+        sawOpts = {
+          from: opts.from,
+          llmRewrite: opts.llmRewrite,
+          ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+        };
+        return { ok: true, message: 'wrote candidates' };
+      },
+    });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      ops,
+    });
+    await app.request('/api/projects/docs-zh/golden/generate', { method: 'POST' });
+    assert.equal(sawOpts!.from, 'structure');
+    assert.equal(sawOpts!.llmRewrite, false);
+    assert.equal(sawOpts!.limit, undefined);
+
+    await app.request('/api/projects/docs-zh/golden/generate?from=runs&limit=20', {
+      method: 'POST',
+    });
+    assert.equal(sawOpts!.from, 'runs');
+    assert.equal(sawOpts!.limit, 20);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/golden/generate: rejects invalid from', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const { ops } = makeStubOps();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      ops,
+    });
+    const res = await app.request('/api/projects/docs-zh/golden/generate?from=inbox', {
+      method: 'POST',
+    });
+    assert.equal(res.status, 400);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/reports: returns the listing newest first', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const reportsDir = join(ws, 'state', 'docs-zh', 'reports');
+    await fs.mkdir(reportsDir, { recursive: true });
+    await fs.writeFile(join(reportsDir, '2026-05-01-eval.md'), 'A');
+    await fs.writeFile(join(reportsDir, '2026-05-08-eval.md'), 'B');
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/reports');
+    const body = (await res.json()) as Array<{ filename: string }>;
+    assert.deepEqual(
+      body.map((r) => r.filename),
+      ['2026-05-08-eval.md', '2026-05-01-eval.md'],
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name/reports/:file: renders report inside <pre>', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const reportsDir = join(ws, 'state', 'docs-zh', 'reports');
+    await fs.mkdir(reportsDir, { recursive: true });
+    await fs.writeFile(join(reportsDir, '2026-05-08-eval.md'), '# Eval\n\nR@5=0.78');
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh/reports/2026-05-08-eval.md');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    assert.match(body, /<pre[^>]*>[^<]*# Eval/);
+    assert.match(body, /R@5=0\.78/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name/reports/:file: 400 on bad filename (path traversal)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    // Note: hono decodes %2e%2e, but our route's filename validator rejects
+    // anything not matching the canonical pattern.
+    const res = await app.request('/p/docs-zh/reports/etc-passwd.md');
+    assert.equal(res.status, 400);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name/reports/:file: 404 when filename valid but file missing', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh/reports/2030-01-01-eval.md');
+    assert.equal(res.status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/runs: returns recent jsonl entries', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const runsDir = join(ws, 'state', 'docs-zh', 'runs');
+    await fs.mkdir(runsDir, { recursive: true });
+    const rec = (q: string): RunRecord => ({
+      ts: '2026-05-10T03:14:15.123Z',
+      request_id: '01HXX',
+      session_id: null,
+      query: q,
+      filters: {},
+      context_pageId: null,
+      retrieval: { fused: [], subtree_ask_triggered: false },
+      answer: {
+        kind: 'answer',
+        answer_id: 'ans',
+        md: 'A.',
+        citations: [],
+        confidence: 0.8,
+        latency_ms: 100,
+        tokens_in: null,
+        tokens_out: null,
+        model: 'mock',
+        error_code: null,
+      },
+      feedback: { beta: null, gamma: null },
+    });
+    await fs.writeFile(
+      join(runsDir, '2026-W19.jsonl'),
+      JSON.stringify(rec('Q1')) + '\n' + JSON.stringify(rec('Q2')) + '\n',
+    );
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/runs?limit=5');
+    const body = (await res.json()) as RunRecord[];
+    assert.equal(body.length, 2);
+    assert.deepEqual(
+      body.map((r) => r.query),
+      ['Q1', 'Q2'],
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name/runs: renders runs table with newest first', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const runsDir = join(ws, 'state', 'docs-zh', 'runs');
+    await fs.mkdir(runsDir, { recursive: true });
+    await fs.writeFile(
+      join(runsDir, '2026-W19.jsonl'),
+      JSON.stringify({
+        ts: '2026-05-10T03:14:15.123Z',
+        request_id: '01HXY',
+        session_id: null,
+        query: 'JWT 续期',
+        filters: {},
+        context_pageId: null,
+        retrieval: { fused: [], subtree_ask_triggered: false },
+        answer: {
+          kind: 'answer',
+          answer_id: 'a1',
+          md: 'use refresh token',
+          citations: [{ chunk_id: 1, page: 'security/jwt', quote: '' }],
+          confidence: 0.78,
+          latency_ms: 1234,
+          tokens_in: null,
+          tokens_out: null,
+          model: 'mock',
+          error_code: null,
+        },
+        feedback: { beta: null, gamma: null },
+      }) + '\n',
+    );
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh/runs');
+    const body = await res.text();
+    assert.match(body, /JWT 续期/);
+    assert.match(body, /security\/jwt/);
+    assert.match(body, /1234ms/);
+    assert.match(body, /tag ok[^>]*>answer/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name/runs: empty state shows hint', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh/runs');
+    const body = await res.text();
+    assert.match(body, /尚无 runs/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('POST /api/projects/:name/ask: touches lastUsedAt to defer reap', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {

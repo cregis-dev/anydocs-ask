@@ -12,11 +12,22 @@
  * eval/analyze/golden triggers, reports/runs viewers.
  */
 
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Hono } from 'hono';
-import { scanProjects, type ProjectListing } from '../workspace.ts';
+import {
+  loadProjectId,
+  resolveStateRoot,
+  scanProjects,
+  type ProjectListing,
+} from '../workspace.ts';
 import type { ProcessRegistry, RegisteredProcess } from './registry.ts';
+import { defaultOps, isReportFilename, listReports, type ConsoleOps } from './ops.ts';
+import { tailRuns } from '../runs/writer.ts';
 import { renderHome } from './pages/home.ts';
 import { renderProject } from './pages/project.ts';
+import { renderReport } from './pages/report.ts';
+import { renderRuns } from './pages/runs.ts';
 
 export type ConsoleAppDeps = {
   workspacePath: string;
@@ -27,6 +38,12 @@ export type ConsoleAppDeps = {
    * processes. Injectable for tests; defaults to globalThis.fetch.
    */
   fetchFn?: typeof globalThis.fetch;
+  /**
+   * Eval / analyze / golden runners; injectable so unit tests don't drag
+   * in real Runtime / sqlite / embedder. Defaults to defaultOps which
+   * shares the same code path as the CLI commands (ARCH §17.5).
+   */
+  ops?: ConsoleOps;
 };
 
 export type ProjectStatusJSON = ProjectListing & {
@@ -38,6 +55,7 @@ export type ProjectStatusJSON = ProjectListing & {
 export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   const app = new Hono();
   const fetchFn = deps.fetchFn ?? globalThis.fetch;
+  const ops = deps.ops ?? defaultOps;
 
   app.get('/', (c) => {
     const projects = scanProjects(deps.workspacePath);
@@ -78,7 +96,55 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       return c.text(`unknown project: ${name}`, 404);
     }
     const running = deps.registry.list().find((e) => e.name === name && !e.exited) ?? null;
-    return c.html(renderProject({ project, running }));
+    const stateRoot = projectStateRoot(deps.workspacePath, project);
+    const reports = stateRoot ? listReports(stateRoot) : [];
+    return c.html(renderProject({ project, running, reports }));
+  });
+
+  app.get('/p/:name/reports/:file', (c) => {
+    const name = c.req.param('name');
+    const file = c.req.param('file');
+    const project = findProject(deps.workspacePath, name);
+    if (!project) return c.text(`unknown project: ${name}`, 404);
+    if (!isReportFilename(file)) return c.text(`invalid report filename: ${file}`, 400);
+    const stateRoot = projectStateRoot(deps.workspacePath, project);
+    if (!stateRoot) return c.text(`project '${name}' has no projectId`, 400);
+    const path = join(stateRoot, 'reports', file);
+    if (!existsSync(path)) return c.text(`not found: ${file}`, 404);
+    const body = readFileSync(path, 'utf8');
+    return c.html(renderReport({ projectName: name, filename: file, body }));
+  });
+
+  app.get('/p/:name/runs', (c) => {
+    const name = c.req.param('name');
+    const project = findProject(deps.workspacePath, name);
+    if (!project) return c.text(`unknown project: ${name}`, 404);
+    const stateRoot = projectStateRoot(deps.workspacePath, project);
+    if (!stateRoot) return c.text(`project '${name}' has no projectId`, 400);
+    const limitRaw = c.req.query('limit');
+    const limit = limitRaw !== undefined ? Math.max(1, Math.min(500, Number(limitRaw) || 50)) : 50;
+    const lines = tailRuns({ stateRoot, count: limit });
+    return c.html(renderRuns({ projectName: name, lines, limit }));
+  });
+
+  app.get('/api/projects/:name/runs', (c) => {
+    const name = c.req.param('name');
+    const project = findProject(deps.workspacePath, name);
+    if (!project) return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
+    const stateRoot = projectStateRoot(deps.workspacePath, project);
+    if (!stateRoot) return c.json({ ok: false, error: 'no projectId' }, 400);
+    const limitRaw = c.req.query('limit');
+    const limit = limitRaw !== undefined ? Math.max(1, Math.min(500, Number(limitRaw) || 50)) : 50;
+    return c.json(tailRuns({ stateRoot, count: limit }));
+  });
+
+  app.get('/api/projects/:name/reports', (c) => {
+    const name = c.req.param('name');
+    const project = findProject(deps.workspacePath, name);
+    if (!project) return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
+    const stateRoot = projectStateRoot(deps.workspacePath, project);
+    if (!stateRoot) return c.json([]);
+    return c.json(listReports(stateRoot));
   });
 
   app.post('/api/projects/:name/start', async (c) => {
@@ -165,12 +231,93 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     });
   });
 
+  // -----------------------------------------------------------------------
+  // Eval / Analyze / Golden generate triggers (ARCH §17.3.2 / §17.5)
+  // -----------------------------------------------------------------------
+  // These call the CLI business functions in-process and respond after
+  // completion. v1 MVP: blocking request; long jobs (eval/analyze) keep
+  // the connection open until the report is written. Async job queue is
+  // a v1.5 polish (see PRD §13.8).
+
+  app.post('/api/projects/:name/eval', async (c) => {
+    const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
+    if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
+    const r = await ops.eval({ projectRoot: ctx.projectRoot, stateRoot: ctx.stateRoot });
+    return c.json(r, r.ok ? 200 : 500);
+  });
+
+  app.post('/api/projects/:name/analyze', async (c) => {
+    const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
+    if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
+    const since = c.req.query('since');
+    const r = await ops.analyzeRuns({
+      projectRoot: ctx.projectRoot,
+      stateRoot: ctx.stateRoot,
+      ...(since ? { since } : {}),
+    });
+    return c.json(r, r.ok ? 200 : 500);
+  });
+
+  app.post('/api/projects/:name/golden/generate', async (c) => {
+    const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
+    if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
+    const fromRaw = c.req.query('from') ?? 'structure';
+    if (fromRaw !== 'structure' && fromRaw !== 'runs') {
+      return c.json({ ok: false, error: 'from must be structure or runs' }, 400);
+    }
+    const limitRaw = c.req.query('limit');
+    const limit = limitRaw !== undefined ? Number(limitRaw) : undefined;
+    if (limit !== undefined && (!Number.isFinite(limit) || limit < 1)) {
+      return c.json({ ok: false, error: 'limit must be a positive integer' }, 400);
+    }
+    const r = await ops.goldenGenerate({
+      projectRoot: ctx.projectRoot,
+      stateRoot: ctx.stateRoot,
+      from: fromRaw,
+      ...(limit !== undefined ? { limit } : {}),
+      llmRewrite: false, // console default: no LLM cost; CLI handles --llm-rewrite
+      force: false,
+    });
+    return c.json(r, r.ok ? 200 : 500);
+  });
+
   return app;
 }
 
 function findProject(workspacePath: string, name: string): ProjectListing | null {
   const projects = scanProjects(workspacePath);
   return projects.find((p) => p.name === name) ?? null;
+}
+
+/** Resolve `<workspace>/state/<projectId>/` for a project listing. */
+function projectStateRoot(workspacePath: string, project: ProjectListing): string | null {
+  if (!project.projectId) return null;
+  return resolveStateRoot(workspacePath, project.projectId);
+}
+
+type OpContext =
+  | { projectRoot: string; stateRoot: string }
+  | { error: string; status: 404 | 400 };
+
+function resolveOpContext(workspacePath: string, name: string): OpContext {
+  const project = findProject(workspacePath, name);
+  if (!project) return { error: `unknown project: ${name}`, status: 404 };
+  if (!project.valid) {
+    return {
+      error: `project '${name}' invalid (missing: ${project.missing.join(', ')})`,
+      status: 400,
+    };
+  }
+  let projectId: string;
+  try {
+    projectId = loadProjectId(project.path);
+  } catch (err) {
+    return { error: (err as Error).message, status: 400 };
+  }
+  return {
+    projectRoot: project.path,
+    stateRoot: resolveStateRoot(workspacePath, projectId),
+  };
 }
 
 function runningMap(list: RegisteredProcess[]): Map<string, RegisteredProcess> {

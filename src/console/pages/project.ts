@@ -9,11 +9,13 @@
 import { html } from 'hono/html';
 import type { ProjectListing } from '../../workspace.ts';
 import type { RegisteredProcess } from '../registry.ts';
+import type { ReportListing } from '../ops.ts';
 import { layout, type Html } from './layout.ts';
 
 export type ProjectViewModel = {
   project: ProjectListing;
   running: RegisteredProcess | null;
+  reports: ReportListing[];
 };
 
 export function renderProject(vm: ProjectViewModel): Html {
@@ -53,12 +55,56 @@ export function renderProject(vm: ProjectViewModel): Html {
 
       ${project.valid ? askPanel(project.name) : ''}
 
-      <h2>eval · reports</h2>
-      <p class="muted">待实现（Commit E）。</p>
+      ${project.valid ? evalPanel(project.name) : ''}
+
+      <h2>reports</h2>
+      ${vm.reports.length === 0
+        ? html`<p class="muted">尚无报告。点上方按钮跑 eval / analyze 即可生成。</p>`
+        : reportsList(project.name, vm.reports)}
+
+      <h2>runs</h2>
+      <p><a href="/p/${project.name}/runs">查看最近 runs →</a></p>
 
       <script>${actionScript(project.name)}</script>
     `,
   });
+}
+
+function evalPanel(name: string): Html {
+  void name;
+  return html`
+    <h2>测评 · golden</h2>
+    <p>
+      <button id="btn-eval">run eval</button>
+      <button id="btn-analyze">analyze runs (since 7d)</button>
+      <button id="btn-golden-structure">golden generate (from structure, no LLM)</button>
+      <button id="btn-golden-runs">golden generate (from runs)</button>
+      <span id="op-status" class="muted"></span>
+    </p>
+    <p class="muted" style="font-size: 12px;">
+      golden generate 默认走 --no-llm-rewrite 以避免意外费用；如需 LLM 改写，
+      用命令行 <code class="mono">anydocs-ask golden generate</code>。
+    </p>
+  `;
+}
+
+function reportsList(name: string, reports: ReportListing[]): Html {
+  const rows = reports.map(
+    (r) => html`
+      <tr>
+        <td class="mono">${r.date}</td>
+        <td><span class="tag">${r.kind}</span></td>
+        <td><a class="mono" href="/p/${name}/reports/${r.filename}">${r.filename}</a></td>
+        <td class="mono muted" style="font-size: 12px;">${r.sizeBytes}B</td>
+      </tr>
+    `,
+  );
+  return html`
+    <table>
+      <thead><tr><th>date</th><th>kind</th><th>file</th><th>size</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
 }
 
 function askPanel(name: string): Html {
@@ -121,6 +167,39 @@ function actionScript(name: string): Html {
       }
       bind('btn-start', 'start');
       bind('btn-stop', 'stop');
+
+      var opStatus = document.getElementById('op-status');
+      function bindOp(id, path) {
+        var b = document.getElementById(id);
+        if (!b || !opStatus) return;
+        b.addEventListener('click', async function () {
+          b.disabled = true;
+          opStatus.textContent = id.replace('btn-', '') + '...';
+          var t0 = Date.now();
+          try {
+            var res = await fetch('/api/projects/' + encodeURIComponent(name) + path, { method: 'POST' });
+            var body = await res.json();
+            var dt = Date.now() - t0;
+            if (!res.ok || body.ok === false) {
+              opStatus.textContent = 'failed (' + dt + 'ms): ' + (body.error || res.statusText);
+            } else if (body.reportPath) {
+              opStatus.textContent = 'done (' + dt + 'ms) — reload for new report';
+              setTimeout(function () { location.reload(); }, 600);
+            } else {
+              opStatus.textContent = 'done (' + dt + 'ms): ' + (body.message || 'ok');
+              setTimeout(function () { location.reload(); }, 600);
+            }
+          } catch (e) {
+            opStatus.textContent = 'network error: ' + (e && e.message ? e.message : e);
+          } finally {
+            b.disabled = false;
+          }
+        });
+      }
+      bindOp('btn-eval', '/eval');
+      bindOp('btn-analyze', '/analyze');
+      bindOp('btn-golden-structure', '/golden/generate?from=structure');
+      bindOp('btn-golden-runs', '/golden/generate?from=runs');
 
       var askBtn = document.getElementById('btn-ask');
       var askQ = document.getElementById('ask-q');
