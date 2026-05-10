@@ -395,6 +395,78 @@ function makeStubFetch(
   }) as typeof globalThis.fetch;
 }
 
+test('GET /api/projects/:name/health: 502 when not running', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/health');
+    assert.equal(res.status, 502);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    assert.equal(body.ok, false);
+    assert.match(body.error, /not running/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/health: mirrors child 503 warming response', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const registry = makeRegistry();
+    await registry.start('docs-zh');
+    const calls: ProxyCall[] = [];
+    const fetchFn = makeStubFetch(calls, () => ({
+      status: 503,
+      body: { status: 'warming', warm: false },
+    }));
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry,
+      fetchFn,
+    });
+    const res = await app.request('/api/projects/docs-zh/health');
+    assert.equal(res.status, 503);
+    const body = (await res.json()) as { warm: boolean };
+    assert.equal(body.warm, false);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.url, 'http://127.0.0.1:4101/v1/health');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/health: mirrors child 200 warm response', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const registry = makeRegistry();
+    await registry.start('docs-zh');
+    const fetchFn = makeStubFetch([], () => ({
+      status: 200,
+      body: { status: 'ok', warm: true, booted_at: 0 },
+    }));
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry,
+      fetchFn,
+    });
+    const res = await app.request('/api/projects/docs-zh/health');
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { warm: boolean };
+    assert.equal(body.warm, true);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('POST /api/projects/:name/ask: lazy-spawns + proxies with dry_run=1', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {

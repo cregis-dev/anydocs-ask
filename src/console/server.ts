@@ -189,6 +189,32 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     return c.json(listReports(stateRoot));
   });
 
+  // -----------------------------------------------------------------------
+  // Health proxy — surfaces child runtime.warm to the console UI.
+  // -----------------------------------------------------------------------
+  // Read-only observation; never auto-spawns. Returns 502 if child is not
+  // running (page JS should not be polling pre-Start).
+
+  app.get('/api/projects/:name/health', async (c) => {
+    const name = c.req.param('name');
+    const project = findProject(deps.workspacePath, name);
+    if (!project) return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
+    const port = deps.registry.getPort(name);
+    if (port === null) return c.json({ ok: false, error: 'not running' }, 502);
+    try {
+      const res = await fetchFn(`http://127.0.0.1:${port}/v1/health`, {
+        signal: AbortSignal.timeout(800),
+      });
+      const text = await res.text();
+      return new Response(text, {
+        status: res.status,
+        headers: { 'Content-Type': res.headers.get('content-type') ?? 'application/json' },
+      });
+    } catch (err) {
+      return c.json({ ok: false, error: `proxy failed: ${(err as Error).message}` }, 502);
+    }
+  });
+
   app.post('/api/projects/:name/start', async (c) => {
     const name = c.req.param('name');
     const project = findProject(deps.workspacePath, name);

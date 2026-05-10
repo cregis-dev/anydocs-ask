@@ -53,9 +53,10 @@ export function renderProject(vm: ProjectViewModel): Html {
 
 function statusPill(live: boolean, running: RegisteredProcess | null): Html {
   if (live && running) {
-    return html`<span class="pill"><span class="dot run"></span>running · :${running.port} · pid ${running.pid}</span>`;
+    // JS overrides text/dot once /v1/health resolves warm vs warming.
+    return html`<span class="pill" id="status-pill"><span class="dot run" id="status-dot"></span><span id="status-text">running · :${running.port} · pid ${running.pid}</span></span>`;
   }
-  return html`<span class="pill"><span class="dot idle"></span>idle</span>`;
+  return html`<span class="pill" id="status-pill"><span class="dot idle" id="status-dot"></span><span id="status-text">idle</span></span>`;
 }
 
 function invalidNotice(project: ProjectListing): Html {
@@ -256,6 +257,111 @@ const cfg = window.__CONSOLE__ || { name: '', valid: false, live: false, autosta
 
 const $ = (id) => document.getElementById(id);
 
+// ------------------------------------------------------------------
+// warm state machine — surfaces child runtime.warm via /v1/health.
+// ------------------------------------------------------------------
+//
+// The child HTTP server binds before runtime.warm flips (embedder load +
+// fullReindex can take 5-30s). We poll /api/projects/:name/health every
+// 1.2s; status pill / Ask gating react. A pending question entered during
+// warmup is queued and auto-submitted on warm.
+const warmState = {
+  warm: false,
+  polling: false,
+  pollStartedAt: 0,
+  pendingQuestion: null,
+  abortPoll: false,
+};
+let warmTickTimer = null;
+
+function setStatusPill(dotCls, text) {
+  const dot = $('status-dot');
+  const txt = $('status-text');
+  if (dot) dot.className = 'dot ' + dotCls;
+  if (txt) txt.textContent = text;
+}
+
+function elapsedSec() {
+  if (!warmState.pollStartedAt) return 0;
+  return Math.floor((Date.now() - warmState.pollStartedAt) / 1000);
+}
+
+function tickWarmingPill() {
+  if (warmState.warm) return;
+  setStatusPill('idle', 'warming · ' + elapsedSec() + 's');
+}
+
+async function pollHealth() {
+  if (warmState.polling) return;
+  warmState.polling = true;
+  warmState.abortPoll = false;
+  warmState.pollStartedAt = Date.now();
+  setStatusPill('idle', 'warming · 0s');
+  if (warmTickTimer) clearInterval(warmTickTimer);
+  warmTickTimer = setInterval(tickWarmingPill, 500);
+  while (!warmState.abortPoll) {
+    let warm = false;
+    let body = null;
+    try {
+      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/health');
+      if (res.status === 200) {
+        body = await res.json();
+        warm = body && body.warm === true;
+      } else if (res.status === 502) {
+        // Child not running — registry says no entry. Stop polling.
+        warmState.polling = false;
+        warmState.abortPoll = true;
+        if (warmTickTimer) { clearInterval(warmTickTimer); warmTickTimer = null; }
+        setStatusPill('idle', 'idle');
+        return;
+      } else {
+        try { body = await res.json(); } catch (_) {}
+      }
+    } catch (_) {
+      // network blip — keep polling
+    }
+    if (warm) {
+      warmState.warm = true;
+      warmState.polling = false;
+      if (warmTickTimer) { clearInterval(warmTickTimer); warmTickTimer = null; }
+      onWarmReady(body);
+      return;
+    }
+    await sleep(1200);
+  }
+  warmState.polling = false;
+  if (warmTickTimer) { clearInterval(warmTickTimer); warmTickTimer = null; }
+}
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+function onWarmReady(body) {
+  // Reflect on pill — keep port info from SSR text if present.
+  const txt = $('status-text');
+  const existing = (txt && txt.textContent) || '';
+  const portMatch = existing.match(/:[0-9]+/);
+  const tail = portMatch ? ' · ' + portMatch[0] : '';
+  setStatusPill('run', 'ready' + tail);
+  if (warmState.pendingQuestion) {
+    const q = warmState.pendingQuestion;
+    warmState.pendingQuestion = null;
+    if (askStatus) {
+      askStatus.textContent = 'warm-up done · re-submitting';
+      askStatus.className = 'status ok';
+    }
+    if (askQ) askQ.value = q;
+    submitAsk();
+  } else if (askStatus) {
+    askStatus.textContent = 'ready';
+    askStatus.className = 'status ok';
+    setTimeout(() => {
+      if (askStatus && askStatus.textContent === 'ready') {
+        askStatus.textContent = '';
+      }
+    }, 1500);
+  }
+}
+
 function lifecycleClick(action) {
   return async () => {
     const btn = $('btn-' + action);
@@ -447,6 +553,14 @@ async function submitAsk() {
     askStatus.className = 'status err';
     return;
   }
+  // If we know the child is warming, queue instead of hitting /ask blindly.
+  if (!warmState.warm) {
+    warmState.pendingQuestion = question;
+    askStatus.textContent = 'queued · waiting for warm-up...';
+    askStatus.className = 'status muted';
+    pollHealth();
+    return;
+  }
   askBtn.disabled = true;
   askStatus.textContent = 'asking...';
   askStatus.className = 'status muted';
@@ -461,6 +575,15 @@ async function submitAsk() {
     let body;
     try { body = JSON.parse(text); } catch (_) { body = { type: 'error', code: 'invalid_response', message: text }; }
     const dt = Date.now() - t0;
+    // Race: child flipped back to warming (rare; e.g. forceReindex) — re-queue.
+    if (res.status === 503 && body && body.code === 'warming') {
+      warmState.warm = false;
+      warmState.pendingQuestion = question;
+      askStatus.textContent = 'child still warming · re-queued';
+      askStatus.className = 'status muted';
+      pollHealth();
+      return;
+    }
     askStatus.textContent = 'http ' + res.status + ' · ' + dt + 'ms';
     askStatus.className = res.ok ? 'status ok' : 'status err';
     renderAnswer(body);
@@ -487,6 +610,8 @@ if (askQ) {
 // Autostart: if /p/:name?autostart=1 and child is not yet live, kick off
 // /start once on page load. Idempotent — registry returns reused:true if
 // the child is already running between the request landing and JS firing.
+// After a successful start, jump straight into health polling instead of
+// reloading — preserves any question the author already typed.
 if (cfg.valid && cfg.autostart && !cfg.live) {
   const status = $('lifecycle-status');
   if (status) { status.textContent = 'auto-starting...'; status.className = 'status muted'; }
@@ -494,8 +619,11 @@ if (cfg.valid && cfg.autostart && !cfg.live) {
     .then((r) => r.json())
     .then((body) => {
       if (body && body.ok) {
-        if (status) { status.textContent = 'started · :' + body.port; status.className = 'status ok'; }
-        setTimeout(() => location.replace(location.pathname), 500);
+        if (status) { status.textContent = 'started · :' + body.port + ' · warming...'; status.className = 'status muted'; }
+        setStatusPill('idle', 'warming · 0s');
+        pollHealth();
+        // Clean ?autostart=1 from the URL so a manual refresh won't re-trigger.
+        history.replaceState({}, '', location.pathname);
       } else if (status) {
         status.textContent = (body && body.error) || 'autostart failed';
         status.className = 'status err';
@@ -504,5 +632,9 @@ if (cfg.valid && cfg.autostart && !cfg.live) {
     .catch((e) => {
       if (status) { status.textContent = 'autostart err: ' + e.message; status.className = 'status err'; }
     });
+} else if (cfg.valid && cfg.live) {
+  // Already live on SSR; verify warm state. Child may have been warm for a
+  // while (instant resolve) or could be mid-fullReindex (poll until warm).
+  pollHealth();
 }
 `;
