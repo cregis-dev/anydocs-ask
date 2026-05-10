@@ -249,6 +249,80 @@ test('/v1/ask without dry_run still appends; mixing dry+real keeps only the real
   }
 });
 
+test('/v1/ask without source: writes source=reader (default)', async () => {
+  const { runtime, cleanup, stateRoot } = await setup({ runsEnabled: true });
+  try {
+    const app = createApp({ runtime });
+    await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Q1' }),
+    });
+    const file = findRunsFile(stateRoot);
+    assert.ok(file);
+    const lines = readFileSync(file!, 'utf8').trim().split('\n');
+    const rec = JSON.parse(lines[0]!) as RunRecord;
+    assert.equal(rec.source, 'reader');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('/v1/ask?source=console: writes source=console (ARCH §17.8 persist path)', async () => {
+  const { runtime, cleanup, stateRoot } = await setup({ runsEnabled: true });
+  try {
+    const app = createApp({ runtime });
+    await app.request('/v1/ask?source=console', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'console-Q' }),
+    });
+    const file = findRunsFile(stateRoot);
+    assert.ok(file);
+    const lines = readFileSync(file!, 'utf8').trim().split('\n');
+    const rec = JSON.parse(lines[0]!) as RunRecord;
+    assert.equal(rec.source, 'console');
+    assert.equal(rec.query, 'console-Q');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('/v1/ask?dry_run=1&source=console: dry_run wins, no run is written', async () => {
+  const { runtime, cleanup, stateRoot } = await setup({ runsEnabled: true });
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask?dry_run=1&source=console', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Q' }),
+    });
+    const body = (await res.json()) as { _dry_run?: boolean };
+    assert.equal(body._dry_run, true);
+    assert.equal(existsSync(join(stateRoot, 'runs')), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('/v1/ask?source=garbage: 400 invalid_request', async () => {
+  const { runtime, cleanup } = await setup({ runsEnabled: true });
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask?source=tools', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Q' }),
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { code: string; message: string };
+    assert.equal(body.code, 'invalid_request');
+    assert.match(body.message, /unknown source/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('/v1/ask?dry_run=0 (or absent value) is NOT treated as dry-run', async () => {
   // We accept exactly '1'; everything else is a regular call.
   const { runtime, cleanup, stateRoot } = await setup({ runsEnabled: true });

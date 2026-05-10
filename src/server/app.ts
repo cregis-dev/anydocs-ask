@@ -58,6 +58,22 @@ export function createApp(deps: AppDeps): Hono {
     // queries don't pollute analytics or feedback identity. response gets
     // `_dry_run: true` so the client UI can disable feedback affordances.
     const dryRun = c.req.query('dry_run') === '1';
+    // source=console marks the run as originating from the dev console with
+    // persist=true (ARCH §17.8). dry_run wins — when dry_run=1, source is
+    // ignored. Default 'reader' covers the public path. Unknown values are
+    // rejected to keep the analyze/golden filter contract honest.
+    const sourceRaw = c.req.query('source');
+    let source: 'reader' | 'console' = 'reader';
+    if (sourceRaw !== undefined) {
+      if (sourceRaw === 'reader' || sourceRaw === 'console') {
+        source = sourceRaw;
+      } else {
+        return c.json(
+          { type: 'error', code: 'invalid_request', message: `unknown source: ${sourceRaw}` },
+          400,
+        );
+      }
+    }
     let body: unknown;
     try {
       body = await c.req.json();
@@ -107,6 +123,7 @@ export function createApp(deps: AppDeps): Hono {
         result,
         trace,
         latencyMs,
+        source,
       });
     }
 
@@ -265,6 +282,7 @@ function appendRun(
     result: AskResult;
     trace: AskTrace;
     latencyMs: number;
+    source: 'reader' | 'console';
   },
 ): void {
   if (!runtime.runs.isEnabled) return;
@@ -297,6 +315,7 @@ function appendRun(
     query: args.query,
     filters: args.filters,
     context_pageId: args.contextPageId,
+    source: args.source,
     retrieval: {
       fused: trace.fused.map((f) => ({
         chunk_id: f.chunk_id,
