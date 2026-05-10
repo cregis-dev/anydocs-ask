@@ -174,3 +174,192 @@ test('GET /api/projects: returns ProjectStatusJSON with running/port/pid', async
     await cleanup();
   }
 });
+
+test('GET /p/:name: 404 on unknown project', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await fs.mkdir(join(ws, 'projects'), { recursive: true });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/nope');
+    assert.equal(res.status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: stopped project shows start button enabled, stop disabled', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    assert.match(body, /<h1>docs-zh<\/h1>/);
+    assert.match(body, /id="btn-start"(?![^>]*disabled)/);
+    assert.match(body, /id="btn-stop"[^>]*disabled/);
+    assert.match(body, /tag[^>]*>stopped/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: running project disables start, enables stop, shows pid+port', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const registry = makeRegistry();
+    await registry.start('docs-zh');
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry,
+    });
+    const res = await app.request('/p/docs-zh');
+    const body = await res.text();
+    assert.match(body, /id="btn-start"[^>]*disabled/);
+    assert.match(body, /id="btn-stop"(?![^>]*disabled)/);
+    assert.match(body, /port=4101/);
+    assert.match(body, /tag run[^>]*>running/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: invalid project hides action buttons', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await fs.mkdir(join(ws, 'projects', 'broken', 'pages'), { recursive: true });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/broken');
+    const body = await res.text();
+    assert.equal(body.includes('id="btn-start"'), false);
+    assert.match(body, /missing.*navigation/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/start: spawns child + returns port', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/start', { method: 'POST' });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean; port: number; reused: boolean };
+    assert.equal(body.ok, true);
+    assert.equal(body.port, 4101);
+    assert.equal(body.reused, false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/start: second call returns reused=true with same port', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    await app.request('/api/projects/docs-zh/start', { method: 'POST' });
+    const r2 = await app.request('/api/projects/docs-zh/start', { method: 'POST' });
+    const body = (await r2.json()) as { ok: boolean; port: number; reused: boolean };
+    assert.equal(body.reused, true);
+    assert.equal(body.port, 4101);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/start: 404 on unknown project', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await fs.mkdir(join(ws, 'projects'), { recursive: true });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/nope/start', { method: 'POST' });
+    assert.equal(res.status, 404);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    assert.equal(body.ok, false);
+    assert.match(body.error, /unknown project/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/start: 400 on invalid project', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await fs.mkdir(join(ws, 'projects', 'broken', 'pages'), { recursive: true });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/broken/start', { method: 'POST' });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    assert.match(body.error, /invalid.*navigation/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/stop: stops running child', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    await app.request('/api/projects/docs-zh/start', { method: 'POST' });
+    const res = await app.request('/api/projects/docs-zh/stop', { method: 'POST' });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean; stopped: boolean };
+    assert.deepEqual(body, { ok: true, stopped: true });
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/stop: returns stopped=false when not running', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/stop', { method: 'POST' });
+    const body = (await res.json()) as { ok: boolean; stopped: boolean };
+    assert.deepEqual(body, { ok: true, stopped: false });
+  } finally {
+    await cleanup();
+  }
+});
