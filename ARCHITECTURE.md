@@ -1495,7 +1495,7 @@ ProcessRegistry {
 | 路由 | 内容 |
 |---|---|
 | `GET /` | 项目选择器（卡片网格） |
-| `GET /p/:name` | 项目详情：左 sidebar（status / lifecycle / Golden / Analyze / reports）+ 右主区 **三 tab** （Ask / Eval / Activity）。tab 由 hash `#tab` 持久化、刷新保留。详 §17.3.4 |
+| `GET /p/:name` | 项目详情：左 sidebar（status / lifecycle / Golden / Analyze / reports）+ 顶部 next-action 横幅（§17.3.7）+ 右主区 **4 tab** （Ask / Index / Eval / Traffic）+ 右侧 Config drawer（§17.3.9）。tab 由 hash `#tab` 持久化、刷新保留 |
 | `GET /p/:name/reports/:file` | 渲染 `state/<projectId>/reports/<file>.md` |
 | `GET /p/:name/runs` | 分页 jsonl 查看（最近 50，可过滤 query/confidence/latency） |
 
@@ -1512,7 +1512,7 @@ ProcessRegistry {
 | `DELETE /api/projects/:name/eval/pin-baseline` | 删 pin 指针文件 |
 | `POST /api/projects/:name/analyze` | in-process 调用 `analyzeRuns()` |
 | `POST /api/projects/:name/golden/generate` | in-process 调用 `goldenGenerate({ from: 'structure'\|'runs' })` |
-| `POST /api/projects/:name/reindex` | 反代到 child `/v1/admin/reindex`（v1 已有） |
+| `POST /api/projects/:name/reindex` | 反代到 child `/v1/index/rebuild`；child idle → 502 |
 | `GET /api/projects/:name/runs?limit=50&since=...` | 直读 `state/<projectId>/runs/*.jsonl`（不经 child） |
 | `GET /api/projects/:name/reports` | 列 `state/<projectId>/reports/*.md` |
 
@@ -1554,6 +1554,69 @@ ProcessRegistry {
 6. history 表：列所有 eval 报告 + 每行 pin 按钮 + sparkline（`▁▂▄▅▆▇` unicode block，趋势 ≥3 报告时显示）
 
 **console-side 零状态原则不破**：pin 文件落 `<state>/<id>/golden/`（项目侧 state），不在 console 进程内存或 console-side 配置。删 console 进程或 cwd 不影响 pin 状态。
+
+#### 17.3.5 Index tab（2026-05-11 加入）
+
+完整工作流的"加载 docs → 索引"步骤（之前 console 完全没接）。`/p/:name`
+tab "Index" 渲染：
+
+| 卡片 | 内容 | 数据源 |
+|---|---|---|
+| index 状态 | on-disk pages / DB pages / chunks / embed_cache / last_indexed_at | disk + child `/v1/index/status`（反代，child idle 时显 "—"） |
+| ⟳ reindex | 按钮 → `POST /api/projects/:name/reindex` → child `/v1/index/rebuild` | 反代；child idle 时禁用 |
+| validation | loader warnings + console 自加（pages/ 不存在 / 空 lang 子目录） | `loadIndexSnapshot` |
+| 首次设置引导 | totalPages=0 时显大字 + 文件树骨架 + 路径 | — |
+| 内容探索器 | lang tabs → navigation 树（按 breadcrumb 分块） → 每页 id/slug/status；missing file 红字；orphan 红色分组 | `loadProject()` |
+
+实现：`src/console/index-state.ts` 加载 + `src/console/pages/project-index-tab.ts` 渲染。
+
+#### 17.3.6 Traffic tab（2026-05-11 加入）
+
+替换之前的 Activity tab + 独立 `/p/:name/runs` 页（保留兼容入口）。
+
+| 区块 | 内容 |
+|---|---|
+| 健康度 strip | 4 KPI 卡 + 按日分桶 sparkline：queries · 7d / mean confidence / P95 latency (P50 副) / non-answer rate (error + clarify) |
+| 筛选条 | query / source(reader\|console) / kind / minConf |
+| runs 表 | SSR 行；每行 ts/kind+src-pill/conf/latency/query/cit |
+| 行展开 | 左：fused top-8 表 + meta(model/answer_id/request_id/tokens) + ↩ Re-ask 按钮；右：answer markdown + citations |
+| Re-ask | 写回 Ask tab textarea + 切到 Ask tab + 滑哈希到 `#ask`；当前 cfg 重跑对比 |
+
+`src/console/traffic-state.ts` 装载 7d 窗口；console-origin runs 与 reader 一同纳入（与 analyze 默认排除不同——Traffic 视图需要可见对照）。
+
+#### 17.3.7 Next-action 横幅（2026-05-11 加入）
+
+项目页 tab strip 上方根据 snapshots 推断"作者下一步该做什么"：
+
+```ts
+computeNextAction({ indexSnapshot, evalSnapshot, trafficWindow, childLive, projectValid })
+  → NextAction { level, title, detail?, cta: { label, targetTab } } | null
+```
+
+优先级从 funnel 头开始：项目无效 → 缺 docs → 缺文件引用 → disk/DB 漂移 → 未启动 → 没题集 → 没首次 eval → 没 pin → 流量 error/conf 告警 → null。
+
+CTA 是 `<a href="#tab">`，layout 加 `hashchange` listener 触发 `setProjectTab()`。零状态、纯函数推断。
+
+#### 17.3.8 Home 页 workspace strip + 项目卡 stats（2026-05-11 加入）
+
+`GET /` 装载：
+- `loadProjectHomeStats(workspacePath, p)` → 每项目 `{ cases, lastEvalDate, runs7d, lastActivity }`
+- `summarizeWorkspace(...)` → workspace-level rollup
+
+页面渲染顶部 KPI strip（valid/total · indexed · running · cases · runs · most recent）+ 卡片底部加 stats 行。
+
+#### 17.3.9 Config drawer（2026-05-11 加入）
+
+`layout()` 加 `configDrawer?: Html` 参数。所有页（home / 项目页）均传 view model；header 加 `⚙` gear 按钮触发 drawer 滑出。
+
+三个 section（read-only）：
+| section | path | 渲染 |
+|---|---|---|
+| workspace · .env | `<workspace>/.env` | 行表；secret keys (API_KEY/AUTH_TOKEN/SECRET/PASSWORD/TOKEN/PRIVATE_KEY 结尾) 自动 `abcd***xy` 脱敏（前 4 / 后 2） |
+| workspace · .console.json | `<workspace>/.console.json` | JSON 渲染 |
+| project · anydocs.ask.json | `<projectRoot>/anydocs.ask.json` | JSON 渲染（仅项目页） |
+
+ESC / 点外侧 / 点 × 关闭。Phase 1 仅只读；inline edit 涉及 \"console 自身零状态\" 锁，Phase 2 评估。
 
 ### 17.4 前端形态
 

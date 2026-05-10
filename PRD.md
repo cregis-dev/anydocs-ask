@@ -646,10 +646,11 @@ Golden case schema（jsonl，每行）：
 
 ### 13.4 功能需求
 
-#### 13.4.1 项目选择器
+#### 13.4.1 项目选择器（首页）
 
-- 列 `<workspace>/projects/*`，每项显示：projectId、源路径（含 symlink 标记）、最近 reindex 时间、当前进程状态（未启动 / 运行中端口 / 错误）。
-- 点击项目卡片：lazy spawn `anydocs-ask serve <name> --port <auto>`；console 全权分配端口（默认 4101+ 段，避免与作者手动启动的 3100/3101 区段冲突）。
+- **workspace 总览 strip**（2026-05-11 加入）：valid/total projects · indexed · running · golden cases · runs · 7d · most recent project
+- 列 `<workspace>/projects/*`，每项卡片显示：projectId、源路径（含 symlink 标记）、warm 状态、indexed 状态、case 数、近 7 天 runs 数、上次 eval 日期
+- 点击项目卡片：lazy spawn `anydocs-ask serve <name> --port <auto>`；console 全权分配端口（默认 4101+ 段，避免与作者手动启动的 3100/3101 区段冲突）。"open + start →" 一键 autostart
 - 项目空闲超过 N 分钟自动 kill 子进程（默认 15 min；可配）。无显式 "pin"。
 - 不替代 `workspace ls`——CLI 仍可独立用。
 
@@ -665,9 +666,15 @@ Golden case schema（jsonl，每行）：
   - **UI 警告**：开启时按钮变红 + 顶端红条提示"将写 runs，源=console"；response 多 `_persisted: true` / `_source: "console"`。
   - 详 ARCH §17.3.3 / §17.8。
 
-#### 13.4.3 测评批跑
+#### 13.4.3 项目页结构（4 tabs + next-action banner）
 
-- 项目页右主区有三个 tab：**Ask**（默认 dogfood）/ **Eval**（独立 workflow）/ **Activity**（runs / reports 入口）
+- 项目页右主区有 **4 个 tab**：**Ask**（默认 dogfood）/ **Index**（docs 入口 / 内容探索 / 验证 / reindex）/ **Eval**（独立 workflow）/ **Traffic**（7 天健康度 + runs 详情 + Re-ask）
+- **next-action 横幅**：tab strip 上方根据 indexSnapshot / evalSnapshot / trafficWindow 推断作者下一步该做什么（info/warn/err 三色），CTA 跳到对应 tab；状态机命中规则见 ARCH §17.3.7
+- **header gear (⚙) → Config drawer**：右侧抽屉只读显示 workspace `.env`（secrets `abcd***xy` 脱敏）/ `.console.json` / 项目 `anydocs.ask.json`；ESC / 点外侧关闭
+
+#### 13.4.4 测评批跑（Eval tab）
+
+- 项目页右主区有 **4 个 tab**：**Ask**（默认 dogfood）/ **Index** / **Eval**（独立 workflow）/ **Traffic**
 - **Eval tab**（2026-05-11 提升为一级 feature）：
   - golden 题集状态：n cases / 按 lang / tag / created_by 分布 / 最近编辑时间
   - 三指标卡：latest eval + baseline 对比，Δ 用颜色（绿涨红跌）标注
@@ -679,11 +686,27 @@ Golden case schema（jsonl，每行）：
 - 实现上**直接调用既有 CLI 内部函数**，不 fork shell；eval CLI 协议**未改**——pin baseline 只是 console 端读指针文件，转译成 `--baseline <path>` 传给 `runEval()`。
 - 详 ARCH §17.3.4。
 
-#### 13.4.4 报告 / runs 查看
+#### 13.4.5 Index tab（docs intake / 内容探索 / reindex）
 
-- 项目页直接列 `state/<projectId>/reports/*.md` 与 `state/<projectId>/runs/*.jsonl`，按时间倒序。
-- Markdown 在线渲染；jsonl 提供"最近 N 条"分页 + 简单按 query/confidence/latency 过滤。
-- 不提供搜索 / 全文索引（runs 的检索能力在 §16.2 `runs export` CLI）。
+- index 状态卡：on disk pages 数 / DB 中 pages / chunks / embed 缓存 / 最近 reindex 时间；disk vs DB 对照
+- **⟳ reindex 按钮**：反代到 child `/v1/index/rebuild`，child idle 时禁用 + 提示
+- 验证卡：anydocs loader warnings + console 自加（pages/ 不存在、空 lang 子目录）合并
+- 首次设置引导：totalPages=0 时显大字 + 文件树骨架 + 路径
+- 内容探索器：按 lang 切换 → 导航树（按 breadcrumb 自动分块）→ 每页 id/slug/status；missing file 红字；orphan（pages/ 有但 navigation/ 没引用）红色分组
+
+#### 13.4.6 Traffic tab（7d 健康度 + runs 详情 + Re-ask）
+
+- 4 KPI 卡 + 按日分桶 sparkline：queries · 7d / mean confidence / P95 latency (含 P50) / non-answer rate (error + clarify)
+- 筛选条：query / source(reader|console) / kind / minConf
+- runs 表（SSR）：行展开看完整 fused top-8 + answer markdown 渲染 + citations + meta(model/answer_id/request_id/tokens)
+- **Re-ask 按钮**：行展开里点 ↩ 把 query 写回 Ask tab textarea + 切到 Ask tab；用当前 cfg 重跑该问题做对比
+- console 与 reader 流量在 Traffic 视图里都纳入并以 src-pill 区分（与 analyze 默认排除 console 不同——这里需要可见对照）
+
+#### 13.4.7 报告 / runs 查看（兼容入口）
+
+- 旧 `/p/:name/runs` 独立页保留（外链 / 老 bookmark），Traffic tab 同时覆盖功能
+- 项目页直接列 `state/<projectId>/reports/*.md`，按时间倒序，Markdown 在线渲染
+- 不提供搜索 / 全文索引（runs 的检索能力在 §16.2 `runs export` CLI）
 
 ### 13.5 非功能与约束
 
