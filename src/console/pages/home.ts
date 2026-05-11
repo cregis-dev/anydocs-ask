@@ -44,7 +44,8 @@ export function renderHome(vm: HomeViewModel): Html {
       <span class="crumb mono">workspace · ${vm.workspacePath}</span>
     </div>
     ${vm.workspaceSummary && vm.projects.length > 0 ? workspaceStrip(vm.workspaceSummary) : ''}
-    ${vm.projects.length === 0 ? emptyState(vm.workspacePath) : projectGrid(vm)}
+    ${vm.projects.length === 0 ? emptyState() : projectGrid(vm)}
+    ${addProjectForm()}
   `;
   return layout({
     title: 'projects',
@@ -90,15 +91,62 @@ function workspaceStrip(s: WorkspaceSummary): Html {
   `;
 }
 
-function emptyState(workspacePath: string): Html {
+function emptyState(): Html {
   return html`
     <div class="card">
-      <p class="empty">workspace 内 <code>projects/</code> 目录为空。</p>
-      <p class="muted" style="text-align:center;">
-        把 anydocs 项目放入 <code class="mono">${workspacePath}/projects/</code>，<br />
-        或用 symlink 接入既有仓库。
-      </p>
+      <p class="empty" style="text-align:center;">还没有注册任何项目。</p>
+      <p class="muted" style="text-align:center;">使用下方表单或 CLI 添加第一个项目：<br /><code class="mono">anydocs-ask workspace add &lt;path&gt;</code></p>
     </div>
+  `;
+}
+
+function addProjectForm(): Html {
+  return html`
+    <div class="card" style="margin-top:16px;">
+      <div class="pagehead" style="margin-bottom:10px;">
+        <h2 style="font-size:15px;margin:0;">Add Project</h2>
+      </div>
+      <form id="add-proj-form" style="display:flex;flex-direction:column;gap:10px;">
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;">
+          Path <span style="color:var(--fg-mute);font-size:11.5px;">absolute or ~/relative path to anydocs project root</span>
+          <input id="add-proj-path" type="text" placeholder="/path/to/my-docs" style="font-family:ui-monospace,monospace;font-size:13px;padding:5px 8px;border:1px solid var(--bd);border-radius:4px;background:var(--bg);color:var(--fg);" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;">
+          Name <span style="color:var(--fg-mute);font-size:11.5px;">optional — defaults to directory name</span>
+          <input id="add-proj-name" type="text" placeholder="auto-detect" style="font-family:ui-monospace,monospace;font-size:13px;padding:5px 8px;border:1px solid var(--bd);border-radius:4px;background:var(--bg);color:var(--fg);" />
+        </label>
+        <div style="display:flex;align-items:center;gap:12px;">
+          <button type="submit" class="btn btn-primary">Add</button>
+          <span id="add-proj-msg" style="font-size:12.5px;"></span>
+        </div>
+      </form>
+    </div>
+    <script>
+      document.getElementById('add-proj-form').addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const path = document.getElementById('add-proj-path').value.trim();
+        const name = document.getElementById('add-proj-name').value.trim();
+        const msg = document.getElementById('add-proj-msg');
+        if (!path) { msg.style.color = 'var(--err)'; msg.textContent = 'path is required'; return; }
+        msg.style.color = 'var(--fg-mute)'; msg.textContent = 'adding…';
+        try {
+          const r = await fetch('/api/projects/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path, ...(name ? { name } : {}) }),
+          });
+          const j = await r.json();
+          if (j.ok) {
+            msg.style.color = 'var(--ok, #2a9)'; msg.textContent = 'added — reloading…';
+            setTimeout(() => location.reload(), 600);
+          } else {
+            msg.style.color = 'var(--err)'; msg.textContent = j.error ?? 'error';
+          }
+        } catch(err) {
+          msg.style.color = 'var(--err)'; msg.textContent = String(err);
+        }
+      });
+    </script>
   `;
 }
 

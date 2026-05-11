@@ -13,10 +13,16 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, join, resolve } from 'node:path';
 import { Hono } from 'hono';
 import {
+  addToProjectRegistry,
+  assertProjectRoot,
+  isBareName,
   loadProjectId,
+  readProjectRegistry,
+  removeFromProjectRegistry,
   resolveStateRoot,
   scanProjects,
   type ProjectListing,
@@ -154,6 +160,68 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       };
     });
     return c.json(payload);
+  });
+
+  // -----------------------------------------------------------------------
+  // Project registry management
+  // -----------------------------------------------------------------------
+
+  app.post('/api/projects/add', async (c) => {
+    let body: { path?: unknown; name?: unknown } | null = null;
+    try {
+      body = (await c.req.json()) as { path?: unknown; name?: unknown };
+    } catch {
+      return c.json({ ok: false, error: 'invalid JSON body' }, 400);
+    }
+    if (!body || typeof body.path !== 'string' || body.path.trim().length === 0) {
+      return c.json({ ok: false, error: 'body.path (string) required' }, 400);
+    }
+
+    const rawPath = body.path.trim();
+    const expandedPath =
+      rawPath === '~'
+        ? homedir()
+        : rawPath.startsWith('~/')
+          ? join(homedir(), rawPath.slice(2))
+          : resolve(rawPath);
+
+    try {
+      assertProjectRoot(expandedPath);
+    } catch (err) {
+      return c.json({ ok: false, error: (err as Error).message }, 400);
+    }
+
+    const name =
+      typeof body.name === 'string' && body.name.trim().length > 0
+        ? body.name.trim()
+        : basename(expandedPath);
+
+    if (!isBareName(name)) {
+      return c.json(
+        { ok: false, error: `invalid project name '${name}' (must match [A-Za-z0-9_][A-Za-z0-9_.-]*)` },
+        400,
+      );
+    }
+
+    const existing = readProjectRegistry(deps.workspacePath);
+    if (name in existing && existing[name] !== expandedPath) {
+      return c.json(
+        { ok: false, error: `name '${name}' already registered at ${existing[name]}` },
+        409,
+      );
+    }
+
+    addToProjectRegistry(deps.workspacePath, expandedPath, name);
+    return c.json({ ok: true, name, path: expandedPath });
+  });
+
+  app.delete('/api/projects/:name', (c) => {
+    const name = c.req.param('name');
+    const removed = removeFromProjectRegistry(deps.workspacePath, name);
+    if (!removed) {
+      return c.json({ ok: false, error: `'${name}' not found in registry` }, 404);
+    }
+    return c.json({ ok: true, name });
   });
 
   // -----------------------------------------------------------------------

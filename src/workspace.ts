@@ -6,7 +6,7 @@
  *
  *   <workspace>/
  *   ├── .env                       # global credentials (ANTHROPIC_*, ...)
- *   ├── projects/<name>/           # SOURCE: anydocs project (path or symlink)
+ *   ├── projects.json              # project registry: { name -> absolute path }
  *   └── state/<projectId>/         # RUNTIME: index.db, runs, golden, reports, ...
  *
  * Resolution order for the workspace path:
@@ -15,7 +15,7 @@
  *   3. default `~/anydocs-ask-runtime/`
  *
  * Project-root arg resolution:
- *   - bare name (e.g. `docs-zh`)            -> `<workspace>/projects/<name>`
+ *   - bare name (e.g. `docs-zh`)  -> looked up in projects.json registry
  *   - anything containing `/`, `\`, `.`, or starting with a path-like char
  *     is treated as a filesystem path and `path.resolve`d against cwd
  *
@@ -25,14 +25,14 @@
  *
  * Both bare-name and path-form invocations land on the same state dir as
  * long as their projectId agrees — runtime data is fully decoupled from
- * source-repo location (no more polluting symlinked source repos).
+ * source-repo location.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 
-export const WORKSPACE_SUBDIRS = ['projects', 'state'] as const;
+export const WORKSPACE_SUBDIRS = ['state'] as const;
 export type WorkspaceSubdir = (typeof WORKSPACE_SUBDIRS)[number];
 
 export type WorkspaceResolution = {
@@ -92,13 +92,71 @@ export function isBareName(arg: string): boolean {
 
 export function resolveProjectRoot(arg: string, workspacePath: string): ProjectRootResolution {
   if (isBareName(arg)) {
+    const registry = readProjectRegistry(workspacePath);
     return {
-      path: join(workspacePath, 'projects', arg),
+      path: registry[arg] ?? join(workspacePath, 'projects', arg),
       source: 'workspace',
       bareName: arg,
     };
   }
   return { path: resolve(arg), source: 'path', bareName: null };
+}
+
+// ---------------------------------------------------------------------------
+// Project registry — projects.json
+// ---------------------------------------------------------------------------
+
+/** name → absolute project path */
+export type ProjectRegistry = Record<string, string>;
+
+const REGISTRY_FILENAME = 'projects.json';
+
+export function readProjectRegistry(workspacePath: string): ProjectRegistry {
+  const p = join(workspacePath, REGISTRY_FILENAME);
+  if (!existsSync(p)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return parsed as ProjectRegistry;
+  } catch {
+    return {};
+  }
+}
+
+function writeProjectRegistry(workspacePath: string, registry: ProjectRegistry): void {
+  const dest = join(workspacePath, REGISTRY_FILENAME);
+  const tmp = dest + '.tmp';
+  writeFileSync(tmp, JSON.stringify(registry, null, 2) + '\n', 'utf8');
+  renameSync(tmp, dest);
+}
+
+/**
+ * Register a project in the workspace. `projectPath` must be absolute.
+ * If `name` is omitted, the basename of `projectPath` is used.
+ * Returns the name that was registered.
+ */
+export function addToProjectRegistry(
+  workspacePath: string,
+  projectPath: string,
+  name?: string,
+): string {
+  const resolvedName = name ?? basename(projectPath);
+  const registry = readProjectRegistry(workspacePath);
+  registry[resolvedName] = projectPath;
+  writeProjectRegistry(workspacePath, registry);
+  return resolvedName;
+}
+
+/**
+ * Remove a project from the registry by name. Returns true if it existed.
+ * Never touches state/ data.
+ */
+export function removeFromProjectRegistry(workspacePath: string, name: string): boolean {
+  const registry = readProjectRegistry(workspacePath);
+  if (!(name in registry)) return false;
+  delete registry[name];
+  writeProjectRegistry(workspacePath, registry);
+  return true;
 }
 
 /**
@@ -184,9 +242,9 @@ export function ensureStateRoot(workspacePath: string, projectId: string): strin
 }
 
 export type ProjectListing = {
-  /** Bare directory name under projects/ */
+  /** Registered name in projects.json */
   name: string;
-  /** Absolute path to projects/<name>/ */
+  /** Absolute path to the project root */
   path: string;
   /** pages/ + navigation/ both present */
   valid: boolean;
@@ -199,47 +257,32 @@ export type ProjectListing = {
 };
 
 /**
- * Scan `<workspace>/projects/*` and report each project's validity / index
- * state. Used by `workspace ls` and the v1 dev console (ARCH §17.3.2
- * `GET /api/projects`). Returns [] if the workspace has no `projects/` dir.
+ * Read projects.json and report each registered project's validity / index
+ * state. Used by `workspace ls` and the dev console `GET /api/projects`.
+ * Returns [] if projects.json does not exist or is empty.
  *
- * Sorted by name (locale order). Symlinks are followed; broken links and
- * non-directory entries are skipped silently.
+ * Sorted by name (locale order). Stale paths (not found on disk) are
+ * included with valid=false so the console can surface them.
  */
 export function scanProjects(workspacePath: string): ProjectListing[] {
-  const projectsDir = join(workspacePath, 'projects');
-  if (!existsSync(projectsDir)) return [];
-
-  const entries = readdirSync(projectsDir, { withFileTypes: true });
+  const registry = readProjectRegistry(workspacePath);
   const out: ProjectListing[] = [];
-  for (const ent of entries) {
-    if (!ent.isDirectory() && !ent.isSymbolicLink()) continue;
-    const projPath = join(projectsDir, ent.name);
-    let isDir = false;
-    try {
-      isDir = statSync(projPath).isDirectory();
-    } catch {
+
+  for (const [name, projPath] of Object.entries(registry)) {
+    if (!existsSync(projPath)) {
+      out.push({ name, path: projPath, valid: false, missing: ['path not found'], projectId: null, indexed: false });
       continue;
     }
-    if (!isDir) continue;
-
     const missing: string[] = [];
     if (!existsSync(join(projPath, 'pages'))) missing.push('pages/');
     if (!existsSync(join(projPath, 'navigation'))) missing.push('navigation/');
-
     const projectId = readProjectIdSafe(projPath);
     const indexed =
-      projectId !== null && existsSync(join(resolveStateRoot(workspacePath, projectId), 'index.db'));
-
-    out.push({
-      name: ent.name,
-      path: projPath,
-      valid: missing.length === 0,
-      missing,
-      projectId,
-      indexed,
-    });
+      projectId !== null &&
+      existsSync(join(resolveStateRoot(workspacePath, projectId), 'index.db'));
+    out.push({ name, path: projPath, valid: missing.length === 0, missing, projectId, indexed });
   }
+
   out.sort((a, b) => a.name.localeCompare(b.name));
   return out;
 }

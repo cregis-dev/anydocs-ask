@@ -35,7 +35,7 @@ import { join } from 'node:path';
 import { runServe } from './commands/serve.ts';
 import { runReindex } from './commands/reindex.ts';
 import { runStatus } from './commands/status.ts';
-import { runWorkspaceInit, runWorkspaceLs } from './commands/workspace.ts';
+import { runWorkspaceInit, runWorkspaceLs, runWorkspaceAdd, runWorkspaceRm } from './commands/workspace.ts';
 import { runRunsExport, runRunsTail } from './commands/runs.ts';
 import { runGoldenGenerate, runGoldenReview } from './commands/golden.ts';
 import { runEval } from './commands/eval.ts';
@@ -112,11 +112,14 @@ Usage:
   anydocs-ask analyze runs     <projectRoot> [--since 7d] [--include-console]
   anydocs-ask workspace init
   anydocs-ask workspace ls
+  anydocs-ask workspace add    <path> [--name <name>]
+  anydocs-ask workspace rm     <name>
   anydocs-ask console          [--port 4100] [--idle-timeout-min 15]
   anydocs-ask --help
 
-<projectRoot> may be a filesystem path or a bare name resolved against
-the runtime workspace (default: ~/anydocs-ask-runtime/projects/<name>).
+<projectRoot> may be a filesystem path or a bare name looked up in the
+workspace registry (projects.json).  Register projects with:
+  anydocs-ask workspace add <path>
 
 --since accepts ISO date (2026-04-01), ISO datetime, or duration (7d / 48h / 30m).
 
@@ -174,7 +177,7 @@ async function main(): Promise<number> {
   if (command === 'workspace') {
     const action = positional[0];
     if (!action) {
-      process.stderr.write(`error: 'workspace' requires an action (init | ls)\n\n`);
+      process.stderr.write(`error: 'workspace' requires an action (init | ls | add | rm)\n\n`);
       printHelp();
       return 2;
     }
@@ -183,6 +186,25 @@ async function main(): Promise<number> {
         return runWorkspaceInit({ workspace });
       case 'ls':
         return runWorkspaceLs({ workspace });
+      case 'add': {
+        const projectPath = positional[1];
+        if (!projectPath) {
+          process.stderr.write(`error: 'workspace add' requires a <path>\n\n`);
+          printHelp();
+          return 2;
+        }
+        const name = typeof flags.name === 'string' ? flags.name : undefined;
+        return runWorkspaceAdd({ workspace, projectPath, name });
+      }
+      case 'rm': {
+        const name = positional[1];
+        if (!name) {
+          process.stderr.write(`error: 'workspace rm' requires a <name>\n\n`);
+          printHelp();
+          return 2;
+        }
+        return runWorkspaceRm({ workspace, name });
+      }
       default:
         process.stderr.write(`error: unknown workspace action '${action}'\n\n`);
         printHelp();
@@ -253,8 +275,8 @@ async function main(): Promise<number> {
     process.stderr.write(`error: ${(err as Error).message}\n`);
     if (projectResolution.source === 'workspace') {
       process.stderr.write(
-        `  hint: bare name '${projectResolution.bareName}' resolved to ${projectResolution.path}\n` +
-          `        place an anydocs project there, or pass an explicit path instead.\n`,
+        `  hint: '${projectResolution.bareName}' is not in the project registry\n` +
+          `        run: anydocs-ask workspace add <path> --name ${projectResolution.bareName}\n`,
       );
     }
     return 2;

@@ -14,6 +14,7 @@ import {
   type RegistryConfig,
   type Spawnable,
 } from '../src/console/registry.ts';
+import { addToProjectRegistry } from '../src/workspace.ts';
 
 async function withTmpDir(): Promise<{ path: string; cleanup: () => Promise<void> }> {
   const path = await fs.mkdtemp(join(tmpdir(), 'anydocs-console-srv-'));
@@ -21,7 +22,6 @@ async function withTmpDir(): Promise<{ path: string; cleanup: () => Promise<void
 }
 
 async function makeWorkspaceWithProjects(ws: string, names: string[]): Promise<void> {
-  await fs.mkdir(join(ws, 'projects'), { recursive: true });
   await fs.mkdir(join(ws, 'state'), { recursive: true });
   for (const name of names) {
     const p = join(ws, 'projects', name);
@@ -31,6 +31,7 @@ async function makeWorkspaceWithProjects(ws: string, names: string[]): Promise<v
       join(p, 'anydocs.config.json'),
       JSON.stringify({ version: 1, projectId: name }),
     );
+    addToProjectRegistry(ws, p, name);
   }
 }
 
@@ -62,7 +63,6 @@ function makeRegistry(): ProcessRegistry {
 test('GET /: empty workspace shows guidance, not crash', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
-    await fs.mkdir(join(ws, 'projects'), { recursive: true });
     const app = createConsoleApp({
       workspacePath: ws,
       consolePort: 4100,
@@ -72,7 +72,7 @@ test('GET /: empty workspace shows guidance, not crash', async () => {
     assert.equal(res.status, 200);
     const body = await res.text();
     assert.match(body, /projects/);
-    assert.match(body, /projects\/<\/code>\s+目录为空|目录为空/);
+    assert.match(body, /还没有注册任何项目|workspace add/);
     // workspace path appears in the header block
     assert.ok(body.includes(ws));
   } finally {
@@ -84,8 +84,10 @@ test('GET /: lists valid + invalid projects with status tags', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
-    // Add an invalid one (missing navigation/)
-    await fs.mkdir(join(ws, 'projects', 'broken', 'pages'), { recursive: true });
+    // Add an invalid one (missing navigation/) — must also register it
+    const brokenPath = join(ws, 'projects', 'broken');
+    await fs.mkdir(join(brokenPath, 'pages'), { recursive: true });
+    addToProjectRegistry(ws, brokenPath, 'broken');
     const app = createConsoleApp({
       workspacePath: ws,
       consolePort: 4100,
@@ -133,7 +135,6 @@ test('GET /: running registry entry surfaces port + run tag', async () => {
 test('GET /api/projects: empty workspace returns []', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
-    await fs.mkdir(join(ws, 'projects'), { recursive: true });
     const app = createConsoleApp({
       workspacePath: ws,
       consolePort: 4100,
@@ -181,7 +182,6 @@ test('GET /api/projects: returns ProjectStatusJSON with running/port/pid', async
 test('GET /p/:name: 404 on unknown project', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
-    await fs.mkdir(join(ws, 'projects'), { recursive: true });
     const app = createConsoleApp({
       workspacePath: ws,
       consolePort: 4100,
@@ -274,7 +274,9 @@ test('GET /p/:name: project tabs (Ask/Index/Eval/Traffic) + scoped JS handler so
 test('GET /p/:name: invalid project hides action buttons', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
-    await fs.mkdir(join(ws, 'projects', 'broken', 'pages'), { recursive: true });
+    const brokenPath = join(ws, 'projects', 'broken');
+    await fs.mkdir(join(brokenPath, 'pages'), { recursive: true });
+    addToProjectRegistry(ws, brokenPath, 'broken');
     const app = createConsoleApp({
       workspacePath: ws,
       consolePort: 4100,
@@ -350,7 +352,9 @@ test('POST /api/projects/:name/start: 404 on unknown project', async () => {
 test('POST /api/projects/:name/start: 400 on invalid project', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
-    await fs.mkdir(join(ws, 'projects', 'broken', 'pages'), { recursive: true });
+    const brokenPath = join(ws, 'projects', 'broken');
+    await fs.mkdir(join(brokenPath, 'pages'), { recursive: true });
+    addToProjectRegistry(ws, brokenPath, 'broken');
     const app = createConsoleApp({
       workspacePath: ws,
       consolePort: 4100,
