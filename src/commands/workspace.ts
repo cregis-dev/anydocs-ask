@@ -9,11 +9,11 @@
  * Both subcommands honor `--workspace <path>` resolution from cli.ts.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   ensureWorkspace,
-  resolveStateRoot,
+  scanProjects,
   WORKSPACE_SUBDIRS,
   type WorkspaceResolution,
 } from '../workspace.ts';
@@ -44,58 +44,21 @@ export type WorkspaceLsOptions = {
   workspace: WorkspaceResolution;
 };
 
-type ProjectListing = {
-  name: string;
-  valid: boolean;
-  indexed: boolean;
-  missing: string[];
-  projectId: string | null;
-};
-
 export function runWorkspaceLs(opts: WorkspaceLsOptions): number {
   const { workspace } = opts;
-  const projectsDir = join(workspace.path, 'projects');
-  if (!existsSync(projectsDir)) {
+  if (!existsSync(join(workspace.path, 'projects'))) {
     process.stderr.write(
       `workspace not initialized at ${workspace.path}; run 'anydocs-ask workspace init' first.\n`,
     );
     return 1;
   }
-  const entries = readdirSync(projectsDir, { withFileTypes: true });
-  const projects: ProjectListing[] = [];
-  for (const ent of entries) {
-    if (!ent.isDirectory() && !ent.isSymbolicLink()) continue;
-    const projPath = join(projectsDir, ent.name);
-    let isDir = false;
-    try {
-      isDir = statSync(projPath).isDirectory();
-    } catch {
-      continue;
-    }
-    if (!isDir) continue;
-    const missing: string[] = [];
-    if (!existsSync(join(projPath, 'pages'))) missing.push('pages/');
-    if (!existsSync(join(projPath, 'navigation'))) missing.push('navigation/');
-
-    const projectId = readProjectIdSafe(projPath);
-    const indexed =
-      projectId !== null && existsSync(join(resolveStateRoot(workspace.path, projectId), 'index.db'));
-
-    projects.push({
-      name: ent.name,
-      valid: missing.length === 0,
-      indexed,
-      missing,
-      projectId,
-    });
-  }
+  const projects = scanProjects(workspace.path);
 
   process.stdout.write(`anydocs-ask workspace: ${workspace.path}\n`);
   if (projects.length === 0) {
     process.stdout.write(`  (no projects in projects/)\n`);
     return 0;
   }
-  projects.sort((a, b) => a.name.localeCompare(b.name));
   const nameWidth = Math.max(...projects.map((p) => p.name.length));
   for (const p of projects) {
     const tags = [p.valid ? 'valid' : `invalid (${p.missing.join(', ')})`];
@@ -104,17 +67,4 @@ export function runWorkspaceLs(opts: WorkspaceLsOptions): number {
     process.stdout.write(`  ${p.name.padEnd(nameWidth)}  [${tags.join('] [')}]\n`);
   }
   return 0;
-}
-
-function readProjectIdSafe(projPath: string): string | null {
-  const configPath = join(projPath, 'anydocs.config.json');
-  if (!existsSync(configPath)) return null;
-  try {
-    const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as { projectId?: unknown };
-    return typeof parsed.projectId === 'string' && parsed.projectId.length > 0
-      ? parsed.projectId
-      : null;
-  } catch {
-    return null;
-  }
 }

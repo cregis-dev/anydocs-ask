@@ -612,3 +612,144 @@ Golden case schema（jsonl，每行）：
 | 5 | `eval` 在 baseline golden 上输出三指标 + diff 上一次 baseline | 集成测试 |
 | 6 | `analyze runs --since 7d` 在合成 runs 上识别全部 1-3 维度信号 | 红队验证 |
 | 7 | 默认 LLM 关闭（无 ANTHROPIC_API_KEY）时，`golden generate --from structure` 报错并给出指引；不静默回退到纯结构候选 | 单元测试 |
+
+## 13. v1 dev console（内部评测台）
+
+> Status: v0.1 计划（未实现）
+> Date: 2026-05-10
+> 范围：v1 增量。仅供 anydocs **作者本机** dogfood 与评测用，**不对外暴露**。
+> 详细架构：[ARCHITECTURE.md §17](./ARCHITECTURE.md)
+
+### 13.1 目标
+
+把 §12 已立项的 CLI 评测能力（`eval` / `analyze` / `golden generate` / `runs tail`）和 v1 ask 服务包成一个**作者本机的可视化壳**，解决三件事：
+
+- **作者亲身体感**：作者能像真实用户一样问问题，看到答案、citations、检索过程，判断"自己写的文档"是否被检索/答得对。
+- **跨项目一站式**：在同一个本地 Web 入口里切换多个 anydocs 项目，不必手动起多个 `serve` 终端。
+- **CLI 可视化**：把 `eval` / `analyze` / `golden generate` 的输入参数和输出报告以点击式 UI 暴露，降低评测使用门槛。
+
+### 13.2 与已锁决策的关系
+
+- **不破** §12.2 决策 4（一进程一项目）——console 自身是 meta 层，每选一个项目仍 spawn 独立 `anydocs-ask serve` 子进程占独立端口。
+- **不替代** §11 v1.5 文件优先反馈流——console v1 **不引入新的 DB / 评审状态**；UI 上的所有"写动作"最终都是文件写或调用既有 CLI 函数。
+- **修订** ARCH §16.9 "Web 评测面板"否决项的语义：保留"对外不做 / 不替代文件流"，新增允许"内部 dev console 作为既有 CLI 的可视化壳，零独立状态"。详见 ARCH §17.7。
+
+### 13.3 用户场景
+
+| # | 场景 | 主要操作 |
+|---|---|---|
+| 1 | 作者切到 docs-zh，问 "JWT 怎么续期"，看 top-5 chunk 与最终答案 | 选项目 → 输入问题 → 看返回（含检索 trace） |
+| 2 | 作者发现"我刚补的 mobile/oauth 页召回不到"，想验证 reindex 后是否修复 | 选项目 → 触发 reindex → 重新问同一问题 |
+| 3 | 上线前过一遍 baseline | 选项目 → 点 "Run eval" → 看三指标 vs baseline diff |
+| 4 | 周报前看一周 ask 健康度 | 选项目 → 点 "Analyze runs (since 7d)" → 看报告 |
+| 5 | 冷启动后审 LLM 生成的 Golden 候选 | 选项目 → 点 "Generate golden (from structure)" → 跳到候选文件 |
+
+### 13.4 功能需求
+
+#### 13.4.1 项目选择器（首页）
+
+- **workspace 总览 strip**（2026-05-11 加入）：valid/total projects · indexed · running · golden cases · runs · 7d · most recent project
+- 列 `<workspace>/projects/*`，每项卡片显示：projectId、源路径（含 symlink 标记）、warm 状态、indexed 状态、case 数、近 7 天 runs 数、上次 eval 日期
+- 点击项目卡片：lazy spawn `anydocs-ask serve <name> --port <auto>`；console 全权分配端口（默认 4101+ 段，避免与作者手动启动的 3100/3101 区段冲突）。"open + start →" 一键 autostart
+- 项目空闲超过 N 分钟自动 kill 子进程（默认 15 min；可配）。无显式 "pin"。
+- 不替代 `workspace ls`——CLI 仍可独立用。
+
+#### 13.4.2 Ask 体验台
+
+- 文本框 + 提交按钮，调子进程的 `/v1/ask`，**默认 dry-run**：不落 runs jsonl，不进 answer-cache，仅在 console 内存里返回结果。
+- 显示：检索 fused top-5（page / rrf_score / vec_rank / bm25_rank / nav_index_boost）、最终 answer markdown、citations、confidence、latency、model。
+- 子树反问触发时显示反问选项树（与 Reader 一致）。
+- 不提供"标记 bad"按钮（v1 不引入 feedback inbox 写入；详见 §13.6 与 v1.5 扩展点）。
+- **persist 开关**（2026-05-11 加入）：右上 checkbox，默认 **OFF**，开启时该次提交反代到 `/v1/ask?source=console`，子进程**落 runs，进 answer-cache**，`source` 字段标记 `"console"`。
+  - **不记忆**：刷新页面 / 切项目 / 切 tab 全部自动回到 dry-run，避免长期遗忘"还在灌库"。
+  - **下游 guard**：`analyze runs` / `golden generate --from runs` 默认排除 `source=="console"`，需要 `--include-console` 显式纳入。
+  - **UI 警告**：开启时按钮变红 + 顶端红条提示"将写 runs，源=console"；response 多 `_persisted: true` / `_source: "console"`。
+  - 详 ARCH §17.3.3 / §17.8。
+
+#### 13.4.3 项目页结构（4 tabs + next-action banner）
+
+- 项目页右主区有 **4 个 tab**：**Ask**（默认 dogfood）/ **Index**（docs 入口 / 内容探索 / 验证 / reindex）/ **Eval**（独立 workflow）/ **Traffic**（7 天健康度 + runs 详情 + Re-ask）
+- **next-action 横幅**：tab strip 上方根据 indexSnapshot / evalSnapshot / trafficWindow 推断作者下一步该做什么（info/warn/err 三色），CTA 跳到对应 tab；状态机命中规则见 ARCH §17.3.7
+- **header gear (⚙) → Config drawer**：右侧抽屉只读显示 workspace `.env`（secrets `abcd***xy` 脱敏）/ `.console.json` / 项目 `anydocs.ask.json`；ESC / 点外侧关闭
+
+#### 13.4.4 测评批跑（Eval tab）
+
+- 项目页右主区有 **4 个 tab**：**Ask**（默认 dogfood）/ **Index** / **Eval**（独立 workflow）/ **Traffic**
+- **Eval tab**（2026-05-11 提升为一级 feature）：
+  - golden 题集状态：n cases / 按 lang / tag / created_by 分布 / 最近编辑时间
+  - 三指标卡：latest eval + baseline 对比，Δ 用颜色（绿涨红跌）标注
+  - **baseline pin**：history 表每行 `pin` 按钮可钉一份历史报告作"金准"，后续 eval 默认对比它（不只对比上一份）；UI Unpin 一键清；落盘 `state/<id>/golden/eval-baseline.json`
+  - Run eval：dropdown 选对比目标（previous / pinned / 任一历史报告），按钮触发；结果落 `state/<id>/reports/<date>-eval.md`，自动刷新视图
+  - 最近报告 markdown inline 渲染（同 reports 页面）
+  - history 表：所有 eval 报告 + R@5 / Cit / Ans 三列 + sparkline 趋势（≥3 报告时显示，unicode block 零依赖）
+- **Golden / Analyze** side card（Eval 上游辅助）：保留 analyze runs / golden ← structure / golden ← runs 三个按钮（这些不是日常主路径）
+- 实现上**直接调用既有 CLI 内部函数**，不 fork shell；eval CLI 协议**未改**——pin baseline 只是 console 端读指针文件，转译成 `--baseline <path>` 传给 `runEval()`。
+- 详 ARCH §17.3.4。
+
+#### 13.4.5 Index tab（docs intake / 内容探索 / reindex）
+
+- index 状态卡：on disk pages 数 / DB 中 pages / chunks / embed 缓存 / 最近 reindex 时间；disk vs DB 对照
+- **⟳ reindex 按钮**：反代到 child `/v1/index/rebuild`，child idle 时禁用 + 提示
+- 验证卡：anydocs loader warnings + console 自加（pages/ 不存在、空 lang 子目录）合并
+- 首次设置引导：totalPages=0 时显大字 + 文件树骨架 + 路径
+- 内容探索器：按 lang 切换 → 导航树（按 breadcrumb 自动分块）→ 每页 id/slug/status；missing file 红字；orphan（pages/ 有但 navigation/ 没引用）红色分组
+
+#### 13.4.6 Traffic tab（7d 健康度 + runs 详情 + Re-ask）
+
+- 4 KPI 卡 + 按日分桶 sparkline：queries · 7d / mean confidence / P95 latency (含 P50) / non-answer rate (error + clarify)
+- 筛选条：query / source(reader|console) / kind / minConf
+- runs 表（SSR）：行展开看完整 fused top-8 + answer markdown 渲染 + citations + meta(model/answer_id/request_id/tokens)
+- **Re-ask 按钮**：行展开里点 ↩ 把 query 写回 Ask tab textarea + 切到 Ask tab；用当前 cfg 重跑该问题做对比
+- console 与 reader 流量在 Traffic 视图里都纳入并以 src-pill 区分（与 analyze 默认排除 console 不同——这里需要可见对照）
+
+#### 13.4.7 报告 / runs 查看（兼容入口）
+
+- 旧 `/p/:name/runs` 独立页保留（外链 / 老 bookmark），Traffic tab 同时覆盖功能
+- 项目页直接列 `state/<projectId>/reports/*.md`，按时间倒序，Markdown 在线渲染
+- 不提供搜索 / 全文索引（runs 的检索能力在 §16.2 `runs export` CLI）
+
+### 13.5 非功能与约束
+
+- **绑定**：默认 `127.0.0.1:4100`；不支持 0.0.0.0 / 远程访问（v1 内部专用）。
+- **状态**：console 进程**自身无持久化状态**——所有"配置"读 anydocs.ask.json，所有"数据"读 `<workspace>/state/<projectId>/`。重启 console 不丢任何东西。
+- **认证**：v1 不做 token / 登录——基于 127.0.0.1 + 本机 dev tool 假设。后续如果对外开放，重新评审。
+- **打包**：随 `@anydocs/ask` 同包发布；前端构建产物（如有）打进 dist。无独立 npm 包。
+- **依赖**：后端复用既有依赖（Hono / SQLite / better-sqlite3），不再加新核心运行时依赖。前端走 Hono `html` 模板 SSR，零构建链；浏览器侧仅引入 `marked`（作为运行时依赖，由 console 自身的 `/console/static/marked.esm.js` 端点反代 `node_modules/marked` 的 ESM 入口提供——无 CDN、无外网依赖、与 `127.0.0.1` 内部 dev tool 假设一致）。
+
+### 13.5.1 已知 v1 约束（操作时心里有数）
+
+- **触发 eval / analyze 的 HTTP 请求会阻塞至完成**：v1 MVP 直返结果路径，`run eval` 在中型 docs 上可能 30s+ 才返回。浏览器 fetch 默认超时数分钟内 OK，但 UI 上的 "running…" 文字不会更新。后台任务 + 心跳进度留 v1.5（PRD §13.8）。
+- **同项目 serve + eval 并发可能锁等**：作者手动 `serve docs-zh`（端口 3100）后 console 触发同项目 eval，两个进程都打开 `state/<projectId>/index.db`。SQLite WAL 模式下并发 reader 安全，但 eval 的 `runtime.start()` 会做 fullReindex（写）→ 可能短暂 lock wait，eval 本身变慢但不损坏数据。如撞到，先 stop child 再跑 eval。
+- **子进程冷启动健康探测默认 30s**：dev 模式下 `serve` 子进程要 strip-types 加载 ~50 个 TS 文件 + 嵌入器 warm-up，5s 不够。`<workspace>/.console.json` 的 `childHealthTimeoutMs` 可调（≥1000）。
+
+### 13.6 v1 显式不做
+
+| 项 | 理由 | 何时重评 |
+|---|---|---|
+| ~~Ask 体验台直接落 runs（"灌真实流量"语义）~~ | ~~dry-run 与真实流量混淆会污染 §12.7 analyze；v1 默认走 dry-run，避免作者测试自动写库~~ | **2026-05-11 落地**：UI 加 persist 切换（默认 OFF + 不记忆），runs 多 `source: "reader" \| "console"` 字段，analyze / golden 默认排除 console 流量，`--include-console` 显式纳入。详 §13.4.2 |
+| "标记 bad / good" 按钮 → feedback inbox | v1.5 §11 反馈回路尚未落地；过早引入会先于 β/γ 信号链 | v1.5 §11 落地时同步加 |
+| 检索 / LLM 完整 trace（prompt 全文 / token 用量 / 中间排序） | v1 ask 未埋点；要改 `/v1/ask` 协议加 `?debug=1` | v1.5 |
+| 写权限的 Golden 编辑器（候选审 / 通过 / 驳回 in-UI） | 文件优先；候选文件直接编辑 jsonl 即可，UI 化收益不抵复杂度 | 看作者真实使用频率 |
+| 多用户 / 远程访问 / 团队共享 | v1 内部专用；多用户场景与 PRD §6 本地优先冲突 | v2 |
+| 自动定时任务（cron 调 eval / analyze） | 应用层职责，非 console 职责（用 macOS launchd / cron + CLI 即可） | — |
+
+### 13.7 v1 验收标准（console 增量）
+
+| # | 标准 | 验证方式 |
+|---|---|---|
+| 1 | `anydocs-ask console` 启动后绑定 `127.0.0.1:4100`，列出 `<workspace>/projects/*` 全部项目 | 集成测试 |
+| 2 | 点击项目卡片 5 秒内 spawn 出独立 `serve` 子进程，端口落在 4101+ 段，不撞作者手动起的 3100 | 集成测试 |
+| 3 | Ask 体验台默认 dry-run：提交问题后 `<workspace>/state/<projectId>/runs/` 周文件**不增加行数** | 集成测试 |
+| 4 | 项目卡片切换 / console 退出时，子进程正确 SIGTERM，不留僵尸进程 | 集成测试 |
+| 5 | 点击 "Run eval" 触发与 CLI `anydocs-ask eval <project>` **完全等价**的代码路径，输出报告位置一致 | 单元测试 + 集成对照 |
+| 6 | console 自身无 sqlite / 无落盘状态；删除 console 进程或 cwd 不影响任何项目数据 | 红队验证 |
+| 7 | 不暴露 0.0.0.0 / 不开认证：尝试从其他主机访问 4100 端口失败 | 集成测试 |
+| 8 | 同一 query 在 console Ask 体验台返回的 fused/answer/citations 与通过 Reader 直调 child `/v1/ask`（同 child 进程、同请求体）返回结果**逐字段一致**（仅 `_dry_run` / `_persisted` / `_source` 字段差异） | 集成对照 |
+| 9 | persist=true 时 runs jsonl 新行 `source` 字段 = `"console"`；`analyze runs` 默认排除该行；`--include-console` 显式纳入 | 单元 + 集成 |
+
+### 13.8 v1.5 扩展点（不在本版做，仅留口子）
+
+- ~~**Ask 体验台 → 真实流量**：增加"saved"按钮把 dry-run 结果以 `source: "console"` tag 落 runs，方便作者把高质量 dogfood query 灌进数据集。~~ **2026-05-11 落地**，详 §13.4.2 persist 段。
+- **β 标 bad → inbox**：与 v1.5 §11 一同接入；UI 仅写 `feedback/inbox/<date>-<id>.md`，不引入 DB。
+- **检索 / LLM trace 深挖**：要 `/v1/ask` 协议增 `?debug=1` 字段；console 默认带上、外部调用方仍按需。
+- **Golden 候选审**：等作者用一段时间反馈 jsonl 直编是否够用，再决定是否上 UI。

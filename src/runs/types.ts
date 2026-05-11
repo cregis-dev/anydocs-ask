@@ -10,6 +10,15 @@
  * jsonl-version migrations.
  */
 
+/**
+ * Origin of the request. `reader` = real user traffic via the public
+ * /v1/ask endpoint. `console` = author dogfooding via the dev console
+ * ask 体验台 with persist=true (ARCH §17.8). Missing in jsonl rows
+ * written before 2026-05-11 — readers MUST treat absent source as
+ * `reader` for back-compat.
+ */
+export type RunSource = 'reader' | 'console';
+
 export type RunRecord = {
   ts: string;
   request_id: string;
@@ -17,6 +26,12 @@ export type RunRecord = {
   query: string;
   filters: Record<string, unknown>;
   context_pageId: string | null;
+  /**
+   * Optional in the on-disk JSON (legacy rows omit it). Use
+   * `runSource(record)` from ./reader for safe access with a default
+   * of 'reader'.
+   */
+  source?: RunSource;
   retrieval: RunRetrievalTrace;
   answer: RunAnswer;
   feedback: RunFeedback;
@@ -81,3 +96,13 @@ export type RunFeedbackUpdate = {
 };
 
 export type RunsLine = RunRecord | RunFeedbackUpdate;
+
+/**
+ * Safe accessor for RunRecord.source — returns `'reader'` for legacy
+ * rows that pre-date the `source` field. Downstream filters (analyze,
+ * golden generate --from runs) MUST go through this so historical
+ * runs aren't accidentally re-classified.
+ */
+export function runSource(r: RunRecord): RunSource {
+  return r.source ?? 'reader';
+}

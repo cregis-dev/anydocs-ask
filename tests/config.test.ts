@@ -7,7 +7,8 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig } from '../src/config.ts';
+import { homedir } from 'node:os';
+import { loadConfig, resolveTransformersCacheDir } from '../src/config.ts';
 
 async function withTmpProject(setup: (root: string) => Promise<void>): Promise<{
   root: string;
@@ -111,6 +112,60 @@ test('loadConfig: blank ANTHROPIC_MODEL leaves config.llm.model alone', async ()
   } finally {
     if (prev === undefined) delete process.env.ANTHROPIC_MODEL;
     else process.env.ANTHROPIC_MODEL = prev;
+    await cleanup();
+  }
+});
+
+test('resolveTransformersCacheDir: default = ~/.cache/huggingface/anydocs-ask/transformers', async () => {
+  const prev = process.env.ANYDOCS_TRANSFORMERS_CACHE;
+  delete process.env.ANYDOCS_TRANSFORMERS_CACHE;
+  const { root, cleanup } = await withTmpProject(async () => {});
+  try {
+    const r = await loadConfig(root);
+    const got = resolveTransformersCacheDir(r.config);
+    const expected = join(homedir(), '.cache', 'huggingface', 'anydocs-ask', 'transformers');
+    assert.equal(got, expected);
+  } finally {
+    if (prev !== undefined) process.env.ANYDOCS_TRANSFORMERS_CACHE = prev;
+    await cleanup();
+  }
+});
+
+test('resolveTransformersCacheDir: env ANYDOCS_TRANSFORMERS_CACHE wins over config + default', async () => {
+  const prev = process.env.ANYDOCS_TRANSFORMERS_CACHE;
+  process.env.ANYDOCS_TRANSFORMERS_CACHE = '/tmp/custom-hf-cache';
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ embedding: { cacheDir: '/tmp/from-config' } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    const got = resolveTransformersCacheDir(r.config);
+    assert.equal(got, '/tmp/custom-hf-cache');
+  } finally {
+    if (prev === undefined) delete process.env.ANYDOCS_TRANSFORMERS_CACHE;
+    else process.env.ANYDOCS_TRANSFORMERS_CACHE = prev;
+    await cleanup();
+  }
+});
+
+test('resolveTransformersCacheDir: anydocs.ask.json cacheDir picked when env unset', async () => {
+  const prev = process.env.ANYDOCS_TRANSFORMERS_CACHE;
+  delete process.env.ANYDOCS_TRANSFORMERS_CACHE;
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ embedding: { cacheDir: '/tmp/from-config' } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    const got = resolveTransformersCacheDir(r.config);
+    assert.equal(got, '/tmp/from-config');
+  } finally {
+    if (prev !== undefined) process.env.ANYDOCS_TRANSFORMERS_CACHE = prev;
     await cleanup();
   }
 });

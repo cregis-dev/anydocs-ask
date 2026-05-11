@@ -24,7 +24,7 @@ import { buildDefaultLLM } from '../llm/factory.ts';
 import { RunsWriter } from '../runs/writer.ts';
 import type { Embedder } from '../embedding/types.ts';
 import type { LLM } from '../llm/types.ts';
-import type { ResolvedConfig } from '../config.ts';
+import { resolveTransformersCacheDir, type ResolvedConfig } from '../config.ts';
 
 export type RuntimeOptions = {
   /** Source: anydocs project (pages/ + navigation/). */
@@ -186,7 +186,10 @@ function buildDefaultEmbedder(config: ResolvedConfig): Embedder {
   // is), but we want a deterministic default for tests / dev that explicitly
   // ask. For the real `local` path, dispatch by model name.
   if (config.embedding.provider === 'local' && config.embedding.model === 'bge-m3') {
-    return new Bgem3Embedder({ preferQuantized: config.embedding.preferQuantized });
+    return new Bgem3Embedder({
+      preferQuantized: config.embedding.preferQuantized,
+      cacheDir: resolveTransformersCacheDir(config),
+    });
   }
   // Unknown model — fall back to mock so the server boots but logs are loud.
   process.stderr.write(

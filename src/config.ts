@@ -11,6 +11,7 @@
  */
 
 import { promises as fs } from 'node:fs';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 export type EmbeddingConfig = {
@@ -18,6 +19,20 @@ export type EmbeddingConfig = {
   model: string;
   allowSingleLangFallback: boolean;
   preferQuantized: boolean;
+  /**
+   * Absolute path to the transformers.js model cache. null = built-in
+   * fallback (~/.cache/huggingface/anydocs-ask/transformers/).
+   *
+   * The transformers.js default points inside node_modules/, which gets
+   * wiped by every `pnpm install` and is per-worktree — forcing a 2GB
+   * bge-m3 re-download. A stable home-cache location survives both.
+   *
+   * Resolution order (highest first):
+   *   1. env ANYDOCS_TRANSFORMERS_CACHE
+   *   2. anydocs.ask.json embedding.cacheDir
+   *   3. ~/.cache/huggingface/anydocs-ask/transformers/
+   */
+  cacheDir: string | null;
 };
 
 export type LLMConfig = {
@@ -95,6 +110,7 @@ const DEFAULTS: ResolvedConfig = {
     model: 'bge-m3',
     allowSingleLangFallback: false,
     preferQuantized: false,
+    cacheDir: null,
   },
   llm: {
     provider: 'anthropic',
@@ -179,6 +195,24 @@ export function applyEnvOverrides(config: ResolvedConfig): void {
   }
 }
 
+/**
+ * Resolve the absolute path for the transformers.js model cache. Highest
+ * priority wins; null inputs fall through to the next source.
+ *
+ *   1. env ANYDOCS_TRANSFORMERS_CACHE
+ *   2. config.embedding.cacheDir
+ *   3. ~/.cache/huggingface/anydocs-ask/transformers/
+ *
+ * Path is NOT mkdir-ed here — callers (Bgem3Embedder) do that when they
+ * actually need to write.
+ */
+export function resolveTransformersCacheDir(config: ResolvedConfig): string {
+  const env = process.env.ANYDOCS_TRANSFORMERS_CACHE?.trim();
+  if (env && env.length > 0) return resolve(env);
+  if (config.embedding.cacheDir) return resolve(config.embedding.cacheDir);
+  return join(homedir(), '.cache', 'huggingface', 'anydocs-ask', 'transformers');
+}
+
 // ---------------------------------------------------------------------------
 // Merge / validate helpers
 // ---------------------------------------------------------------------------
@@ -258,6 +292,19 @@ function applySection(
   for (const key of Object.keys(target)) {
     if (!(key in obj)) continue;
     const v = obj[key];
+    // null in the default signals an "optional string" slot. Accept string
+    // values (and explicit null, treated as a no-op); reject other types.
+    if (target[key] === null) {
+      if (v === null) continue;
+      if (typeof v !== 'string') {
+        warnings.push(
+          `anydocs.ask.json: ${name}.${key} expected string|null, got ${typeof v}; using default`,
+        );
+        continue;
+      }
+      target[key] = v;
+      continue;
+    }
     const expected = typeof target[key];
     if (typeof v !== expected) {
       warnings.push(

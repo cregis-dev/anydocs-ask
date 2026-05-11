@@ -16,6 +16,7 @@
  * stage-5 e2e test triggers a single warm-up if env ANYDOCS_ASK_TEST_REAL_EMBED=1.
  */
 
+import { mkdirSync } from 'node:fs';
 import type { FeatureExtractionPipeline } from '@huggingface/transformers';
 import type { Embedder, EmbedResult } from './types.ts';
 
@@ -51,7 +52,12 @@ export class Bgem3Embedder implements Embedder {
     if (this.ready && this.pipeline) return;
     // Lazy-load to keep MockEmbedder users from paying the import cost.
     const tx = await import('@huggingface/transformers');
-    if (this.cacheDir) tx.env.cacheDir = this.cacheDir;
+    if (this.cacheDir) {
+      // mkdir before transformers.js touches it; getModelFile fails opaquely
+      // if the parent dir doesn't exist on first run.
+      mkdirSync(this.cacheDir, { recursive: true });
+      tx.env.cacheDir = this.cacheDir;
+    }
     this.pipeline = (await tx.pipeline('feature-extraction', this.hfModel, {
       dtype: this.preferQuantized ? 'q8' : 'fp32',
     })) as FeatureExtractionPipeline;

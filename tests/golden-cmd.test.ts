@@ -197,6 +197,165 @@ test('golden generate --from runs returns 1 when no runs file exists', async () 
   }
 });
 
+test('golden generate --from runs: excludes source=console by default', async () => {
+  const { root, cleanup } = await buildProject();
+  try {
+    await fs.mkdir(join(root, 'runs'), { recursive: true });
+    const week = '2026-W19';
+    const baseRecord = (q: string, src: 'reader' | 'console') => ({
+      ts: '2026-05-08T03:14:15.123Z',
+      request_id: q.toLowerCase().replace(/\W+/g, '-'),
+      session_id: null,
+      query: q,
+      filters: {},
+      context_pageId: null,
+      source: src,
+      retrieval: { fused: [], subtree_ask_triggered: false },
+      answer: {
+        kind: 'answer',
+        answer_id: 'a-' + q,
+        md: 'short answer about ' + q,
+        citations: [{ chunk_id: 1, page: 'jwt', quote: '' }],
+        confidence: 0.92,
+        latency_ms: 200,
+        tokens_in: null,
+        tokens_out: null,
+        model: 'mock',
+        error_code: null,
+      },
+      feedback: { beta: null, gamma: null },
+    });
+    await fs.writeFile(
+      join(root, 'runs', `${week}.jsonl`),
+      [baseRecord('JWT 续期是什么', 'reader'), baseRecord('test 体验台 query', 'console')]
+        .map((r) => JSON.stringify(r))
+        .join('\n') + '\n',
+    );
+    const { promise, reset } = captureIo(() =>
+      runGoldenGenerate({
+        projectRoot: root,
+        stateRoot: root,
+        from: 'runs',
+        llmRewrite: false,
+        force: false,
+      }),
+    );
+    const code = await promise;
+    const { out } = reset();
+    assert.equal(code, 0);
+    assert.match(out, /excluded 1 console-origin/);
+    const candidates = readCandidates(root).rows;
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0]!.query, 'JWT 续期是什么');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('golden generate --from runs --include-console: pulls in console-origin runs', async () => {
+  const { root, cleanup } = await buildProject();
+  try {
+    await fs.mkdir(join(root, 'runs'), { recursive: true });
+    const record = (q: string, src: 'reader' | 'console') => ({
+      ts: '2026-05-08T03:14:15.123Z',
+      request_id: q.toLowerCase().replace(/\W+/g, '-'),
+      session_id: null,
+      query: q,
+      filters: {},
+      context_pageId: null,
+      source: src,
+      retrieval: { fused: [], subtree_ask_triggered: false },
+      answer: {
+        kind: 'answer',
+        answer_id: 'a-' + q,
+        md: 'short answer about ' + q,
+        citations: [{ chunk_id: 1, page: 'jwt', quote: '' }],
+        confidence: 0.92,
+        latency_ms: 200,
+        tokens_in: null,
+        tokens_out: null,
+        model: 'mock',
+        error_code: null,
+      },
+      feedback: { beta: null, gamma: null },
+    });
+    await fs.writeFile(
+      join(root, 'runs', '2026-W19.jsonl'),
+      [record('JWT 续期', 'reader'), record('OAuth 授权码模式', 'console')]
+        .map((r) => JSON.stringify(r))
+        .join('\n') + '\n',
+    );
+    const { promise, reset } = captureIo(() =>
+      runGoldenGenerate({
+        projectRoot: root,
+        stateRoot: root,
+        from: 'runs',
+        llmRewrite: false,
+        force: false,
+        includeConsole: true,
+      }),
+    );
+    const code = await promise;
+    const { out } = reset();
+    assert.equal(code, 0);
+    assert.doesNotMatch(out, /excluded.*console-origin/);
+    const candidates = readCandidates(root).rows;
+    assert.equal(candidates.length, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('golden generate --from runs: legacy rows without source treated as reader', async () => {
+  const { root, cleanup } = await buildProject();
+  try {
+    await fs.mkdir(join(root, 'runs'), { recursive: true });
+    // No `source` field — represents pre-2026-05-11 jsonl on disk.
+    const legacy = {
+      ts: '2026-05-08T03:14:15.123Z',
+      request_id: 'legacy',
+      session_id: null,
+      query: '历史数据 query',
+      filters: {},
+      context_pageId: null,
+      retrieval: { fused: [], subtree_ask_triggered: false },
+      answer: {
+        kind: 'answer',
+        answer_id: 'a-legacy',
+        md: 'short answer',
+        citations: [{ chunk_id: 1, page: 'jwt', quote: '' }],
+        confidence: 0.95,
+        latency_ms: 200,
+        tokens_in: null,
+        tokens_out: null,
+        model: 'mock',
+        error_code: null,
+      },
+      feedback: { beta: null, gamma: null },
+    };
+    await fs.writeFile(
+      join(root, 'runs', '2026-W19.jsonl'),
+      JSON.stringify(legacy) + '\n',
+    );
+    const { promise, reset } = captureIo(() =>
+      runGoldenGenerate({
+        projectRoot: root,
+        stateRoot: root,
+        from: 'runs',
+        llmRewrite: false,
+        force: false,
+      }),
+    );
+    const code = await promise;
+    reset();
+    assert.equal(code, 0);
+    const candidates = readCandidates(root).rows;
+    assert.equal(candidates.length, 1, 'legacy row was kept');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('golden generate --from inbox still gated as v1.5', async () => {
   const { root, cleanup } = await buildProject();
   try {

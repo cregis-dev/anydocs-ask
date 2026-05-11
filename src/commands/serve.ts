@@ -11,7 +11,7 @@ import { resolve } from 'node:path';
 import { serve as nodeServe } from '@hono/node-server';
 import { createApp } from '../server/app.ts';
 import { Runtime } from '../server/runtime.ts';
-import { loadConfig } from '../config.ts';
+import { loadConfig, resolveTransformersCacheDir } from '../config.ts';
 
 export type ServeOptions = {
   projectRoot: string;
@@ -50,6 +50,7 @@ export async function runServe(opts: ServeOptions): Promise<number> {
           `  source:    ${projectRoot}\n` +
           `  state:     ${stateRoot}\n` +
           `  embedding: ${config.embedding.model}\n` +
+          `  hf-cache:  ${resolveTransformersCacheDir(config)}\n` +
           `  llm:       ${config.llm.provider}/${config.llm.model}\n` +
           `  GET /v1/health will return 503 until warm-up finishes.\n`,
       );

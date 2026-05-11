@@ -28,7 +28,7 @@
  * source-repo location (no more polluting symlinked source repos).
  */
 
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
@@ -181,4 +181,78 @@ export function ensureStateRoot(workspacePath: string, projectId: string): strin
     mkdirSync(stateRoot, { recursive: true });
   }
   return stateRoot;
+}
+
+export type ProjectListing = {
+  /** Bare directory name under projects/ */
+  name: string;
+  /** Absolute path to projects/<name>/ */
+  path: string;
+  /** pages/ + navigation/ both present */
+  valid: boolean;
+  /** Required dirs that are missing (subset of ['pages/', 'navigation/']) */
+  missing: string[];
+  /** projectId from anydocs.config.json, or null if missing/unreadable */
+  projectId: string | null;
+  /** state/<projectId>/index.db exists */
+  indexed: boolean;
+};
+
+/**
+ * Scan `<workspace>/projects/*` and report each project's validity / index
+ * state. Used by `workspace ls` and the v1 dev console (ARCH §17.3.2
+ * `GET /api/projects`). Returns [] if the workspace has no `projects/` dir.
+ *
+ * Sorted by name (locale order). Symlinks are followed; broken links and
+ * non-directory entries are skipped silently.
+ */
+export function scanProjects(workspacePath: string): ProjectListing[] {
+  const projectsDir = join(workspacePath, 'projects');
+  if (!existsSync(projectsDir)) return [];
+
+  const entries = readdirSync(projectsDir, { withFileTypes: true });
+  const out: ProjectListing[] = [];
+  for (const ent of entries) {
+    if (!ent.isDirectory() && !ent.isSymbolicLink()) continue;
+    const projPath = join(projectsDir, ent.name);
+    let isDir = false;
+    try {
+      isDir = statSync(projPath).isDirectory();
+    } catch {
+      continue;
+    }
+    if (!isDir) continue;
+
+    const missing: string[] = [];
+    if (!existsSync(join(projPath, 'pages'))) missing.push('pages/');
+    if (!existsSync(join(projPath, 'navigation'))) missing.push('navigation/');
+
+    const projectId = readProjectIdSafe(projPath);
+    const indexed =
+      projectId !== null && existsSync(join(resolveStateRoot(workspacePath, projectId), 'index.db'));
+
+    out.push({
+      name: ent.name,
+      path: projPath,
+      valid: missing.length === 0,
+      missing,
+      projectId,
+      indexed,
+    });
+  }
+  out.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
+}
+
+function readProjectIdSafe(projPath: string): string | null {
+  const configPath = join(projPath, 'anydocs.config.json');
+  if (!existsSync(configPath)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as { projectId?: unknown };
+    return typeof parsed.projectId === 'string' && parsed.projectId.length > 0
+      ? parsed.projectId
+      : null;
+  } catch {
+    return null;
+  }
 }

@@ -634,6 +634,18 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
   - 实现细节：embedding_cache 的 `model` 列在量化时附 `:q8` 后缀（`Xenova/bge-m3:q8`），fp32/int8 互不污染缓存；切换 `preferQuantized` 不会静默用错维度向量
   - v1 默认仍 fp32（保留召回保真），但**生产 / VPS 场景推荐 `preferQuantized: true`**；仅在 PRD §8 召回回归测试发现明显损失才回 fp32
 
+### transformers.js 模型缓存路径（2026-05-11 修订）
+
+`@huggingface/transformers` 默认 `cacheDir` 指向 `node_modules/.pnpm/.../@huggingface/transformers/.cache/` — pnpm 任意装包 / 多 worktree 都会清空它，强制 ~2.2GB bge-m3 重下载。v1 显式接管 cacheDir，**默认落 `~/.cache/huggingface/anydocs-ask/transformers/`**，跨 worktree / 装包稳定。
+
+**解析顺序**（高优先级先）：
+
+1. env `ANYDOCS_TRANSFORMERS_CACHE`（运维 / CI 覆盖）
+2. `anydocs.ask.json` 的 `embedding.cacheDir`（项目级显式）
+3. 默认 `~/.cache/huggingface/anydocs-ask/transformers/`
+
+`Bgem3Embedder.warmUp()` 启动时 mkdir -p 此目录后再交给 transformers.js（避免 getModelFile 在缺父目录时报不透明的 "Unable to get model file path or buffer"）。`serve` 启动日志会打印 `hf-cache: <绝对路径>`，便于排查。
+
 ---
 
 ## 9. 配置
@@ -646,7 +658,8 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
     "provider": "local",
     "model": "bge-m3",
     "allowSingleLangFallback": false,
-    "preferQuantized": false
+    "preferQuantized": false,
+    "cacheDir": null
   },
   "llm": {
     "provider": "anthropic",
@@ -1224,6 +1237,7 @@ Baseline: 2026-04-25 (R@5=0.74, Cit=0.68, Ans=0.62)
   "query": "JWT 怎么续期",
   "filters": { "audience": "public", "version": null },
   "context_pageId": null,
+  "source": "reader",
   "retrieval": {
     "fused": [
       {
@@ -1260,6 +1274,7 @@ Baseline: 2026-04-25 (R@5=0.74, Cit=0.68, Ans=0.62)
 - `answer.confidence`：v1 用 rerank 后 `top_final_score` 作为代理；待 v1.5 引入 reranker model 后替换为模型分。
 - `answer.tokens_in / tokens_out`：v1 LLM 接口未暴露，写 `null`；后续 LLM 接口扩展时填充。schema 不变。
 - `answer.error_code`：仅 `kind='error'` 时非 null（如 `invalid_scope` / `invalid_question`）。
+- `source`：`"reader" | "console"`（2026-05-11 加入）。Reader 直调 `/v1/ask` 时填 `"reader"`；dev console persist 切换开启时填 `"console"`。**旧 jsonl 行缺此字段 → 读取时视为 `"reader"`**（`runs/types.ts:runSource()` 兜底）。`analyze` / `golden generate --from runs` 默认排除 `"console"`，`--include-console` 显式纳入。详 §17.3.3 / §17.8。
 
 **写入路径**：`server/app.ts` `/v1/ask` handler 调 `query/answer.ts:askWithTrace()` 拿到 `{ result, trace }`，末尾同步 append 一行 jsonl（`appendFileSync`；I/O 微秒级，相对 SQLite + LLM 可忽略；失败仅 stderr，不阻塞响应）。
 
@@ -1408,7 +1423,270 @@ subtree_ask_triggered rate: 18% (74 / 412), of which 31 未跟进 →
 |---|---|---|
 | 一进程多项目加载 | PRD §5.5 / §12.2 决策 4 否决 | v2 |
 | 跨项目共享 sqlite / runs / golden | 一进程一项目硬约束 | v2 |
-| Web 评测面板 | 与 v1.5 §11 决策 #3 一致：文件优先、git 友好 | 看作者侧反馈 |
+| Web 评测面板（对外 / 替代文件流） | 与 v1.5 §11 决策 #3 一致：文件优先、git 友好 | — |
+| ~~内部 dev console（作者本机评测台）~~ | 2026-05-10 立项：作为既有 CLI 的可视化壳、零独立状态、不替代文件流 → 见 §17 | 已收敛 |
 | LLM 自动审 Golden（替代人工筛选） | 引入幻觉；与 v1.5 §15.8 "LLM 辅助审核"一致否决 | — |
 | Runs 写入远端 | 本地优先；v1 默认 127.0.0.1 | v2 多用户 / 团队版 |
 | Embedding 漂移自动告警 | 维度 5 仅做诊断不告警 | 看 v1.5 真实数据 |
+
+## 17. v1 dev console（实现）
+
+> 对应 [PRD §13](./PRD.md)。Date: 2026-05-10。
+> 范围：v1 增量。仅供作者本机使用、不对外暴露。修订 §16.9 "Web 评测面板"否决项，详见 §17.7。
+
+### 17.1 形态与启动
+
+**新增 CLI 子命令**（同包，复用 workspace / projectId 解析）：
+
+```bash
+anydocs-ask console [--workspace <path>] [--port 4100] [--idle-timeout-min 15]
+```
+
+启动序列：
+
+```
+1. resolveWorkspace() —— 与 §16.1.1 同
+2. loadEnv()           —— 仅 <workspace>/.env（不加载任何 projectRoot/.env，console 是 meta 层）
+3. scanProjects()      —— 扫 <workspace>/projects/*，不启动任何子进程
+4. startHonoApp()      —— 绑定 127.0.0.1:4100；JSX SSR 路由 + JSON 路由
+5. attachShutdown()    —— SIGINT/SIGTERM 时按 PID 表 SIGTERM 全部 child serve
+```
+
+**绑定**：硬编码 `127.0.0.1`，**无 `--host` flag**；尝试 `--host 0.0.0.0` 应被 CLI 拒绝（console 是内部 dev tool 假设）。
+
+**与 `serve` 的关系**：console 不是 serve 的替代。作者手动 `anydocs-ask serve docs-zh --port 3100` 仍合法、独立运行；console 不会感知它（也不该）。console 自己 spawn 的子进程走 4101+ 段，互不干扰。
+
+### 17.2 进程编排
+
+#### 17.2.1 模型：lazy spawn + idle reap
+
+```
+ProcessRegistry {
+  byProjectName: Map<string, { pid, port, child, startedAt, lastUsedAt }>
+}
+```
+
+- **首次访问触发 spawn**：UI 点击 "Open project" → POST `/api/projects/<name>/start` → console fork `anydocs-ask serve <name> --port <auto>`；端口由 console 从 `4101..4199` 顺序探活分配。
+- **健康探测**：spawn 后 console 轮询 `http://127.0.0.1:<port>/v1/health` 至最长 5s；超时则 SIGKILL + 报错。
+- **Idle reap**：每 60s 扫一遍 registry，`now - lastUsedAt > idleTimeoutMin*60s` 的子进程 SIGTERM；优雅期 5s 后 SIGKILL。
+- **显式停止**：UI 点 "Stop" → SIGTERM。
+- **console 退出**：所有子进程 SIGTERM；进程组在 macOS / Linux 下走 `process.kill(-pid, 'SIGTERM')` 一次性收尾。
+
+#### 17.2.2 端口分配
+
+```
+4100         console 自身
+4101–4199    console-spawned serve 子进程（按 spawn 顺序占用最低空闲）
+3100+        作者手动 serve（§16.1.3 推荐区段，console 不碰）
+```
+
+冲突处理：4101–4199 全占用时报错（实际场景不会触达 99 个项目）。
+
+#### 17.2.3 反向代理 vs 直接调用
+
+**Ask 体验台**：console 不直接 import 子进程的 ask 模块（违背一进程一项目）。**反向代理** `POST /api/projects/<name>/ask` → `POST http://127.0.0.1:<childPort>/v1/ask`，附加 `?dry_run=1` 参数（详见 §17.3.2）。
+
+**Eval / Analyze / Golden**：这些**不需要子进程已在跑**——它们读 `state/<projectId>/` 文件 + 直接拿 sqlite。console **直接 in-process 调用** `eval()` / `analyzeRuns()` / `goldenGenerate()` 函数（与 CLI 入口同代码路径）。这避免重复 spawn 浪费内存、也保证 CLI 与 UI 行为完全等价。
+
+### 17.3 HTTP 路由
+
+#### 17.3.1 SSR 页面
+
+| 路由 | 内容 |
+|---|---|
+| `GET /` | 项目选择器（卡片网格） |
+| `GET /p/:name` | 项目详情：左 sidebar（status / lifecycle / Golden / Analyze / reports）+ 顶部 next-action 横幅（§17.3.7）+ 右主区 **4 tab** （Ask / Index / Eval / Traffic）+ 右侧 Config drawer（§17.3.9）。tab 由 hash `#tab` 持久化、刷新保留 |
+| `GET /p/:name/reports/:file` | 渲染 `state/<projectId>/reports/<file>.md` |
+| `GET /p/:name/runs` | 分页 jsonl 查看（最近 50，可过滤 query/confidence/latency） |
+
+#### 17.3.2 JSON API（console 自身）
+
+| 路由 | 行为 |
+|---|---|
+| `GET /api/projects` | 同 `workspace ls`，附 `running: bool` / `port?: number` |
+| `POST /api/projects/:name/start` | lazy spawn；返回 `{ port }` |
+| `POST /api/projects/:name/stop` | SIGTERM child，registry 删 entry |
+| `POST /api/projects/:name/ask` | 默认反代到 child `/v1/ask?dry_run=1`；body 含 `{persist: true}` 时改走 `/v1/ask?source=console`，child 落 runs 时打 `source="console"`。`persist` 字段被代理消费、不转发给 child |
+| `POST /api/projects/:name/eval` | in-process 调用 `eval()`；body 可选 `{ baseline_path: "<YYYY-MM-DD-eval.md>" }` 覆盖对比基线；未传时优先用 pin 文件，无 pin 则走 CLI 默认 |
+| `POST /api/projects/:name/eval/pin-baseline` | body `{ filename }` → 写 `state/<id>/golden/eval-baseline.json` |
+| `DELETE /api/projects/:name/eval/pin-baseline` | 删 pin 指针文件 |
+| `POST /api/projects/:name/analyze` | in-process 调用 `analyzeRuns()` |
+| `POST /api/projects/:name/golden/generate` | in-process 调用 `goldenGenerate({ from: 'structure'\|'runs' })` |
+| `POST /api/projects/:name/reindex` | 反代到 child `/v1/index/rebuild`；child idle → 502 |
+| `GET /api/projects/:name/runs?limit=50&since=...` | 直读 `state/<projectId>/runs/*.jsonl`（不经 child） |
+| `GET /api/projects/:name/reports` | 列 `state/<projectId>/reports/*.md` |
+
+#### 17.3.3 `dry_run` / `source` 协议（v1 ask 增量）
+
+`POST /v1/ask` 接受两个可选 query parameter：
+
+| 参数 | 类型 / 默认 | 行为 |
+|---|---|---|
+| `dry_run` | `"1"` \| 缺省 | 缺省 = 正常路径；`=1` 时跳过 `RunsWriter.append()` 与 answer-cache 读写；response 增加 `_dry_run: true` |
+| `source` | `"reader"` \| `"console"` \| 缺省 | 缺省 = `"reader"`；未知值 → 400 invalid_request。`RunRecord.source` 字段以此标记。**dry_run=1 时 source 被忽略**（不写 runs 也就无 source 落地） |
+
+**优先级**：`dry_run` 胜过 `source`。同时传 `?dry_run=1&source=console` → 不写 runs。
+
+**为什么 source 不放 body**：与 `dry_run` 同位置；child 的 `AskRequest` schema 保持不变（向后兼容 Reader），proxy 与 CLI 都不需要扩 schema。
+
+**console 反代映射**（ARCH §17.3.2 路由）：
+- `body.persist !== true` → `?dry_run=1`（默认）
+- `body.persist === true` → `?source=console`，child 写 runs `source: "console"`，response 由 console 端补 `_persisted: true` / `_source: "console"` 后返给 UI
+
+这是对 v1 ask 的**最小侵入**——一条分支、一个字段，无 schema 变化。CLI / Reader 默认行为不变。
+
+#### 17.3.4 Eval tab（2026-05-11 加入）
+
+项目页右主区从 \"Ask 体验台 + activity\" 升级为三 tab 结构：
+
+| Tab | 内容 |
+|---|---|
+| **Ask** | 现有 Ask 体验台（dry-run / persist toggle / Answer-Citations-Meta 子 tab） |
+| **Eval** | golden 题集概览 + 三指标卡 + baseline pin/unpin + Run eval + 最近报告 markdown 渲染 + history 表 + sparkline 趋势 |
+| **Activity** | runs / reports 入口（保留兼容；后续可吸收为 tab 内嵌） |
+
+**Eval tab 完整工作流**：
+1. 题集状态：从 `<state>/golden/cases.jsonl` 读 # cases，按 lang / tag / created_by 分桶（unicode bar chart，零依赖）
+2. 最新 eval：解析最近一份 `<state>/reports/<YYYY-MM-DD>-eval.md` 的 `<!-- EVAL_SUMMARY {...} -->` 注释拿三指标；与 pin 的 baseline 对比给 Δ
+3. baseline pin：`<state>/golden/eval-baseline.json` 是个 \"指针文件\"（schema `{ filename, pinnedAt }`），eval CLI **不需要改**——console POST `/eval` 时读 pin 文件，把指向的报告路径作为 `baselinePath` 传给 `runEval()`。CLI 用户无 pin 仍走默认 \"latest prior eval\" 行为。
+4. Run eval：UI dropdown 选 \"previous eval (default) / pinned / 任一历史报告\"，console 反代到 `POST /api/projects/:name/eval` 带 `baseline_path` body
+5. 最近报告：浏览器侧 marked 渲染 `<state>/reports/<date>-eval.md`（与 §17.4 markdown 共用）
+6. history 表：列所有 eval 报告 + 每行 pin 按钮 + sparkline（`▁▂▄▅▆▇` unicode block，趋势 ≥3 报告时显示）
+
+**console-side 零状态原则不破**：pin 文件落 `<state>/<id>/golden/`（项目侧 state），不在 console 进程内存或 console-side 配置。删 console 进程或 cwd 不影响 pin 状态。
+
+#### 17.3.5 Index tab（2026-05-11 加入）
+
+完整工作流的"加载 docs → 索引"步骤（之前 console 完全没接）。`/p/:name`
+tab "Index" 渲染：
+
+| 卡片 | 内容 | 数据源 |
+|---|---|---|
+| index 状态 | on-disk pages / DB pages / chunks / embed_cache / last_indexed_at | disk + child `/v1/index/status`（反代，child idle 时显 "—"） |
+| ⟳ reindex | 按钮 → `POST /api/projects/:name/reindex` → child `/v1/index/rebuild` | 反代；child idle 时禁用 |
+| validation | loader warnings + console 自加（pages/ 不存在 / 空 lang 子目录） | `loadIndexSnapshot` |
+| 首次设置引导 | totalPages=0 时显大字 + 文件树骨架 + 路径 | — |
+| 内容探索器 | lang tabs → navigation 树（按 breadcrumb 分块） → 每页 id/slug/status；missing file 红字；orphan 红色分组 | `loadProject()` |
+
+实现：`src/console/index-state.ts` 加载 + `src/console/pages/project-index-tab.ts` 渲染。
+
+#### 17.3.6 Traffic tab（2026-05-11 加入）
+
+替换之前的 Activity tab + 独立 `/p/:name/runs` 页（保留兼容入口）。
+
+| 区块 | 内容 |
+|---|---|
+| 健康度 strip | 4 KPI 卡 + 按日分桶 sparkline：queries · 7d / mean confidence / P95 latency (P50 副) / non-answer rate (error + clarify) |
+| 筛选条 | query / source(reader\|console) / kind / minConf |
+| runs 表 | SSR 行；每行 ts/kind+src-pill/conf/latency/query/cit |
+| 行展开 | 左：fused top-8 表 + meta(model/answer_id/request_id/tokens) + ↩ Re-ask 按钮；右：answer markdown + citations |
+| Re-ask | 写回 Ask tab textarea + 切到 Ask tab + 滑哈希到 `#ask`；当前 cfg 重跑对比 |
+
+`src/console/traffic-state.ts` 装载 7d 窗口；console-origin runs 与 reader 一同纳入（与 analyze 默认排除不同——Traffic 视图需要可见对照）。
+
+#### 17.3.7 Next-action 横幅（2026-05-11 加入）
+
+项目页 tab strip 上方根据 snapshots 推断"作者下一步该做什么"：
+
+```ts
+computeNextAction({ indexSnapshot, evalSnapshot, trafficWindow, childLive, projectValid })
+  → NextAction { level, title, detail?, cta: { label, targetTab } } | null
+```
+
+优先级从 funnel 头开始：项目无效 → 缺 docs → 缺文件引用 → disk/DB 漂移 → 未启动 → 没题集 → 没首次 eval → 没 pin → 流量 error/conf 告警 → null。
+
+CTA 是 `<a href="#tab">`，layout 加 `hashchange` listener 触发 `setProjectTab()`。零状态、纯函数推断。
+
+#### 17.3.8 Home 页 workspace strip + 项目卡 stats（2026-05-11 加入）
+
+`GET /` 装载：
+- `loadProjectHomeStats(workspacePath, p)` → 每项目 `{ cases, lastEvalDate, runs7d, lastActivity }`
+- `summarizeWorkspace(...)` → workspace-level rollup
+
+页面渲染顶部 KPI strip（valid/total · indexed · running · cases · runs · most recent）+ 卡片底部加 stats 行。
+
+#### 17.3.9 Config drawer（2026-05-11 加入）
+
+`layout()` 加 `configDrawer?: Html` 参数。所有页（home / 项目页）均传 view model；header 加 `⚙` gear 按钮触发 drawer 滑出。
+
+三个 section（read-only）：
+| section | path | 渲染 |
+|---|---|---|
+| workspace · .env | `<workspace>/.env` | 行表；secret keys (API_KEY/AUTH_TOKEN/SECRET/PASSWORD/TOKEN/PRIVATE_KEY 结尾) 自动 `abcd***xy` 脱敏（前 4 / 后 2） |
+| workspace · .console.json | `<workspace>/.console.json` | JSON 渲染 |
+| project · anydocs.ask.json | `<projectRoot>/anydocs.ask.json` | JSON 渲染（仅项目页） |
+
+ESC / 点外侧 / 点 × 关闭。Phase 1 仅只读；inline edit 涉及 \"console 自身零状态\" 锁，Phase 2 评估。
+
+### 17.4 前端形态
+
+**SSR + Hono `html` 模板**，零前端构建链：
+
+- 路由处理函数返回 `c.html(...)`；模板用 Hono 内置 `html\`...\`` tagged literal（不是 JSX/TSX）。
+- 交互（提交 ask、tab 切换、runs 过滤、autostart）走原生 `fetch()` + vanilla JS。每页 inline 脚本 ≤ 200 行；不引入构建链、不引入 React/Vue/Svelte。
+- 浏览器侧 markdown 渲染由 `marked` 提供（v18，作为 `dependencies`）；console 自身在 `GET /console/static/marked.esm.js` 反代 `require.resolve('marked')` 的 ESM 入口，无 CDN、无外网依赖。
+- 静态资源 CSS 内联在 layout 模板里（`dist/` 即 dist，不需要单独 copy）；图标走 emoji / unicode（不引入图标库）。
+- **无 React / Vue / Svelte / Vite / Webpack / TSX 构建**。
+
+理由：作者本机 dogfood 工具，交互复杂度可控（home/project/runs/report 四视图），SPA 收益不抵工程负担。`marked` 是唯一例外——markdown 手写正则在 ask answer / 报告渲染上回报太低、错误代价高（cite 锚点错位会误导评测判断）。如未来要实时 trace stream / 富交互，再评审升级（§17.8 留口子）。
+
+### 17.5 与现有模块的依赖关系
+
+| 模块 | console 用法 | 是否需改 |
+|---|---|---|
+| `core/workspace.ts`（resolveWorkspace / scanProjects） | 直接 import | 不改 |
+| `server/app.ts` `/v1/ask` | 反代调用，加 `?dry_run=1` | **加 dry_run 分支**（§17.3.3） |
+| `server/app.ts` `/v1/admin/reindex` | 反代调用 | 不改 |
+| `eval/index.ts` 入口函数 | 直接 import | 抽出"CLI 入口 vs 函数入口"（如已分则不改） |
+| `analyze/runs.ts` 入口函数 | 直接 import | 同上 |
+| `golden/generate.ts` 入口函数 | 直接 import | 同上 |
+| `runs/reader.ts`（按周读 jsonl） | 直接 import | 如不存在则新增（read-only utility） |
+
+> **实施前置**（独立一次 refactor commit，不与 console 立项耦合）：audit `src/cli.ts`，把 `eval` / `analyze` / `golden generate` 三个子命令的"业务函数"从"argv 解析"里抽出来导出。这一步**先于** console 任何代码动工——避免 console 实施期同时改 CLI 内部、PR 难审。
+
+### 17.6 配置
+
+console 是 workspace 级 meta 层，配置文件落 **`<workspace>/.console.json`**（**不是** per-project `anydocs.ask.json`）：
+
+```json
+{
+  "enabled": true,
+  "port": 4100,
+  "idleTimeoutMin": 15,
+  "childPortRangeStart": 4101,
+  "childPortRangeEnd": 4199
+}
+```
+
+理由：console 端口段 / idle 策略与"某个项目"无关，挂在 per-project 配置里反直觉、且会出现 N 份冲突值。`<workspace>/.console.json` 与 `<workspace>/.env` 同位、同语义（workspace 全局）。
+
+加载顺序：CLI flag > `<workspace>/.console.json` > 内置默认。文件不存在时按内置默认跑（不要求作者先初始化）。`enabled: false` 时 `anydocs-ask console` 命令报错并指引（不静默成空 server）。
+
+### 17.7 §16.9 修订（2026-05-10）
+
+§16.9 "Web 评测面板"原条目语义收敛为两条：
+
+1. **对外 Web 评测面板** / **替代文件流的 Web 审核面板** —— 仍否决（与 v1.5 §11 决策 #3 一致）。
+2. **内部作者本机的 dev console** —— **解禁**，限定形态：(a) 既有 CLI 的可视化壳；(b) 零独立状态（无 DB / 无落盘 console-side 配置）；(c) **dry-run 默认**——`persist` 切换可显式写 runs，但 `source="console"` 隔离、UI 不记忆该状态、`analyze` / `golden` 下游默认排除（2026-05-11 第 1 条 v1.5 §17.8 落地）；(d) 仅 127.0.0.1。
+
+任何要把 console 推向"可对外 / 多用户 / 替代 inbox 文件" 的提议视为破边界，需重新评审。
+
+### 17.8 v1.5 扩展点
+
+| 能力 | 接入点 | 备注 |
+|---|---|---|
+| ~~Ask 体验台落 runs（"灌真实流量"）~~ | ~~`/api/projects/:name/ask` body 新增 `persist: true` → 反代时不带 `?dry_run=1`；child 落 runs 时附 `source: "console"` tag~~ | **2026-05-11 落地**：runs schema `RunRecord.source?: "reader"\|"console"`（缺省视为 reader 向后兼容）；`runSource()` helper 统一访问；console UI checkbox 默认 OFF + 不记忆；analyze / golden `--include-console` flag |
+| β 标 bad → inbox | `/api/projects/:name/feedback` POST → 直接写 `state/<projectId>/feedback/inbox/<date>-<id>.md`（与 v1.5 §15.5 文件格式一致） | 不引入 DB |
+| 检索 / LLM trace L2 | `/v1/ask` 协议增 `?debug=1` 返回 `_trace`（向量召回 / BM25 / RRF 中间态 / prompt 摘要） | 与 §16.4 runs trace 字段对齐扩展 |
+| Golden 候选 in-UI 审 | 新增 `/p/:name/golden/candidates` 路由，读写 `cases.candidate.jsonl` | 看作者用 jsonl 直编是否够用 |
+
+### 17.9 边界
+
+| 项 | 理由 | 何时重评 |
+|---|---|---|
+| console 自身写任何持久化状态 | 决策 13.5：零独立状态；所有"配置"读 anydocs.ask.json，所有"数据"读 state/。重启不丢任何东西 | 永久 |
+| console 暴露给外部网络 | 13.5 / 17.1：硬编码 127.0.0.1 | v2（多用户 / 团队） |
+| console 加认证 | 同上：本机 dev tool 假设 | v2 |
+| console 接管 cron / 定时任务 | 应用层职责（macOS launchd / cron + CLI 即可） | — |
+| 实时 trace 流（WebSocket / SSE） | v1 SSR + 轮询足够；先看作者真实使用频率 | v1.5 视情 |
+| console 跨 workspace 切换 | 一 console 进程一 workspace；切 workspace 重启 console | 永久 |
