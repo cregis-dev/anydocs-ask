@@ -22,6 +22,7 @@ import { renderTrafficTab } from './project-traffic-tab.ts';
 import type { EvalTabSnapshot } from '../eval-state.ts';
 import type { IndexSnapshot } from '../index-state.ts';
 import type { TrafficWindow } from '../traffic-state.ts';
+import type { CandidateSnapshot } from '../golden-workshop-state.ts';
 import { computeNextAction, type NextAction } from '../next-action.ts';
 import { renderConfigDrawer } from './config-drawer.ts';
 import type { ConfigViewModel } from '../config-state.ts';
@@ -43,6 +44,8 @@ export type ProjectViewModel = {
   trafficWindow?: TrafficWindow;
   /** Config drawer view model (env / .console.json / anydocs.ask.json). */
   configView?: ConfigViewModel;
+  /** Golden candidate snapshot — Eval tab workshop section. */
+  candidates?: CandidateSnapshot;
 };
 
 export function renderProject(vm: ProjectViewModel): Html {
@@ -68,7 +71,7 @@ export function renderProject(vm: ProjectViewModel): Html {
     ${nextAction ? nextActionBanner(nextAction) : ''}
 
     ${project.valid
-      ? html`<div class="grid-2">${sidebar(project, live, running, vm.reports)} ${mainCol(project, live, vm.evalSnapshot, vm.latestEvalReportBody, vm.indexSnapshot, vm.trafficWindow)}</div>`
+      ? html`<div class="grid-2">${sidebar(project, live, running, vm.reports)} ${mainCol(project, live, vm.evalSnapshot, vm.latestEvalReportBody, vm.indexSnapshot, vm.trafficWindow, vm.candidates)}</div>`
       : invalidNotice(project)}
 
     <script>${raw(`
@@ -245,6 +248,7 @@ function mainCol(
   latestEvalReportBody: string | null | undefined,
   indexSnapshot: IndexSnapshot | undefined,
   trafficWindow: TrafficWindow | undefined,
+  candidates: CandidateSnapshot | undefined,
 ): Html {
   return html`
     <div>
@@ -272,6 +276,7 @@ function mainCol(
               projectName: project.name,
               snapshot: evalSnapshot,
               latestReportBody: latestEvalReportBody ?? null,
+              candidates: candidates ?? { total: 0, pending: [], approved: 0, rejected: 0, malformed: 0 },
             })
           : html`<div class="card"><p class="empty">eval 状态不可用。</p></div>`}
       </div>
@@ -522,6 +527,92 @@ function bindOp(id, path) {
 bindOp('btn-analyze', '/analyze');
 bindOp('btn-golden-structure', '/golden/generate?from=structure');
 bindOp('btn-golden-runs', '/golden/generate?from=runs');
+// Golden Workshop generators (Eval tab buttons mirror sidebar ones but with
+// dedicated status line; both go through the same /golden/generate endpoint).
+(function bindGwGenerators() {
+  function bind(id, path) {
+    const btn = $(id);
+    const status = $('gw-gen-status');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      if (status) { status.textContent = id.replace('btn-gen-', '') + '...'; status.className = 'status muted'; }
+      const t0 = Date.now();
+      try {
+        const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + path, { method: 'POST' });
+        const body = await res.json();
+        const dt = Date.now() - t0;
+        if (!res.ok || body.ok === false) {
+          if (status) { status.textContent = 'failed (' + dt + 'ms): ' + (body.error || res.statusText); status.className = 'status err'; }
+        } else {
+          if (status) { status.textContent = 'done (' + dt + 'ms): ' + (body.message || 'ok'); status.className = 'status ok'; }
+          setTimeout(() => location.reload(), 600);
+        }
+      } catch (e) {
+        if (status) { status.textContent = 'network error: ' + (e && e.message ? e.message : e); status.className = 'status err'; }
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+  bind('btn-gen-structure', '/golden/generate?from=structure');
+  bind('btn-gen-runs', '/golden/generate?from=runs');
+})();
+
+// Golden Workshop approve / reject on candidate rows (PRD §13.6 第 4 行
+// v1 锁 broken 2026-05-12 with author consent).
+(function bindGwDecide() {
+  document.querySelectorAll('.gw-candidate').forEach((row) => {
+    const id = row.dataset.id;
+    if (!id) return;
+    row.querySelectorAll('button[data-decide]').forEach((b) => {
+      b.addEventListener('click', async () => {
+        const decision = b.dataset.decide;
+        b.disabled = true;
+        try {
+          const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/golden/decide', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, decision }),
+          });
+          const body = await res.json();
+          if (!res.ok || body.ok === false) {
+            alert((body && body.error) || res.statusText);
+            b.disabled = false;
+            return;
+          }
+          // Visual fade-out: hide row immediately, reload after a beat.
+          row.style.opacity = '0.4';
+          row.style.transition = 'opacity .15s';
+          setTimeout(() => location.reload(), 250);
+        } catch (e) {
+          alert('network error: ' + (e && e.message ? e.message : e));
+          b.disabled = false;
+        }
+      });
+    });
+  });
+  const flush = $('btn-gw-flush');
+  if (flush) {
+    flush.addEventListener('click', async () => {
+      if (!confirm('flush approved candidates → cases.jsonl?')) return;
+      flush.disabled = true;
+      try {
+        const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/golden/flush', { method: 'POST' });
+        const body = await res.json();
+        if (!res.ok || body.ok === false) {
+          alert((body && body.error) || res.statusText);
+          flush.disabled = false;
+          return;
+        }
+        location.reload();
+      } catch (e) {
+        alert('network error: ' + (e && e.message ? e.message : e));
+        flush.disabled = false;
+      }
+    });
+  }
+})();
 
 // ------------------------------------------------------------------
 // Project-page tabs (Ask / Eval / Activity)

@@ -17,12 +17,16 @@
 import { html, raw } from 'hono/html';
 import type { Html } from './layout.ts';
 import type { EvalTabSnapshot, EvalReportSummary } from '../eval-state.ts';
+import type { CandidateSnapshot } from '../golden-workshop-state.ts';
+import type { GoldenCaseCandidate } from '../../golden/types.ts';
 
 export type EvalTabViewModel = {
   projectName: string;
   snapshot: EvalTabSnapshot;
   /** Pre-loaded latest eval report body (markdown). null = no report yet. */
   latestReportBody: string | null;
+  /** Golden candidate jsonl snapshot — workshop section. */
+  candidates: CandidateSnapshot;
 };
 
 export function renderEvalTab(vm: EvalTabViewModel): Html {
@@ -33,6 +37,7 @@ export function renderEvalTab(vm: EvalTabViewModel): Html {
     <div class="eval-tab">
       ${metricRow(latest, pinnedSummary, pinned)}
       ${goldenSummaryCard(goldenStats)}
+      ${workshopCard(vm.candidates)}
       ${runCard(history, pinned)}
       ${latestReportCard(vm.projectName, latest, vm.latestReportBody)}
       ${historyCard(vm.projectName, history, pinned?.filename ?? null)}
@@ -58,6 +63,17 @@ export function renderEvalTab(vm: EvalTabViewModel): Html {
       .eval-history th { background: var(--bg-soft); }
       .eval-history td { font-size: 12.5px; }
       .eval-history .pin-btn { font-size: 11px; padding: 2px 8px; }
+      .gw-card .gw-summary { display:flex; gap:14px; font-size:12.5px; margin-bottom:10px; color: var(--fg-soft); }
+      .gw-card .gw-summary .v { font-family: ui-monospace, monospace; font-weight: 600; color: var(--fg); }
+      .gw-candidate { display: grid; grid-template-columns: 28px 1fr auto; gap: 10px; padding: 10px 12px; border: 1px solid var(--bd-soft); border-radius: 6px; margin-bottom: 8px; background: var(--bg-soft); }
+      .gw-candidate .badge { font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 4px; background: var(--bg-elev); color: var(--fg-mute); align-self: start; }
+      .gw-candidate .meta { font-size: 11.5px; color: var(--fg-mute); margin-top: 4px; word-break: break-word; }
+      .gw-candidate .query { font-size: 13px; font-weight: 500; word-break: break-word; }
+      .gw-candidate .actions { display: flex; gap: 6px; align-self: start; }
+      .gw-candidate .actions button { font-size: 11.5px; padding: 3px 10px; }
+      .gw-candidate .actions .approve { background: var(--ok); border-color: var(--ok); color: white; }
+      .gw-candidate .actions .reject { background: var(--err-bg); border-color: var(--err); color: var(--err); }
+      .gw-card .empty-q { color: var(--fg-mute); font-size: 12.5px; padding: 18px 0; text-align: center; }
     </style>
   `;
 }
@@ -234,6 +250,71 @@ function bucketBlock(label: string, bucket: Record<string, number>): Html {
           </div>
         `,
       )}
+    </div>
+  `;
+}
+
+function workshopCard(snap: CandidateSnapshot): Html {
+  const hasAny = snap.total > 0;
+  const hasApproved = snap.approved > 0;
+  return html`
+    <div class="card gw-card">
+      <div class="card-head" style="padding: 0 0 10px; border-bottom: 1px solid var(--bd-soft); margin: -2px 0 10px; display:flex; justify-content:space-between; align-items:baseline;">
+        <h2 style="margin: 0;">golden workshop</h2>
+        <span class="muted" style="font-size: 11.5px;">cases.candidate.jsonl</span>
+      </div>
+      <div class="gw-summary">
+        <span>pending <span class="v">${snap.pending.length}</span></span>
+        <span>approved <span class="v">${snap.approved}</span></span>
+        <span>rejected <span class="v">${snap.rejected}</span></span>
+        ${snap.malformed > 0
+          ? html`<span style="color: var(--err);">malformed <span class="v">${snap.malformed}</span></span>`
+          : ''}
+      </div>
+      <div class="btn-row" style="margin-bottom: 10px; flex-wrap: wrap;">
+        <button id="btn-gen-structure">+ from structure</button>
+        <button id="btn-gen-runs">+ from runs</button>
+        <span id="gw-gen-status" class="status muted" style="font-size: 12px;"></span>
+        ${hasApproved
+          ? html`
+              <span style="flex:1;"></span>
+              <button id="btn-gw-flush" class="btn-primary">flush ${snap.approved} approved → cases.jsonl</button>
+            `
+          : ''}
+      </div>
+      ${!hasAny
+        ? html`<p class="empty-q">尚无候选。点上方按钮生成（默认无 LLM 改写；要 <code>--llm-rewrite</code> 走命令行）。</p>`
+        : snap.pending.length === 0
+          ? html`<p class="empty-q">全部已审。${hasApproved ? '点 flush 把 approved 移入 cases.jsonl。' : ''}</p>`
+          : html`${snap.pending.slice(0, 50).map((c) => candidateRow(c))}
+              ${snap.pending.length > 50
+                ? html`<p class="muted" style="font-size: 11.5px;">... 另 ${snap.pending.length - 50} 条未显示（继续审上面 50 条后会自动加载下一批）</p>`
+                : ''}`}
+      <p class="muted" style="font-size: 11px; margin-top: 10px;">
+        UI approve/reject 等价改 jsonl 行的 <code>decision</code> 字段；flush 等价
+        <code class="mono">anydocs-ask golden review</code>。
+      </p>
+    </div>
+  `;
+}
+
+function candidateRow(c: GoldenCaseCandidate): Html {
+  const must = c.expected?.must_cite_pages ?? [];
+  return html`
+    <div class="gw-candidate" data-id="${c.id}">
+      <span class="badge mono">${c.template_id ?? c.created_by}</span>
+      <div>
+        <div class="query">${c.query}</div>
+        <div class="meta mono">
+          ${c.lang} ·
+          must_cite: ${must.length > 0 ? must.join(', ') : '—'}
+          ${c.context_pageId ? html` · ctx ${c.context_pageId}` : ''}
+        </div>
+      </div>
+      <div class="actions">
+        <button class="approve" data-decide="approved">approve</button>
+        <button class="reject" data-decide="rejected">reject</button>
+      </div>
     </div>
   `;
 }

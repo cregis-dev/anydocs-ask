@@ -39,6 +39,11 @@ import { loadIndexSnapshot, type ChildIndexStatus } from './index-state.ts';
 import { loadTrafficWindow } from './traffic-state.ts';
 import { loadProjectHomeStats, summarizeWorkspace } from './home-state.ts';
 import { loadConsoleConfigView } from './config-state.ts';
+import {
+  decideCandidate,
+  flushApproved,
+  loadCandidates,
+} from './golden-workshop-state.ts';
 
 export type ConsoleAppDeps = {
   workspacePath: string;
@@ -190,6 +195,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       }
     }
     const trafficWindow = stateRoot ? loadTrafficWindow(stateRoot, 7) : undefined;
+    const candidates = stateRoot ? loadCandidates(stateRoot) : undefined;
     return c.html(
       renderProject({
         project,
@@ -201,6 +207,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         latestEvalReportBody,
         ...(indexSnapshot ? { indexSnapshot } : {}),
         ...(trafficWindow ? { trafficWindow } : {}),
+        ...(candidates ? { candidates } : {}),
         configView: loadConsoleConfigView(deps.workspacePath, project.valid ? project.path : null),
       }),
     );
@@ -519,6 +526,41 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       ...(since ? { since } : {}),
     });
     return c.json(r, r.ok ? 200 : 500);
+  });
+
+  // --- Golden Workshop: candidate decide + flush (PRD §13.6 #4 lock
+  //     broken 2026-05-12: console writes decision field into the
+  //     candidate jsonl, then flush == golden review CLI equivalent).
+  app.post('/api/projects/:name/golden/decide', async (c) => {
+    const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
+    if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
+    let body: { id?: unknown; decision?: unknown } | null = null;
+    try {
+      body = (await c.req.json()) as { id?: unknown; decision?: unknown };
+    } catch {
+      return c.json({ ok: false, error: 'invalid JSON body' }, 400);
+    }
+    if (!body || typeof body.id !== 'string') {
+      return c.json({ ok: false, error: 'body.id (string) required' }, 400);
+    }
+    const d = body.decision;
+    if (d !== null && d !== 'approved' && d !== 'rejected') {
+      return c.json({ ok: false, error: 'body.decision must be null|approved|rejected' }, 400);
+    }
+    const r = decideCandidate(ctx.stateRoot, body.id, d);
+    if (!r.ok) return c.json({ ok: false, error: r.error }, 404);
+    return c.json({ ok: true, before: r.before, after: r.after });
+  });
+
+  app.post('/api/projects/:name/golden/flush', (c) => {
+    const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
+    if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
+    try {
+      const summary = flushApproved(ctx.stateRoot, 'console');
+      return c.json({ ok: true, summary });
+    } catch (err) {
+      return c.json({ ok: false, error: (err as Error).message }, 500);
+    }
   });
 
   app.post('/api/projects/:name/golden/generate', async (c) => {
