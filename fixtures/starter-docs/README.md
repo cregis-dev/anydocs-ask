@@ -1,71 +1,71 @@
-# Anydocs Starter Example
+# Anydocs Starter 示例
 
-This is the smallest complete Anydocs project kept in the repository.
+这是仓库中保留的最小完整 Anydocs 项目。
 
-Use it when you want to understand the base project shape without templates, import staging, or agent-specific guidance mixed in.
+当你想了解基础项目结构，又不希望混入模板、导入暂存或 agent 特定指引时，可以参考这个示例。
 
-## Structure
+## 目录结构
 
 ```
 examples/starter-docs/
-├── anydocs.config.json      # Project configuration
-├── anydocs.workflow.json    # Workflow standard definition
-├── pages/                   # Page content (canonical DocContentV1 JSON)
-│   ├── zh/*.json           # Chinese pages
-│   └── en/*.json           # English pages
-├── navigation/              # Navigation trees
-│   ├── zh.json             # Chinese navigation
-│   └── en.json             # English navigation
-└── .gitignore              # Ignores dist/, .anydocs/
+├── anydocs.config.json      # 项目配置
+├── anydocs.workflow.json    # 工作流标准定义
+├── pages/                   # 页面内容（规范 DocContentV1 JSON）
+│   ├── zh/*.json           # 中文页面
+│   └── en/*.json           # 英文页面
+├── navigation/              # 导航树
+│   ├── zh.json             # 中文导航
+│   └── en.json             # 英文导航
+└── .gitignore              # 忽略 dist/、.anydocs/
 ```
 
-## What This Example Covers
+## 示例涵盖内容
 
-- minimal bilingual docs project
-- page and navigation source layout
-- `build` and `preview` workflow
-- Studio local editing
+- 最简双语文档项目
+- 页面和导航的源文件布局
+- `build` 和 `preview` 工作流
+- Studio 本地编辑
 
-## What This Example Does Not Cover
+## 示例未涵盖内容
 
-- custom page templates
-- metadata schemas
-- import staging
-- agent / MCP authoring workflows
+- 自定义页面模板
+- metadata schema
+- 导入暂存
+- agent / MCP 创作工作流
 
-For those topics, use the focused examples listed in [../README.md](../README.md).
+以上主题请参考 [../README.md](../README.md) 中列出的专项示例。
 
-## Quick Start
+## 快速开始
 
-### Building
+### 构建
 
 ```bash
 node --experimental-strip-types packages/cli/src/index.ts build examples/starter-docs
 ```
 
-### Preview
+### 预览
 
 ```bash
 node --experimental-strip-types packages/cli/src/index.ts preview examples/starter-docs
 ```
 
-### Development with Studio
+### 配合 Studio 开发
 
 ```bash
 pnpm dev
 ```
 
-Then open Studio and select `examples/starter-docs` as the project path.
+然后打开 Studio，将 `examples/starter-docs` 设置为项目路径。
 
-## Creating Your Own Project
+## 创建自己的项目
 
-### Option 1: Use CLI init
+### 方式一：使用 CLI init
 
 ```bash
 node --experimental-strip-types packages/cli/src/index.ts init ./my-docs-project
 ```
 
-### Option 2: Copy this example
+### 方式二：复制本示例
 
 ```bash
 cp -r examples/starter-docs ./my-docs-project
