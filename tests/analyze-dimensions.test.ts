@@ -89,6 +89,17 @@ test('D1: error kind with empty citations does NOT trip no-citations', () => {
   assert.equal(out.recall.count, 0);
 });
 
+test('D1: error kind with low confidence does NOT trip recall', () => {
+  // Validation / client errors have confidence=0 by definition; they are not
+  // retrieval failures and must not pollute the recall-failure report.
+  const out = analyzeDimensions({
+    runs: [fakeRun({ request_id: 'r1', confidence: 0, citations: 0, kind: 'error' })],
+    confidenceFloor: 0.4,
+    latencyP95Threshold: 3000,
+  });
+  assert.equal(out.recall.count, 0);
+});
+
 test('D1: re-ask within 30s with small edit distance flags earlier query', () => {
   const out = analyzeDimensions({
     runs: [

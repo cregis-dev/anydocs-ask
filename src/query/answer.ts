@@ -100,7 +100,13 @@ export async function askWithTrace(
   });
 
   // 1. Input validation.
-  const question = (req.question ?? '').trim();
+  if (req.question === undefined || req.question === null) {
+    return {
+      result: errorResult('invalid_question', "field 'question' is required"),
+      trace: emptyTrace(),
+    };
+  }
+  const question = req.question.trim();
   if (question.length === 0) {
     return {
       result: errorResult('invalid_question', 'question must not be empty'),

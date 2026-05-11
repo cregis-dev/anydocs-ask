@@ -4,6 +4,40 @@ All notable changes to `@anydocs/ask` are documented here. The format roughly
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project follows semver pre-release semantics (`0.1.0-alpha.N`).
 
+## 0.1.0-alpha.1 — 2026-05-11
+
+Patch release: bug fixes and documentation improvements discovered during
+startup evaluation.
+
+### Fixed
+
+- **`llm_unavailable` error message** — when `apiKeyEnv` equals the default
+  `ANTHROPIC_API_KEY`, the error message no longer repeats the env var name
+  twice (`'ANTHROPIC_API_KEY' / 'ANTHROPIC_API_KEY'`). Custom `apiKeyEnv`
+  values are now rendered as `'MY_KEY (or ANTHROPIC_API_KEY)'`.
+  (`src/llm/factory.ts`)
+- **`POST /v1/ask` missing-field error** — sending `{"query":"…"}` instead of
+  `{"question":"…"}` now returns `"field 'question' is required"` instead of
+  the opaque `"question must not be empty"`, allowing integrators to self-diagnose.
+  (`src/query/answer.ts`)
+- **`analyze runs` recall-failure inflation** — validation / client-error runs
+  (`answer.kind = 'error'`) were being counted as recall failures because their
+  `confidence` is always 0. They are now skipped entirely in the D1 loop,
+  including the re-ask-30s scan. (`src/analyze/dimensions.ts`)
+
+### Added
+
+- **`fixtures/starter-docs/.env.example`** — minimal credential template so
+  new users following the Quick Start don't have to hunt for the root-level
+  `.env.example`.
+- **README Quick Start** — step-by-step onboarding (install → configure → start
+  → verify → ask), first-run BGE-M3 download notice, and full
+  `POST /v1/ask` request / response contract.
+- **Test coverage** — new `analyze-dimensions` test case: *error kind with low
+  confidence does NOT trip recall*.
+
+---
+
 ## 0.1.0-alpha.0 — 2026-05-09
 
 First public alpha. The full v1 surface from `PRD.md` is shipped — index +

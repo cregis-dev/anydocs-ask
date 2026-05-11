@@ -108,9 +108,10 @@ type RecallTrigger = 'low-confidence' | 'no-citations' | 'reask-30s';
 function analyzeRecall(input: DimensionInputs): RecallFindings {
   const triggers = new Map<string, Set<RecallTrigger>>(); // request_id -> triggers
   for (const r of input.runs) {
+    if (r.answer.kind === 'error') continue; // validation / client errors, not retrieval quality
     const t = new Set<RecallTrigger>();
     if (r.answer.confidence < input.confidenceFloor) t.add('low-confidence');
-    if (r.answer.citations.length === 0 && r.answer.kind !== 'error') t.add('no-citations');
+    if (r.answer.citations.length === 0) t.add('no-citations');
     if (t.size > 0) triggers.set(r.request_id, t);
   }
 
@@ -131,7 +132,8 @@ function analyzeRecall(input: DimensionInputs): RecallFindings {
         REASK_EDIT_DISTANCE,
       );
       if (dist >= REASK_EDIT_DISTANCE) continue;
-      // The earlier query is the "failed" one; mark it.
+      // The earlier query is the "failed" one; mark it (skip if it was a client error).
+      if (a.answer.kind === 'error') continue;
       const t = triggers.get(a.request_id) ?? new Set<RecallTrigger>();
       t.add('reask-30s');
       triggers.set(a.request_id, t);

@@ -4,6 +4,82 @@ Local-first Q&A service for [anydocs](https://github.com/cregis-dev/anydocs) pro
 
 > Status: **v1 alpha (0.1.0-alpha.0).** Index + query + HTTP + evaluation loop (§16) shipped. PRD and architecture: [`PRD.md`](./PRD.md), [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
+## Quick Start
+
+```bash
+# 1. Install
+npm install -g @anydocs/ask   # or: npx @anydocs/ask <command>
+
+# 2. Configure credentials (copy template from your project root or the fixture)
+cp .env.example .env          # then fill in ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN
+
+# 3. (Optional) initialise the runtime workspace — auto-created on first serve too
+anydocs-ask workspace init
+
+# 4. Start
+anydocs-ask serve <projectRoot> --port 3100
+
+# 5. Verify
+curl http://localhost:3100/v1/health
+# → {"status":"ok","warm":true,...}
+
+# 6. Ask
+curl -X POST http://localhost:3100/v1/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"How does authentication work?","lang":"en"}'
+```
+
+`<projectRoot>` is the folder that contains `anydocs.config.json`, `pages/`, and `navigation/`. All runtime data (SQLite index, runs, golden set, reports) is written to `~/anydocs-ask-runtime/state/<projectId>/` — the source repo is never modified.
+
+### HTTP API
+
+**`POST /v1/ask`**
+
+```jsonc
+// Request
+{
+  "question": "如何鉴权？",          // required — the user's question (≤ 500 chars)
+  "lang": "zh",                      // required — "zh" | "en"
+  "context": {                       // optional
+    "current_page_id": "auth",       //   page the user is currently viewing
+    "scope_id": "nav:zh.json:3"      //   restrict retrieval to a nav subtree
+  }
+}
+
+// Response — answer
+{
+  "type": "answer",
+  "answer_id": "ans_…",
+  "answer_md": "…markdown…",
+  "answer_lang": "zh",
+  "citations": [
+    {
+      "citation_id": "cit_1",
+      "title": "鉴权",
+      "breadcrumb": […],
+      "url": "/zh/auth",
+      "snippet": "…"
+    }
+  ],
+  "translation_notice": null         // non-null when cross-lang fallback fired
+}
+
+// Response — error
+{ "type": "error", "code": "invalid_question", "message": "…" }
+```
+
+**`POST /v1/ask/feedback`** — send 👍 / 👎 signals after rendering an answer (see ARCHITECTURE.md §5.2).
+
+**`GET /v1/health`** — returns `{"status":"ok"}` once warm-up finishes (BGE-M3 load + initial index). Stays `{"status":"warming"}` until then; Reader should poll before first ask.
+
+> **First-run note:** on a cold machine the BGE-M3 embedding model (~600 MB) is downloaded automatically before indexing begins. Expect 5–15 minutes depending on your connection; subsequent starts load from the local cache and warm up in ~5–10 s.
+
+### `anydocs.ask.json` (optional)
+
+Drop an `anydocs.ask.json` file in `<projectRoot>` to override defaults (model, retrieval weights, CORS origins, etc.). All fields are optional — omitting the file is fine for local dev. See ARCHITECTURE.md §9 for the full reference config.
+
+---
+
 ## What it is (and isn't)
 
 - **Is**: an HTTP service that respects the author's *editorial intent* (navigation order, subtree boundaries, publish state). Drag-reorder a section — embeddings are **not** recomputed.
