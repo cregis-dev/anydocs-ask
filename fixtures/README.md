@@ -1,9 +1,9 @@
 # Fixtures
 
-Snapshots of anydocs projects used for unit / integration / e2e tests.
+用于单元 / 集成 / 端到端测试的 anydocs 项目快照。
 
-| Fixture | Source | Purpose |
+| Fixture | 来源 | 用途 |
 |---|---|---|
-| `starter-docs/` | `anydocs/examples/starter-docs` (2026-05-06 snapshot) | Smallest valid anydocs project — single section, single page per lang, double lang (zh + en). Used to validate structure-layer projection (stage 3) and the §4.6 "drag-zero-reembed" e2e test (stage 5). |
+| `starter-docs/` | `anydocs/examples/starter-docs`（2026-05-06 快照） | 最小可用的 anydocs 项目——单节、每语言单页、双语（zh + en）。用于验证结构层投影（阶段 3）和 §4.6「拖拽零 embedding 重算」端到端测试（阶段 5）。 |
 
-These fixtures are **frozen copies** — do not edit them in-place to chase upstream anydocs changes. If anydocs schema evolves and we need new fixtures, refresh deliberately and bump tests.
+这些 fixtures 是**冻结副本**——不要就地修改以追随上游 anydocs 的变化。如果 anydocs schema 演进而需要新 fixtures，请有意识地刷新并同步更新测试。
