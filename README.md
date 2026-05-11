@@ -114,7 +114,28 @@ curl -X POST http://localhost:3100/v1/ask \
   -d '{"question":"鉴权怎么做？","lang":"zh"}'
 ```
 
-`<projectRoot>` 是包含 `anydocs.config.json`、`pages/` 和 `navigation/` 的目录，可以是文件系统路径，也可以是相对于运行时工作区解析的裸名称（`<workspace>/projects/<name>`）。所有运行时数据（SQLite 索引、runs、golden 集、reports）写入 `~/anydocs-ask-runtime/state/<projectId>/`，源码仓库永远不会被修改。
+### `<projectRoot>` 是什么？——两种写法，二选一
+
+所有 CLI 子命令第一个位置参数都是 `<projectRoot>`，指向**一个 anydocs 项目目录**（必须包含 `anydocs.config.json`、`pages/`、`navigation/`）。允许两种形式，**靠是否含 `/` 自动判定**（`src/workspace.ts:86`）：
+
+| 写法 | 例子 | 实际解析为 | 何时用 |
+|---|---|---|---|
+| **裸名称**（不含 `/`） | `my-docs` | `<workspace>/projects/my-docs/`（默认 `~/anydocs-ask-runtime/projects/my-docs/`） | 已经把项目软链 / 复制到工作区，想用简称 |
+| **文件系统路径**（含 `/` 或绝对路径） | `./fixtures/starter-docs`、`/abs/path/to/docs` | 按字面路径解析（相对路径基于 `cwd`） | 临时跑一次，不想接入工作区 |
+
+具体例子：
+
+```bash
+# A. 裸名——前提：~/anydocs-ask-runtime/projects/my-docs/ 已存在
+anydocs-ask serve my-docs --port 3100
+anydocs-ask eval  my-docs
+
+# B. 路径——任意目录都行
+anydocs-ask serve ./fixtures/starter-docs --port 3100
+anydocs-ask serve /Users/me/work/product-docs
+```
+
+无论用哪种写法，**所有运行时数据（SQLite 索引、runs、golden 集、reports）都写入 `<workspace>/state/<projectId>/`**，源码仓库永远不会被修改（双根分离，ARCH §16.1）。
 
 ### HTTP API
 
@@ -158,6 +179,8 @@ curl -X POST http://localhost:3100/v1/ask \
 **`GET /v1/health`** — 预热完成后（BGE-M3 加载 + 初始索引）返回 `{"status":"ok"}`，预热期间返回 `{"status":"warming"}`；Reader 在首次提问前应轮询此接口。
 
 ### 完整 CLI 子命令
+
+下表里所有 `<projectRoot>` 都遵循上一小节的两可规则——裸名 `my-docs` 或路径 `./fixtures/starter-docs`，二选一。
 
 ```bash
 # 服务
