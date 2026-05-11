@@ -16,6 +16,7 @@ import {
   addToProjectRegistry,
   assertProjectRoot,
   ensureWorkspace,
+  ensureWorkspaceEnv,
   isBareName,
   readProjectRegistry,
   removeFromProjectRegistry,
@@ -43,6 +44,17 @@ export function runWorkspaceInit(opts: WorkspaceInitOptions): number {
     process.stdout.write(`  ${sub}/\n`);
   }
   process.stdout.write(`  (source: ${workspace.source})\n`);
+
+  const envPath = join(workspace.path, '.env');
+  const envCreated = ensureWorkspaceEnv(workspace.path);
+  if (envCreated) {
+    process.stdout.write(`\nanydocs-ask: created credential file at ${envPath}\n`);
+    process.stdout.write(`  Fill in your API key before starting the service:\n`);
+    process.stdout.write(`  $EDITOR ${envPath}\n`);
+  } else {
+    process.stdout.write(`\nanydocs-ask: credential file already exists at ${envPath}\n`);
+  }
+
   return 0;
 }
 
