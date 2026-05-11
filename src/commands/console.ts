@@ -7,7 +7,6 @@
  */
 
 import { serve as nodeServe } from '@hono/node-server';
-import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConsoleConfig, type ConsoleConfig } from '../console/config.ts';
 import { ProcessRegistry } from '../console/registry.ts';
@@ -50,14 +49,6 @@ export async function runConsole(opts: ConsoleOptions): Promise<number> {
   if (config.port >= config.childPortRangeStart && config.port <= config.childPortRangeEnd) {
     process.stderr.write(
       `error: --port ${config.port} falls inside child range [${config.childPortRangeStart}, ${config.childPortRangeEnd}]; pick a port outside the child range\n`,
-    );
-    return 2;
-  }
-
-  const projectsDir = join(workspace.path, 'projects');
-  if (!existsSync(projectsDir)) {
-    process.stderr.write(
-      `error: workspace at ${workspace.path} has no projects/; run 'anydocs-ask workspace init' first.\n`,
     );
     return 2;
   }
