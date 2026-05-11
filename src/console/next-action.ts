@@ -14,6 +14,20 @@ import type { EvalTabSnapshot } from './eval-state.ts';
 import type { IndexSnapshot } from './index-state.ts';
 import type { TrafficWindow } from './traffic-state.ts';
 
+function countUnpublished(idx: IndexSnapshot): number {
+  let n = 0;
+  for (const l of idx.langs) {
+    for (const p of l.pages) {
+      if (p.missingFile) continue; // can't have a status; counted separately
+      if (p.status !== 'published') n++;
+    }
+    for (const p of l.orphans) {
+      if (p.status !== 'published') n++;
+    }
+  }
+  return n;
+}
+
 export type NextAction = {
   /** Severity / urgency: 'info' (suggestion), 'warn' (you should), 'err' (broken). */
   level: 'info' | 'warn' | 'err';
@@ -65,13 +79,25 @@ export function computeNextAction(inputs: NextActionInputs): NextAction | null {
         cta: { label: 'open Index', targetTab: 'index' },
       };
     }
-    if (idx.dbStatus && Math.abs(idx.dbStatus.page_count - idx.totalPages) >= 1) {
-      return {
-        level: 'warn',
-        title: `disk 与 DB 页数不一致 (${idx.totalPages} vs ${idx.dbStatus.page_count})`,
-        detail: '点 reindex 同步 SQLite 索引。',
-        cta: { label: 'open Index', targetTab: 'index' },
-      };
+    if (idx.dbStatus) {
+      // The indexer writes every published page on disk (orphans included —
+      // nav-membership is a soft rerank signal per PRD §4.5, not a hard
+      // filter). The hard filter is `status === 'published'`. So:
+      //     expected in DB = totalPages - unpublishedCount
+      // Orphans alone don't explain drift; only unpublished pages do.
+      const unpublishedCount = countUnpublished(idx);
+      const expectedInDb = idx.totalPages - unpublishedCount;
+      if (Math.abs(idx.dbStatus.page_count - expectedInDb) >= 1) {
+        return {
+          level: 'warn',
+          title: `disk 与 DB 页数不一致 (expected ${expectedInDb}, got ${idx.dbStatus.page_count})`,
+          detail: '点 reindex 同步 SQLite 索引。',
+          cta: { label: 'open Index', targetTab: 'index' },
+        };
+      }
+      // Differences absorbed by unpublished / orphan are not "next actions"
+      // — Index tab validation card surfaces them in red already, banner
+      // staying silent avoids noise.
     }
   }
 

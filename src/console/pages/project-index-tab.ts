@@ -55,6 +55,21 @@ export function renderIndexTab(vm: IndexTabViewModel): Html {
 
 function statusCard(snap: IndexSnapshot, childLive: boolean): Html {
   const db = snap.dbStatus;
+  // Indexer hard-filter is `status === 'published'`; orphans (nav-missing)
+  // still get indexed per PRD §4.5. So `expected in DB` = published count.
+  let unpublishedCount = 0;
+  let orphanCount = 0;
+  for (const l of snap.langs) {
+    for (const p of l.pages) {
+      if (!p.missingFile && p.status !== 'published') unpublishedCount++;
+    }
+    for (const p of l.orphans) {
+      orphanCount++;
+      if (p.status !== 'published') unpublishedCount++;
+    }
+  }
+  const expectedInDb = snap.totalPages - unpublishedCount;
+  const drift = db ? db.page_count - expectedInDb : 0;
   return html`
     <div class="card">
       <div class="card-head" style="padding: 0 0 10px; border-bottom: 1px solid var(--bd-soft); margin: -2px 0 12px; display:flex; justify-content:space-between; align-items:baseline;">
@@ -65,12 +80,30 @@ function statusCard(snap: IndexSnapshot, childLive: boolean): Html {
         <div class="stat">
           <div class="k">on disk</div>
           <div class="v">${snap.totalPages}</div>
-          <div class="muted" style="font-size: 11px;">pages</div>
+          <div class="muted" style="font-size: 11px;">
+            ${unpublishedCount > 0 || orphanCount > 0
+              ? html`
+                  ${unpublishedCount > 0
+                    ? html`<span style="color: var(--warn);">${unpublishedCount} draft</span>`
+                    : ''}
+                  ${orphanCount > 0
+                    ? html`${unpublishedCount > 0 ? ' · ' : ''}<span style="color: var(--fg-soft);">${orphanCount} orphan</span>`
+                    : ''}
+                  · ${expectedInDb} expected indexed
+                `
+              : 'pages'}
+          </div>
         </div>
         <div class="stat">
           <div class="k">in DB</div>
           <div class="v">${db ? db.page_count : '—'}</div>
-          <div class="muted" style="font-size: 11px;">${db ? 'pages' : 'child idle'}</div>
+          <div class="muted" style="font-size: 11px;">
+            ${!db
+              ? 'child idle'
+              : drift === 0
+                ? html`<span style="color: var(--ok);">✓ in sync</span>`
+                : html`<span style="color: var(--warn);">Δ ${drift > 0 ? '+' : ''}${drift}</span>`}
+          </div>
         </div>
         <div class="stat">
           <div class="k">chunks</div>
