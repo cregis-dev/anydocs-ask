@@ -104,11 +104,14 @@ ln -s /path/to/my-docs ~/anydocs-ask-runtime/projects/my-docs
 
 # 3. 启动控制台
 anydocs-ask console                    # 默认地址：http://127.0.0.1:4100
-anydocs-ask console --port 4200        # 自定义端口
+anydocs-ask console --port 4200        # 自定义端口（须落在 4101–4199 之外）
 anydocs-ask console --idle-timeout 30  # 空闲项目保活 30 分钟
+
+# 4. 验证（可选）
+PORT=4100; curl :$PORT/         # 如使用了 --port，将 PORT 改为对应值
 ```
 
-在浏览器中打开 **http://127.0.0.1:4100**。
+在浏览器中打开 **http://127.0.0.1:4100**（若使用了 `--port`，将端口改为对应值）。
 
 ### 页面一览
 
@@ -145,7 +148,7 @@ anydocs-ask console --idle-timeout 30  # 空闲项目保活 30 分钟
 // ~/anydocs-ask-runtime/.console.json
 {
   "enabled": true,              // 设为 false 可禁用 'anydocs-ask console'
-  "port": 4100,                 // 控制台端口（必须在 childPortRange 范围之外）
+  "port": 4100,                 // 控制台端口（必须落在 4101–4199 之外）
   "idleTimeoutMin": 15,         // 子进程空闲多少分钟后自动回收
   "childPortRangeStart": 4101,
   "childPortRangeEnd": 4199,
