@@ -31,7 +31,9 @@ import { renderRuns } from './pages/runs.ts';
 import { getStaticAsset } from './static.ts';
 import {
   clearPinnedBaseline,
+  listAnalyzeReports,
   loadEvalSnapshot,
+  readAnalyzeReportBody,
   readReportBody,
   writePinnedBaseline,
 } from './eval-state.ts';
@@ -196,6 +198,11 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     }
     const trafficWindow = stateRoot ? loadTrafficWindow(stateRoot, 7) : undefined;
     const candidates = stateRoot ? loadCandidates(stateRoot) : undefined;
+    const analyzeHistory = stateRoot ? listAnalyzeReports(stateRoot) : [];
+    const latestAnalyzeBody =
+      stateRoot && analyzeHistory[0]
+        ? readAnalyzeReportBody(stateRoot, analyzeHistory[0].filename)
+        : null;
     return c.html(
       renderProject({
         project,
@@ -208,6 +215,8 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         ...(indexSnapshot ? { indexSnapshot } : {}),
         ...(trafficWindow ? { trafficWindow } : {}),
         ...(candidates ? { candidates } : {}),
+        analyzeHistory,
+        latestAnalyzeBody,
         configView: loadConsoleConfigView(deps.workspacePath, project.valid ? project.path : null),
       }),
     );
@@ -520,10 +529,20 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
     if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
     const since = c.req.query('since');
+    let includeConsole = c.req.query('include_console') === '1';
+    try {
+      const body = (await c.req.json().catch(() => null)) as
+        | { include_console?: boolean }
+        | null;
+      if (body && body.include_console === true) includeConsole = true;
+    } catch {
+      // ignore — no body or non-JSON
+    }
     const r = await ops.analyzeRuns({
       projectRoot: ctx.projectRoot,
       stateRoot: ctx.stateRoot,
       ...(since ? { since } : {}),
+      ...(includeConsole ? { includeConsole: true } : {}),
     });
     return c.json(r, r.ok ? 200 : 500);
   });

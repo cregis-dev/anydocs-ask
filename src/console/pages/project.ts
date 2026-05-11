@@ -23,6 +23,7 @@ import type { EvalTabSnapshot } from '../eval-state.ts';
 import type { IndexSnapshot } from '../index-state.ts';
 import type { TrafficWindow } from '../traffic-state.ts';
 import type { CandidateSnapshot } from '../golden-workshop-state.ts';
+import type { AnalyzeReportSummary } from '../eval-state.ts';
 import { computeNextAction, type NextAction } from '../next-action.ts';
 import { renderConfigDrawer } from './config-drawer.ts';
 import type { ConfigViewModel } from '../config-state.ts';
@@ -46,6 +47,10 @@ export type ProjectViewModel = {
   configView?: ConfigViewModel;
   /** Golden candidate snapshot — Eval tab workshop section. */
   candidates?: CandidateSnapshot;
+  /** Past analyze reports (newest first) — Traffic tab analyze section. */
+  analyzeHistory?: AnalyzeReportSummary[];
+  /** Body of latest analyze report (markdown). */
+  latestAnalyzeBody?: string | null;
 };
 
 export function renderProject(vm: ProjectViewModel): Html {
@@ -71,7 +76,7 @@ export function renderProject(vm: ProjectViewModel): Html {
     ${nextAction ? nextActionBanner(nextAction) : ''}
 
     ${project.valid
-      ? html`<div class="grid-2">${sidebar(project, live, running, vm.reports)} ${mainCol(project, live, vm.evalSnapshot, vm.latestEvalReportBody, vm.indexSnapshot, vm.trafficWindow, vm.candidates)}</div>`
+      ? html`<div class="grid-2">${sidebar(project, live, running, vm.reports)} ${mainCol(project, live, vm.evalSnapshot, vm.latestEvalReportBody, vm.indexSnapshot, vm.trafficWindow, vm.candidates, vm.analyzeHistory ?? [], vm.latestAnalyzeBody ?? null)}</div>`
       : invalidNotice(project)}
 
     <script>${raw(`
@@ -249,6 +254,8 @@ function mainCol(
   indexSnapshot: IndexSnapshot | undefined,
   trafficWindow: TrafficWindow | undefined,
   candidates: CandidateSnapshot | undefined,
+  analyzeHistory: AnalyzeReportSummary[],
+  latestAnalyzeBody: string | null,
 ): Html {
   return html`
     <div>
@@ -282,7 +289,12 @@ function mainCol(
       </div>
       <div id="ptab-traffic" class="tab-panel" data-project-tab="traffic" hidden>
         ${trafficWindow
-          ? renderTrafficTab({ projectName: project.name, window: trafficWindow })
+          ? renderTrafficTab({
+              projectName: project.name,
+              window: trafficWindow,
+              analyzeHistory,
+              latestAnalyzeBody,
+            })
           : html`<div class="card"><p class="empty">traffic 状态不可用。</p></div>`}
       </div>
     </div>
@@ -527,6 +539,40 @@ function bindOp(id, path) {
 bindOp('btn-analyze', '/analyze');
 bindOp('btn-golden-structure', '/golden/generate?from=structure');
 bindOp('btn-golden-runs', '/golden/generate?from=runs');
+
+// Traffic tab analyze button — same /analyze endpoint but with optional
+// include_console body flag from the inline checkbox.
+(function bindTrafficAnalyze() {
+  const btn = $('btn-traffic-analyze');
+  const status = $('traffic-analyze-status');
+  const includeConsole = $('analyze-include-console');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    if (status) { status.textContent = 'running... (10–60s)'; status.className = 'status muted'; }
+    const t0 = Date.now();
+    try {
+      const payload = includeConsole && includeConsole.checked ? { include_console: true } : {};
+      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json();
+      const dt = Date.now() - t0;
+      if (!res.ok || body.ok === false) {
+        if (status) { status.textContent = 'failed (' + dt + 'ms): ' + (body.error || res.statusText); status.className = 'status err'; }
+      } else {
+        if (status) { status.textContent = 'done (' + dt + 'ms)'; status.className = 'status ok'; }
+        setTimeout(() => location.reload(), 500);
+      }
+    } catch (e) {
+      if (status) { status.textContent = 'network error: ' + (e && e.message ? e.message : e); status.className = 'status err'; }
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
 // Golden Workshop generators (Eval tab buttons mirror sidebar ones but with
 // dedicated status line; both go through the same /golden/generate endpoint).
 (function bindGwGenerators() {

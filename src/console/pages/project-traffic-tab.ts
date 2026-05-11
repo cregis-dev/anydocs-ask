@@ -15,10 +15,13 @@ import type { Html } from './layout.ts';
 import type { TrafficWindow } from '../traffic-state.ts';
 import { runSource } from '../../runs/types.ts';
 import type { RunRecord } from '../../runs/types.ts';
+import type { AnalyzeReportSummary } from '../eval-state.ts';
 
 export type TrafficTabViewModel = {
   projectName: string;
   window: TrafficWindow;
+  analyzeHistory: AnalyzeReportSummary[];
+  latestAnalyzeBody: string | null;
 };
 
 export function renderTrafficTab(vm: TrafficTabViewModel): Html {
@@ -27,6 +30,7 @@ export function renderTrafficTab(vm: TrafficTabViewModel): Html {
     <div class="traffic-tab">
       ${healthStrip(w)}
       ${w.records.length === 0 ? emptyState(w.sinceISO) : trafficTable(w)}
+      ${analyzeCard(vm.projectName, vm.analyzeHistory, vm.latestAnalyzeBody)}
     </div>
     <script>${raw(`window.__TRAFFIC__ = ${rawJSON(w.records)};`)}</script>
     <script type="module">${raw(TRAFFIC_SCRIPT)}</script>
@@ -153,6 +157,68 @@ function trafficTable(w: TrafficWindow): Html {
         </thead>
         <tbody id="tf-body">${ordered.map((r, i) => trafficRow(r, i))}</tbody>
       </table>
+    </div>
+  `;
+}
+
+function analyzeCard(
+  projectName: string,
+  history: AnalyzeReportSummary[],
+  latestBody: string | null,
+): Html {
+  const latest = history[0];
+  const latestBodyJSON = latestBody !== null ? raw(JSON.stringify(latestBody)) : 'null';
+  return html`
+    <div class="card analyze-card" style="margin-top: 18px;">
+      <div class="card-head" style="padding: 0 0 10px; border-bottom: 1px solid var(--bd-soft); margin: -2px 0 12px; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;">
+        <h2 style="margin: 0;">analyze runs</h2>
+        ${latest
+          ? html`<span class="muted mono" style="font-size: 11.5px;">latest · ${latest.date}</span>`
+          : html`<span class="muted" style="font-size: 11.5px;">no report yet</span>`}
+      </div>
+      <div class="btn-row" style="align-items: center; margin-bottom: 10px;">
+        <button id="btn-traffic-analyze" class="btn-primary">▶ run analyze · 7d</button>
+        <label style="display:inline-flex; align-items:center; gap: 5px; font-size: 12.5px; color: var(--fg-soft);">
+          <input type="checkbox" id="analyze-include-console" /> include console traffic
+        </label>
+        <span id="traffic-analyze-status" class="status muted"></span>
+      </div>
+      ${latest && latestBody !== null
+        ? html`
+            <details open style="margin-top: 6px;">
+              <summary style="cursor: pointer; font-size: 12.5px; color: var(--fg-soft);">latest report inline</summary>
+              <div id="analyze-md" class="md" style="margin-top: 10px;"></div>
+              <p style="margin-top: 8px;"><a href="/p/${projectName}/reports/${latest.filename}" class="muted" style="font-size: 11.5px;">open standalone →</a></p>
+            </details>
+            <script type="module">${raw(`
+              import { marked } from '/console/static/marked.esm.js';
+              marked.setOptions({ breaks: true, gfm: true });
+              var body = ${latestBodyJSON};
+              if (body) document.getElementById('analyze-md').innerHTML = marked.parse(body);
+            `)}</script>
+          `
+        : ''}
+      ${history.length > 1
+        ? html`
+            <details style="margin-top: 8px;">
+              <summary style="cursor: pointer; font-size: 12.5px; color: var(--fg-soft);">history (${history.length})</summary>
+              <ul style="list-style: none; padding: 0; margin: 8px 0 0;">
+                ${history.slice(1).map(
+                  (h) => html`
+                    <li style="padding: 4px 0; font-size: 12px;">
+                      <span class="mono muted">${h.date}</span> ·
+                      <a class="mono" href="/p/${projectName}/reports/${h.filename}">${h.filename}</a>
+                    </li>
+                  `,
+                )}
+              </ul>
+            </details>
+          `
+        : ''}
+      <p class="muted" style="font-size: 11px; margin-top: 10px;">
+        诊断三维度：D1 召回失败 / D2 延迟异常 / D3 反问悬崖。<br />
+        默认排除 <code>source=console</code> 流量；勾上 \"include console\" 把作者 dogfood 也纳入。
+      </p>
     </div>
   `;
 }
