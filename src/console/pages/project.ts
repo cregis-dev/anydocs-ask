@@ -143,7 +143,6 @@ function sidebar(
     <div>
       ${statusCard(project, live, running)}
       ${lifecycleCard(live)}
-      ${opsCard()}
       ${reportsCard(project.name, reports)}
     </div>
   `;
@@ -181,25 +180,12 @@ function lifecycleCard(live: boolean): Html {
 }
 
 function opsCard(): Html {
-  return html`
-    <div class="card">
-      <h2>Golden / Analyze</h2>
-      <div class="btn-row">
-        <button id="btn-analyze">analyze runs · 7d</button>
-      </div>
-      <div class="btn-row" style="margin-top: 8px;">
-        <button id="btn-golden-structure">golden ← structure</button>
-        <button id="btn-golden-runs">golden ← runs</button>
-      </div>
-      <p id="op-status" class="status muted" style="margin-top: 10px; font-size: 12px; min-height: 16px;"></p>
-      <p class="muted" style="font-size: 11.5px; margin-top: 6px;">
-        Eval workflow 在右侧 <strong>Eval</strong> tab；这里是上游：<br />
-        · analyze runs 跑流量诊断报告<br />
-        · golden generate 生成回归题候选（待 <code class="mono">cases.candidate.jsonl</code> 审）<br />
-        默认无 LLM 改写；要 <code>--llm-rewrite</code> 走命令行。
-      </p>
-    </div>
-  `;
+  // The previous side card with Golden + Analyze buttons was removed
+  // 2026-05-12 — those workflows are now first-class inside Eval tab
+  // (Golden Workshop) and Traffic tab (Analyze section). Keeping this
+  // function as a no-op placeholder so call sites stay stable; sidebar()
+  // simply omits it.
+  return html``;
 }
 
 function reportsCard(name: string, reports: ReportListing[]): Html {
@@ -536,9 +522,10 @@ function bindOp(id, path) {
     }
   });
 }
-bindOp('btn-analyze', '/analyze');
-bindOp('btn-golden-structure', '/golden/generate?from=structure');
-bindOp('btn-golden-runs', '/golden/generate?from=runs');
+// (Old sidebar opsCard buttons — btn-analyze / btn-golden-structure /
+// btn-golden-runs — removed 2026-05-12; those workflows now live inside
+// Eval tab Golden Workshop and Traffic tab analyze section. bindOp() left
+// in place above for ad-hoc reuse; no current callers in opsCard.)
 
 // Traffic tab analyze button — same /analyze endpoint but with optional
 // include_console body flag from the inline checkbox.
