@@ -58,11 +58,30 @@ export class Bgem3Embedder implements Embedder {
       mkdirSync(this.cacheDir, { recursive: true });
       tx.env.cacheDir = this.cacheDir;
     }
-    this.pipeline = (await tx.pipeline('feature-extraction', this.hfModel, {
-      dtype: this.preferQuantized ? 'q8' : 'fp32',
-    })) as FeatureExtractionPipeline;
-    // Run a single token through to ensure ONNX session is hot.
-    await this.pipeline(' ', { pooling: 'mean', normalize: true });
+    // HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1 set env.allowRemoteModels=false
+    // in transformers.js v3.x, which causes an immediate "Unable to get model
+    // file path or buffer" when the local cache is empty. We are an interactive
+    // dev tool that must download on first run, so always allow remote access.
+    tx.env.allowRemoteModels = true;
+
+    const dtype = this.preferQuantized ? 'q8' : 'fp32';
+    process.stderr.write(
+      `[ask/embedding] loading ${this.hfModel} (dtype=${dtype}, cache=${this.cacheDir ?? 'default'}) — first run downloads ~${this.preferQuantized ? '300' : '600'} MB\n`,
+    );
+    try {
+      this.pipeline = (await tx.pipeline('feature-extraction', this.hfModel, {
+        dtype,
+      })) as FeatureExtractionPipeline;
+      // Run a single token through to ensure ONNX session is hot.
+      await this.pipeline(' ', { pooling: 'mean', normalize: true });
+    } catch (err) {
+      throw new Error(
+        `[ask/embedding] failed to load model "${this.hfModel}" (dtype=${dtype}, cache=${this.cacheDir ?? 'default'}).\n` +
+          `  allowRemoteModels=${tx.env.allowRemoteModels} allowLocalModels=${tx.env.allowLocalModels}\n` +
+          `  Cause: ${(err as Error).message}`,
+        { cause: err },
+      );
+    }
     this.ready = true;
   }
 
