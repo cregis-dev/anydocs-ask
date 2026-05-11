@@ -84,7 +84,7 @@ curl http://127.0.0.1:$PORT/        # 应返回工作区首页 HTML
 // ~/anydocs-ask-runtime/.console.json
 {
   "enabled": true,              // 设为 false 可禁用 'anydocs-ask console'
-  "port": 4100,                 // 控制台端口（必须在 childPortRange 范围之外）
+  "port": 4100,                 // 控制台端口（必须落在 4101–4199 之外）
   "idleTimeoutMin": 15,         // 子进程空闲多少分钟后自动回收
   "childPortRangeStart": 4101,
   "childPortRangeEnd": 4199,
