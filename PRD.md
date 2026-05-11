@@ -682,7 +682,13 @@ Golden case schema（jsonl，每行）：
   - Run eval：dropdown 选对比目标（previous / pinned / 任一历史报告），按钮触发；结果落 `state/<id>/reports/<date>-eval.md`，自动刷新视图
   - 最近报告 markdown inline 渲染（同 reports 页面）
   - history 表：所有 eval 报告 + R@5 / Cit / Ans 三列 + sparkline 趋势（≥3 报告时显示，unicode block 零依赖）
-- **Golden / Analyze** side card（Eval 上游辅助）：保留 analyze runs / golden ← structure / golden ← runs 三个按钮（这些不是日常主路径）
+- **2026-05-12 重构**：sidebar "Golden / Analyze" 卡删，三按钮按数据流归位：
+  - `analyze runs` → **Traffic tab** analyze 区（紧贴 7d 流量数据）；勾"include console traffic"等价 `--include-console`
+  - `golden ← structure` / `golden ← runs` → **Eval tab** Golden Workshop 区（紧贴 cases 统计）
+- **Golden Workshop**（PRD §13.6 第 4 行 v1 锁 2026-05-12 解除）：
+  - cases.candidate.jsonl 候选列表 in-UI 显示，每行 approve / reject 按钮
+  - "flush approved → cases.jsonl" 按钮，等价 `anydocs-ask golden review` 把 approved 移入正式 cases
+  - 文件优先原则保留：console 只写 candidate jsonl 的 decision 字段，CLI `golden review` 仍可平行用
 - 实现上**直接调用既有 CLI 内部函数**，不 fork shell；eval CLI 协议**未改**——pin baseline 只是 console 端读指针文件，转译成 `--baseline <path>` 传给 `runEval()`。
 - 详 ARCH §17.3.4。
 
@@ -729,7 +735,7 @@ Golden case schema（jsonl，每行）：
 | ~~Ask 体验台直接落 runs（"灌真实流量"语义）~~ | ~~dry-run 与真实流量混淆会污染 §12.7 analyze；v1 默认走 dry-run，避免作者测试自动写库~~ | **2026-05-11 落地**：UI 加 persist 切换（默认 OFF + 不记忆），runs 多 `source: "reader" \| "console"` 字段，analyze / golden 默认排除 console 流量，`--include-console` 显式纳入。详 §13.4.2 |
 | "标记 bad / good" 按钮 → feedback inbox | v1.5 §11 反馈回路尚未落地；过早引入会先于 β/γ 信号链 | v1.5 §11 落地时同步加 |
 | 检索 / LLM 完整 trace（prompt 全文 / token 用量 / 中间排序） | v1 ask 未埋点；要改 `/v1/ask` 协议加 `?debug=1` | v1.5 |
-| 写权限的 Golden 编辑器（候选审 / 通过 / 驳回 in-UI） | 文件优先；候选文件直接编辑 jsonl 即可，UI 化收益不抵复杂度 | 看作者真实使用频率 |
+| ~~写权限的 Golden 编辑器（候选审 / 通过 / 驳回 in-UI）~~ | ~~文件优先；候选文件直接编辑 jsonl 即可，UI 化收益不抵复杂度~~ | **2026-05-12 落地**：Eval tab Golden Workshop——console 只写 candidate jsonl 的 decision 字段，CLI `golden review` 仍可平行用，文件优先原则未破 |
 | 多用户 / 远程访问 / 团队共享 | v1 内部专用；多用户场景与 PRD §6 本地优先冲突 | v2 |
 | 自动定时任务（cron 调 eval / analyze） | 应用层职责，非 console 职责（用 macOS launchd / cron + CLI 即可） | — |
 

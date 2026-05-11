@@ -31,7 +31,9 @@ import { renderRuns } from './pages/runs.ts';
 import { getStaticAsset } from './static.ts';
 import {
   clearPinnedBaseline,
+  listAnalyzeReports,
   loadEvalSnapshot,
+  readAnalyzeReportBody,
   readReportBody,
   writePinnedBaseline,
 } from './eval-state.ts';
@@ -39,6 +41,11 @@ import { loadIndexSnapshot, type ChildIndexStatus } from './index-state.ts';
 import { loadTrafficWindow } from './traffic-state.ts';
 import { loadProjectHomeStats, summarizeWorkspace } from './home-state.ts';
 import { loadConsoleConfigView } from './config-state.ts';
+import {
+  decideCandidate,
+  flushApproved,
+  loadCandidates,
+} from './golden-workshop-state.ts';
 
 export type ConsoleAppDeps = {
   workspacePath: string;
@@ -190,6 +197,12 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       }
     }
     const trafficWindow = stateRoot ? loadTrafficWindow(stateRoot, 7) : undefined;
+    const candidates = stateRoot ? loadCandidates(stateRoot) : undefined;
+    const analyzeHistory = stateRoot ? listAnalyzeReports(stateRoot) : [];
+    const latestAnalyzeBody =
+      stateRoot && analyzeHistory[0]
+        ? readAnalyzeReportBody(stateRoot, analyzeHistory[0].filename)
+        : null;
     return c.html(
       renderProject({
         project,
@@ -201,6 +214,9 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         latestEvalReportBody,
         ...(indexSnapshot ? { indexSnapshot } : {}),
         ...(trafficWindow ? { trafficWindow } : {}),
+        ...(candidates ? { candidates } : {}),
+        analyzeHistory,
+        latestAnalyzeBody,
         configView: loadConsoleConfigView(deps.workspacePath, project.valid ? project.path : null),
       }),
     );
@@ -513,12 +529,57 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
     if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
     const since = c.req.query('since');
+    let includeConsole = c.req.query('include_console') === '1';
+    try {
+      const body = (await c.req.json().catch(() => null)) as
+        | { include_console?: boolean }
+        | null;
+      if (body && body.include_console === true) includeConsole = true;
+    } catch {
+      // ignore — no body or non-JSON
+    }
     const r = await ops.analyzeRuns({
       projectRoot: ctx.projectRoot,
       stateRoot: ctx.stateRoot,
       ...(since ? { since } : {}),
+      ...(includeConsole ? { includeConsole: true } : {}),
     });
     return c.json(r, r.ok ? 200 : 500);
+  });
+
+  // --- Golden Workshop: candidate decide + flush (PRD §13.6 #4 lock
+  //     broken 2026-05-12: console writes decision field into the
+  //     candidate jsonl, then flush == golden review CLI equivalent).
+  app.post('/api/projects/:name/golden/decide', async (c) => {
+    const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
+    if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
+    let body: { id?: unknown; decision?: unknown } | null = null;
+    try {
+      body = (await c.req.json()) as { id?: unknown; decision?: unknown };
+    } catch {
+      return c.json({ ok: false, error: 'invalid JSON body' }, 400);
+    }
+    if (!body || typeof body.id !== 'string') {
+      return c.json({ ok: false, error: 'body.id (string) required' }, 400);
+    }
+    const d = body.decision;
+    if (d !== null && d !== 'approved' && d !== 'rejected') {
+      return c.json({ ok: false, error: 'body.decision must be null|approved|rejected' }, 400);
+    }
+    const r = decideCandidate(ctx.stateRoot, body.id, d);
+    if (!r.ok) return c.json({ ok: false, error: r.error }, 404);
+    return c.json({ ok: true, before: r.before, after: r.after });
+  });
+
+  app.post('/api/projects/:name/golden/flush', (c) => {
+    const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
+    if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
+    try {
+      const summary = flushApproved(ctx.stateRoot, 'console');
+      return c.json({ ok: true, summary });
+    } catch (err) {
+      return c.json({ ok: false, error: (err as Error).message }, 500);
+    }
   });
 
   app.post('/api/projects/:name/golden/generate', async (c) => {

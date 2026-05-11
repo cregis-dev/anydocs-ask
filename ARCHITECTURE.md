@@ -1512,6 +1512,8 @@ ProcessRegistry {
 | `DELETE /api/projects/:name/eval/pin-baseline` | 删 pin 指针文件 |
 | `POST /api/projects/:name/analyze` | in-process 调用 `analyzeRuns()` |
 | `POST /api/projects/:name/golden/generate` | in-process 调用 `goldenGenerate({ from: 'structure'\|'runs' })` |
+| `POST /api/projects/:name/golden/decide` | body `{ id, decision: "approved"\|"rejected"\|null }` → 改写 cases.candidate.jsonl 对应行的 decision |
+| `POST /api/projects/:name/golden/flush` | 等价 CLI `golden review`：approved 移入 cases.jsonl，rejected 丢弃，candidate file 仅留 pending |
 | `POST /api/projects/:name/reindex` | 反代到 child `/v1/index/rebuild`；child idle → 502 |
 | `GET /api/projects/:name/runs?limit=50&since=...` | 直读 `state/<projectId>/runs/*.jsonl`（不经 child） |
 | `GET /api/projects/:name/reports` | 列 `state/<projectId>/reports/*.md` |
@@ -1552,8 +1554,13 @@ ProcessRegistry {
 4. Run eval：UI dropdown 选 \"previous eval (default) / pinned / 任一历史报告\"，console 反代到 `POST /api/projects/:name/eval` 带 `baseline_path` body
 5. 最近报告：浏览器侧 marked 渲染 `<state>/reports/<date>-eval.md`（与 §17.4 markdown 共用）
 6. history 表：列所有 eval 报告 + 每行 pin 按钮 + sparkline（`▁▂▄▅▆▇` unicode block，趋势 ≥3 报告时显示）
+7. **Golden Workshop**（2026-05-12 加入；PRD §13.6 #4 锁解除）：
+   - candidate jsonl 状态 (pending/approved/rejected/malformed) 计数行
+   - "+ from structure" / "+ from runs" 按钮触发 `goldenGenerate()`
+   - pending 候选列表（前 50 条）：每行 template_id badge + query + lang/must_cite_pages 元数据 + approve/reject 按钮
+   - flush 按钮：等价 `golden review`，approved 移入 cases.jsonl，reviewer="console"
 
-**console-side 零状态原则不破**：pin 文件落 `<state>/<id>/golden/`（项目侧 state），不在 console 进程内存或 console-side 配置。删 console 进程或 cwd 不影响 pin 状态。
+**console-side 零状态原则不破**：pin 文件落 `<state>/<id>/golden/`（项目侧 state），不在 console 进程内存或 console-side 配置。Golden Workshop 的 decide 写入也只是改 cases.candidate.jsonl 的 decision 字段，文件优先原则不破。
 
 #### 17.3.5 Index tab（2026-05-11 加入）
 
@@ -1581,8 +1588,9 @@ tab "Index" 渲染：
 | runs 表 | SSR 行；每行 ts/kind+src-pill/conf/latency/query/cit |
 | 行展开 | 左：fused top-8 表 + meta(model/answer_id/request_id/tokens) + ↩ Re-ask 按钮；右：answer markdown + citations |
 | Re-ask | 写回 Ask tab textarea + 切到 Ask tab + 滑哈希到 `#ask`；当前 cfg 重跑对比 |
+| **Analyze 区**（2026-05-12 加入） | runs 表下方：▶ run analyze · 7d 按钮 + "include console traffic" 复选框（→ body `include_console:true`）+ `<details>` 折叠区 inline marked 渲染最新 analyze 报告 + 历史报告 |
 
-`src/console/traffic-state.ts` 装载 7d 窗口；console-origin runs 与 reader 一同纳入（与 analyze 默认排除不同——Traffic 视图需要可见对照）。
+`src/console/traffic-state.ts` 装载 7d 窗口；console-origin runs 与 reader 一同纳入（与 analyze 默认排除不同——Traffic 视图需要可见对照）。analyze 报告解析与列举见 `eval-state.ts:listAnalyzeReports / readAnalyzeReportBody`。
 
 #### 17.3.7 Next-action 横幅（2026-05-11 加入）
 

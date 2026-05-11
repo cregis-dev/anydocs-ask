@@ -947,6 +947,136 @@ test('DELETE /api/projects/:name/eval/pin-baseline: removes pointer file', async
   }
 });
 
+test('POST /api/projects/:name/golden/decide: writes decision into candidate jsonl', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const goldenDir = join(ws, 'state', 'docs-zh', 'golden');
+    await fs.mkdir(goldenDir, { recursive: true });
+    const candidate = {
+      id: 'cand-001',
+      query: 'JWT 续期',
+      filters: {},
+      context_pageId: null,
+      expected: { must_cite_pages: ['jwt'], must_contain: [], forbid_contain: [] },
+      tags: [],
+      created_by: 'structure',
+      reviewed_at: null,
+      reviewer: null,
+      lang: 'zh',
+      decision: null,
+      template_id: 'definition',
+    };
+    await fs.writeFile(
+      join(goldenDir, 'cases.candidate.jsonl'),
+      JSON.stringify(candidate) + '\n',
+    );
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/golden/decide', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'cand-001', decision: 'approved' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean; after: string };
+    assert.equal(body.ok, true);
+    assert.equal(body.after, 'approved');
+    // file actually contains the update
+    const content = await fs.readFile(join(goldenDir, 'cases.candidate.jsonl'), 'utf8');
+    const parsed = JSON.parse(content.trim()) as { decision: string };
+    assert.equal(parsed.decision, 'approved');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/golden/decide: unknown id → 404', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/golden/decide', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'nope', decision: 'approved' }),
+    });
+    assert.equal(res.status, 404);
+    const body = (await res.json()) as { error: string };
+    assert.match(body.error, /not found/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/golden/flush: moves approved → cases.jsonl, leaves rejected behind', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const goldenDir = join(ws, 'state', 'docs-zh', 'golden');
+    await fs.mkdir(goldenDir, { recursive: true });
+    const make = (id: string, decision: string | null) => ({
+      id,
+      query: 'q-' + id,
+      filters: {},
+      context_pageId: null,
+      expected: { must_cite_pages: ['p'], must_contain: [], forbid_contain: [] },
+      tags: [],
+      created_by: 'structure',
+      reviewed_at: null,
+      reviewer: null,
+      lang: 'zh',
+      decision,
+      template_id: 'definition',
+    });
+    await fs.writeFile(
+      join(goldenDir, 'cases.candidate.jsonl'),
+      [make('a', 'approved'), make('b', 'rejected'), make('c', null)]
+        .map((r) => JSON.stringify(r))
+        .join('\n') + '\n',
+    );
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/golden/flush', {
+      method: 'POST',
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      summary: { approved: number; rejected: number; pending: number };
+    };
+    assert.equal(body.summary.approved, 1);
+    assert.equal(body.summary.rejected, 1);
+    assert.equal(body.summary.pending, 1);
+    // cases.jsonl contains the approved row only
+    const cases = (await fs.readFile(join(goldenDir, 'cases.jsonl'), 'utf8'))
+      .trim()
+      .split('\n');
+    assert.equal(cases.length, 1);
+    const approved = JSON.parse(cases[0]!) as { id: string; reviewer: string };
+    assert.equal(approved.id, 'a');
+    assert.equal(approved.reviewer, 'console');
+    // candidate file keeps only the pending row
+    const remaining = (await fs.readFile(join(goldenDir, 'cases.candidate.jsonl'), 'utf8'))
+      .trim()
+      .split('\n');
+    assert.equal(remaining.length, 1);
+    assert.equal((JSON.parse(remaining[0]!) as { id: string }).id, 'c');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('POST /api/projects/:name/eval: 500 with op error on failure', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {

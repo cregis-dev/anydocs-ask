@@ -147,6 +147,39 @@ export function readReportBody(stateRoot: string, filename: string): string | nu
 }
 
 // ----------------------------------------------------------------------
+// Analyze reports (shape used by Traffic tab analyze section)
+// ----------------------------------------------------------------------
+
+const ANALYZE_REPORT_RE = /^\d{4}-\d{2}-\d{2}-analyze\.md$/;
+
+export type AnalyzeReportSummary = {
+  filename: string;
+  date: string;
+  sizeBytes: number;
+};
+
+export function listAnalyzeReports(stateRoot: string): AnalyzeReportSummary[] {
+  const dir = join(stateRoot, 'reports');
+  if (!existsSync(dir)) return [];
+  const files = readdirSync(dir)
+    .filter((f) => ANALYZE_REPORT_RE.test(f))
+    .sort()
+    .reverse();
+  return files.map((f) => {
+    const path = join(dir, f);
+    const sizeBytes = existsSync(path) ? statSync(path).size : 0;
+    return { filename: f, date: f.slice(0, 10), sizeBytes };
+  });
+}
+
+export function readAnalyzeReportBody(stateRoot: string, filename: string): string | null {
+  if (!ANALYZE_REPORT_RE.test(filename)) return null;
+  const path = join(stateRoot, 'reports', filename);
+  if (!existsSync(path)) return null;
+  return readFileSync(path, 'utf8');
+}
+
+// ----------------------------------------------------------------------
 // golden 题集 stats
 // ----------------------------------------------------------------------
 

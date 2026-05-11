@@ -22,6 +22,8 @@ import { renderTrafficTab } from './project-traffic-tab.ts';
 import type { EvalTabSnapshot } from '../eval-state.ts';
 import type { IndexSnapshot } from '../index-state.ts';
 import type { TrafficWindow } from '../traffic-state.ts';
+import type { CandidateSnapshot } from '../golden-workshop-state.ts';
+import type { AnalyzeReportSummary } from '../eval-state.ts';
 import { computeNextAction, type NextAction } from '../next-action.ts';
 import { renderConfigDrawer } from './config-drawer.ts';
 import type { ConfigViewModel } from '../config-state.ts';
@@ -43,6 +45,12 @@ export type ProjectViewModel = {
   trafficWindow?: TrafficWindow;
   /** Config drawer view model (env / .console.json / anydocs.ask.json). */
   configView?: ConfigViewModel;
+  /** Golden candidate snapshot — Eval tab workshop section. */
+  candidates?: CandidateSnapshot;
+  /** Past analyze reports (newest first) — Traffic tab analyze section. */
+  analyzeHistory?: AnalyzeReportSummary[];
+  /** Body of latest analyze report (markdown). */
+  latestAnalyzeBody?: string | null;
 };
 
 export function renderProject(vm: ProjectViewModel): Html {
@@ -68,7 +76,7 @@ export function renderProject(vm: ProjectViewModel): Html {
     ${nextAction ? nextActionBanner(nextAction) : ''}
 
     ${project.valid
-      ? html`<div class="grid-2">${sidebar(project, live, running, vm.reports)} ${mainCol(project, live, vm.evalSnapshot, vm.latestEvalReportBody, vm.indexSnapshot, vm.trafficWindow)}</div>`
+      ? html`<div class="grid-2">${sidebar(project, live, running, vm.reports)} ${mainCol(project, live, vm.evalSnapshot, vm.latestEvalReportBody, vm.indexSnapshot, vm.trafficWindow, vm.candidates, vm.analyzeHistory ?? [], vm.latestAnalyzeBody ?? null)}</div>`
       : invalidNotice(project)}
 
     <script>${raw(`
@@ -135,7 +143,6 @@ function sidebar(
     <div>
       ${statusCard(project, live, running)}
       ${lifecycleCard(live)}
-      ${opsCard()}
       ${reportsCard(project.name, reports)}
     </div>
   `;
@@ -173,25 +180,12 @@ function lifecycleCard(live: boolean): Html {
 }
 
 function opsCard(): Html {
-  return html`
-    <div class="card">
-      <h2>Golden / Analyze</h2>
-      <div class="btn-row">
-        <button id="btn-analyze">analyze runs · 7d</button>
-      </div>
-      <div class="btn-row" style="margin-top: 8px;">
-        <button id="btn-golden-structure">golden ← structure</button>
-        <button id="btn-golden-runs">golden ← runs</button>
-      </div>
-      <p id="op-status" class="status muted" style="margin-top: 10px; font-size: 12px; min-height: 16px;"></p>
-      <p class="muted" style="font-size: 11.5px; margin-top: 6px;">
-        Eval workflow 在右侧 <strong>Eval</strong> tab；这里是上游：<br />
-        · analyze runs 跑流量诊断报告<br />
-        · golden generate 生成回归题候选（待 <code class="mono">cases.candidate.jsonl</code> 审）<br />
-        默认无 LLM 改写；要 <code>--llm-rewrite</code> 走命令行。
-      </p>
-    </div>
-  `;
+  // The previous side card with Golden + Analyze buttons was removed
+  // 2026-05-12 — those workflows are now first-class inside Eval tab
+  // (Golden Workshop) and Traffic tab (Analyze section). Keeping this
+  // function as a no-op placeholder so call sites stay stable; sidebar()
+  // simply omits it.
+  return html``;
 }
 
 function reportsCard(name: string, reports: ReportListing[]): Html {
@@ -245,6 +239,9 @@ function mainCol(
   latestEvalReportBody: string | null | undefined,
   indexSnapshot: IndexSnapshot | undefined,
   trafficWindow: TrafficWindow | undefined,
+  candidates: CandidateSnapshot | undefined,
+  analyzeHistory: AnalyzeReportSummary[],
+  latestAnalyzeBody: string | null,
 ): Html {
   return html`
     <div>
@@ -272,12 +269,18 @@ function mainCol(
               projectName: project.name,
               snapshot: evalSnapshot,
               latestReportBody: latestEvalReportBody ?? null,
+              candidates: candidates ?? { total: 0, pending: [], approved: 0, rejected: 0, malformed: 0 },
             })
           : html`<div class="card"><p class="empty">eval 状态不可用。</p></div>`}
       </div>
       <div id="ptab-traffic" class="tab-panel" data-project-tab="traffic" hidden>
         ${trafficWindow
-          ? renderTrafficTab({ projectName: project.name, window: trafficWindow })
+          ? renderTrafficTab({
+              projectName: project.name,
+              window: trafficWindow,
+              analyzeHistory,
+              latestAnalyzeBody,
+            })
           : html`<div class="card"><p class="empty">traffic 状态不可用。</p></div>`}
       </div>
     </div>
@@ -519,9 +522,130 @@ function bindOp(id, path) {
     }
   });
 }
-bindOp('btn-analyze', '/analyze');
-bindOp('btn-golden-structure', '/golden/generate?from=structure');
-bindOp('btn-golden-runs', '/golden/generate?from=runs');
+// (Old sidebar opsCard buttons — btn-analyze / btn-golden-structure /
+// btn-golden-runs — removed 2026-05-12; those workflows now live inside
+// Eval tab Golden Workshop and Traffic tab analyze section. bindOp() left
+// in place above for ad-hoc reuse; no current callers in opsCard.)
+
+// Traffic tab analyze button — same /analyze endpoint but with optional
+// include_console body flag from the inline checkbox.
+(function bindTrafficAnalyze() {
+  const btn = $('btn-traffic-analyze');
+  const status = $('traffic-analyze-status');
+  const includeConsole = $('analyze-include-console');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    if (status) { status.textContent = 'running... (10–60s)'; status.className = 'status muted'; }
+    const t0 = Date.now();
+    try {
+      const payload = includeConsole && includeConsole.checked ? { include_console: true } : {};
+      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json();
+      const dt = Date.now() - t0;
+      if (!res.ok || body.ok === false) {
+        if (status) { status.textContent = 'failed (' + dt + 'ms): ' + (body.error || res.statusText); status.className = 'status err'; }
+      } else {
+        if (status) { status.textContent = 'done (' + dt + 'ms)'; status.className = 'status ok'; }
+        setTimeout(() => location.reload(), 500);
+      }
+    } catch (e) {
+      if (status) { status.textContent = 'network error: ' + (e && e.message ? e.message : e); status.className = 'status err'; }
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
+// Golden Workshop generators (Eval tab buttons mirror sidebar ones but with
+// dedicated status line; both go through the same /golden/generate endpoint).
+(function bindGwGenerators() {
+  function bind(id, path) {
+    const btn = $(id);
+    const status = $('gw-gen-status');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      if (status) { status.textContent = id.replace('btn-gen-', '') + '...'; status.className = 'status muted'; }
+      const t0 = Date.now();
+      try {
+        const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + path, { method: 'POST' });
+        const body = await res.json();
+        const dt = Date.now() - t0;
+        if (!res.ok || body.ok === false) {
+          if (status) { status.textContent = 'failed (' + dt + 'ms): ' + (body.error || res.statusText); status.className = 'status err'; }
+        } else {
+          if (status) { status.textContent = 'done (' + dt + 'ms): ' + (body.message || 'ok'); status.className = 'status ok'; }
+          setTimeout(() => location.reload(), 600);
+        }
+      } catch (e) {
+        if (status) { status.textContent = 'network error: ' + (e && e.message ? e.message : e); status.className = 'status err'; }
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+  bind('btn-gen-structure', '/golden/generate?from=structure');
+  bind('btn-gen-runs', '/golden/generate?from=runs');
+})();
+
+// Golden Workshop approve / reject on candidate rows (PRD §13.6 第 4 行
+// v1 锁 broken 2026-05-12 with author consent).
+(function bindGwDecide() {
+  document.querySelectorAll('.gw-candidate').forEach((row) => {
+    const id = row.dataset.id;
+    if (!id) return;
+    row.querySelectorAll('button[data-decide]').forEach((b) => {
+      b.addEventListener('click', async () => {
+        const decision = b.dataset.decide;
+        b.disabled = true;
+        try {
+          const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/golden/decide', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, decision }),
+          });
+          const body = await res.json();
+          if (!res.ok || body.ok === false) {
+            alert((body && body.error) || res.statusText);
+            b.disabled = false;
+            return;
+          }
+          // Visual fade-out: hide row immediately, reload after a beat.
+          row.style.opacity = '0.4';
+          row.style.transition = 'opacity .15s';
+          setTimeout(() => location.reload(), 250);
+        } catch (e) {
+          alert('network error: ' + (e && e.message ? e.message : e));
+          b.disabled = false;
+        }
+      });
+    });
+  });
+  const flush = $('btn-gw-flush');
+  if (flush) {
+    flush.addEventListener('click', async () => {
+      if (!confirm('flush approved candidates → cases.jsonl?')) return;
+      flush.disabled = true;
+      try {
+        const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/golden/flush', { method: 'POST' });
+        const body = await res.json();
+        if (!res.ok || body.ok === false) {
+          alert((body && body.error) || res.statusText);
+          flush.disabled = false;
+          return;
+        }
+        location.reload();
+      } catch (e) {
+        alert('network error: ' + (e && e.message ? e.message : e));
+        flush.disabled = false;
+      }
+    });
+  }
+})();
 
 // ------------------------------------------------------------------
 // Project-page tabs (Ask / Eval / Activity)
