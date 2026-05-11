@@ -11,11 +11,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   WORKSPACE_SUBDIRS,
+  addToProjectRegistry,
   assertProjectRoot,
   ensureStateRoot,
   ensureWorkspace,
   isBareName,
   loadProjectId,
+  readProjectRegistry,
+  removeFromProjectRegistry,
   resolveProjectRoot,
   resolveStateRoot,
   resolveWorkspace,
@@ -74,11 +77,26 @@ test('isBareName: paths and weird names rejected', () => {
   assert.equal(isBareName('docs\\zh'), false);
 });
 
-test('resolveProjectRoot: bare name -> <ws>/projects/<name>', () => {
+test('resolveProjectRoot: bare name not in registry falls back to <ws>/projects/<name>', () => {
+  // No registry at /ws → falls back to legacy path for a friendly error message
   const r = resolveProjectRoot('docs-zh', '/ws');
   assert.equal(r.source, 'workspace');
   assert.equal(r.bareName, 'docs-zh');
   assert.equal(r.path, '/ws/projects/docs-zh');
+});
+
+test('resolveProjectRoot: bare name registered -> uses registry path', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    ensureWorkspace(ws);
+    addToProjectRegistry(ws, '/some/other/path/docs-zh', 'docs-zh');
+    const r = resolveProjectRoot('docs-zh', ws);
+    assert.equal(r.source, 'workspace');
+    assert.equal(r.bareName, 'docs-zh');
+    assert.equal(r.path, '/some/other/path/docs-zh');
+  } finally {
+    await cleanup();
+  }
 });
 
 test('resolveProjectRoot: path-like arg resolved against cwd', () => {
@@ -96,7 +114,7 @@ test('resolveProjectRoot: absolute path passes through', () => {
   assert.equal(r.path, '/abs/project');
 });
 
-test('ensureWorkspace: creates root + projects/ subdir on first run', async () => {
+test('ensureWorkspace: creates root + state/ subdir on first run', async () => {
   const { path: parent, cleanup } = await withTmpDir();
   try {
     const ws = join(parent, 'fresh-ws');
@@ -106,7 +124,7 @@ test('ensureWorkspace: creates root + projects/ subdir on first run', async () =
     for (const sub of WORKSPACE_SUBDIRS) {
       assert.ok(existsSync(join(ws, sub)), `expected ${sub}/ to exist`);
     }
-    // workspace top-level is intentionally minimal — no golden/runs/feedback/reports.
+    // workspace top-level is intentionally minimal
     assert.equal(existsSync(join(ws, 'golden')), false);
     assert.equal(existsSync(join(ws, 'runs')), false);
     assert.equal(existsSync(join(ws, 'feedback')), false);
@@ -130,10 +148,9 @@ test('ensureWorkspace: idempotent on second run', async () => {
   }
 });
 
-test('ensureWorkspace: existing projects/ + state/ -> nothing created', async () => {
+test('ensureWorkspace: existing state/ -> nothing created', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
-    await fs.mkdir(join(ws, 'projects'), { recursive: true });
     await fs.mkdir(join(ws, 'state'), { recursive: true });
     const r = ensureWorkspace(ws);
     assert.equal(r.rootCreated, false);
@@ -189,12 +206,13 @@ test('assertProjectRoot: lists both missing dirs in error message', async () => 
   }
 });
 
-test('end-to-end: workspace + bare-name resolution + assertProjectRoot', async () => {
+test('end-to-end: workspace + registry add + bare-name resolution + assertProjectRoot', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     ensureWorkspace(ws);
     const projDir = join(ws, 'projects', 'docs-zh');
     await makeValidProject(projDir);
+    addToProjectRegistry(ws, projDir, 'docs-zh');
 
     const wsResolution = resolveWorkspace(ws, {});
     assert.equal(wsResolution.path, ws);
@@ -273,7 +291,7 @@ test('ensureStateRoot: creates state/<id>/ idempotently', async () => {
   }
 });
 
-test('scanProjects: returns [] for missing projects/ dir', async () => {
+test('scanProjects: returns [] when projects.json absent', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     assert.deepEqual(scanProjects(ws), []);
@@ -296,26 +314,31 @@ test('scanProjects: surfaces valid / invalid / id / indexed', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     ensureWorkspace(ws);
-    const projects = join(ws, 'projects');
 
-    // (a) valid project with config.projectId === dir name, not yet indexed
-    await makeValidProject(join(projects, 'docs-zh'));
+    // (a) valid project with config.projectId === registered name, not yet indexed
+    const docsPath = join(ws, 'docs-zh');
+    await makeValidProject(docsPath);
     await fs.writeFile(
-      join(projects, 'docs-zh', 'anydocs.config.json'),
+      join(docsPath, 'anydocs.config.json'),
       JSON.stringify({ version: 1, projectId: 'docs-zh' }),
     );
+    addToProjectRegistry(ws, docsPath, 'docs-zh');
 
     // (b) valid project with id-rename + indexed (touch index.db)
-    await makeValidProject(join(projects, 'hermes-docs'));
+    const hermesPath = join(ws, 'hermes-docs');
+    await makeValidProject(hermesPath);
     await fs.writeFile(
-      join(projects, 'hermes-docs', 'anydocs.config.json'),
+      join(hermesPath, 'anydocs.config.json'),
       JSON.stringify({ version: 1, projectId: 'hermes-canonical' }),
     );
     await fs.mkdir(join(ws, 'state', 'hermes-canonical'), { recursive: true });
     await fs.writeFile(join(ws, 'state', 'hermes-canonical', 'index.db'), '');
+    addToProjectRegistry(ws, hermesPath, 'hermes-docs');
 
     // (c) invalid project (missing navigation/)
-    await fs.mkdir(join(projects, 'broken', 'pages'), { recursive: true });
+    const brokenPath = join(ws, 'broken');
+    await fs.mkdir(join(brokenPath, 'pages'), { recursive: true });
+    addToProjectRegistry(ws, brokenPath, 'broken');
 
     const out = scanProjects(ws);
     assert.equal(out.length, 3);
@@ -335,7 +358,7 @@ test('scanProjects: surfaces valid / invalid / id / indexed', async () => {
     assert.equal(docs.valid, true);
     assert.equal(docs.projectId, 'docs-zh');
     assert.equal(docs.indexed, false);
-    assert.equal(docs.path, join(projects, 'docs-zh'));
+    assert.equal(docs.path, docsPath);
 
     const hermes = out[2]!;
     assert.equal(hermes.valid, true);
@@ -346,15 +369,28 @@ test('scanProjects: surfaces valid / invalid / id / indexed', async () => {
   }
 });
 
-test('scanProjects: skips files and missing config.json gracefully', async () => {
+test('scanProjects: stale registry entry (path gone) shows valid=false', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     ensureWorkspace(ws);
-    const projects = join(ws, 'projects');
-    // valid project but no anydocs.config.json
-    await makeValidProject(join(projects, 'orphan'));
-    // a stray file at projects/ level (should be ignored)
-    await fs.writeFile(join(projects, 'README.txt'), 'hi');
+    addToProjectRegistry(ws, '/nonexistent/path/docs', 'ghost');
+    const out = scanProjects(ws);
+    assert.equal(out.length, 1);
+    assert.equal(out[0]!.name, 'ghost');
+    assert.equal(out[0]!.valid, false);
+    assert.deepEqual(out[0]!.missing, ['path not found']);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('scanProjects: no anydocs.config.json -> projectId null, valid true', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    ensureWorkspace(ws);
+    const orphanPath = join(ws, 'orphan');
+    await makeValidProject(orphanPath);
+    addToProjectRegistry(ws, orphanPath, 'orphan');
 
     const out = scanProjects(ws);
     assert.equal(out.length, 1);
@@ -363,6 +399,83 @@ test('scanProjects: skips files and missing config.json gracefully', async () =>
     assert.equal(p.valid, true);
     assert.equal(p.projectId, null);
     assert.equal(p.indexed, false);
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Project registry tests
+// ---------------------------------------------------------------------------
+
+test('addToProjectRegistry / readProjectRegistry: round-trip', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    ensureWorkspace(ws);
+    addToProjectRegistry(ws, '/path/to/docs', 'my-docs');
+    addToProjectRegistry(ws, '/path/to/other', 'other');
+    const reg = readProjectRegistry(ws);
+    assert.equal(reg['my-docs'], '/path/to/docs');
+    assert.equal(reg['other'], '/path/to/other');
+    assert.equal(Object.keys(reg).length, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('addToProjectRegistry: overwrites same name', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    ensureWorkspace(ws);
+    addToProjectRegistry(ws, '/old/path', 'docs');
+    addToProjectRegistry(ws, '/new/path', 'docs');
+    assert.equal(readProjectRegistry(ws)['docs'], '/new/path');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('addToProjectRegistry: infers name from basename when not provided', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    ensureWorkspace(ws);
+    const name = addToProjectRegistry(ws, '/some/path/my-project');
+    assert.equal(name, 'my-project');
+    assert.equal(readProjectRegistry(ws)['my-project'], '/some/path/my-project');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('removeFromProjectRegistry: removes existing entry', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    ensureWorkspace(ws);
+    addToProjectRegistry(ws, '/path', 'to-remove');
+    const removed = removeFromProjectRegistry(ws, 'to-remove');
+    assert.equal(removed, true);
+    assert.equal('to-remove' in readProjectRegistry(ws), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('removeFromProjectRegistry: returns false for unknown name', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    ensureWorkspace(ws);
+    const removed = removeFromProjectRegistry(ws, 'ghost');
+    assert.equal(removed, false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('readProjectRegistry: returns {} for malformed JSON', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await fs.writeFile(join(ws, 'projects.json'), 'not json', 'utf8');
+    assert.deepEqual(readProjectRegistry(ws), {});
   } finally {
     await cleanup();
   }

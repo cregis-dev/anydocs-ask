@@ -1094,14 +1094,14 @@ CLI 启动时按下列顺序解析 workspace 路径：
 2. `$ANYDOCS_ASK_WORKSPACE` 环境变量
 3. 默认 `~/anydocs-ask-runtime/`（即 `path.join(os.homedir(), 'anydocs-ask-runtime')`）
 
-不存在时由 CLI 创建（含 `projects/` 与 `state/` 两个顶级子目录）并打印 `created workspace at <path>`。
+不存在时由 CLI 创建（含 `state/` 顶级子目录）并打印 `created workspace at <path>`。
 
-**双根分离**（2026-05-08 三次订正，撤回二次订正"项目自包含"）：workspace 顶层并列两个职能完全分离的目录：
+**双根分离**（2026-05-08 三次订正；2026-05-12 四次订正：symlink 方式改为注册表）：workspace 顶层结构：
 
 ```
 <workspace>/
 ├── .env                       # 全局凭证（ANTHROPIC_*、模型 override 等）
-├── projects/<name>/           # SOURCE：文档本体；user-authored，可 symlink 到既有仓库
+├── projects.json              # 项目注册表：{ "name": "/abs/path/to/project", ... }
 └── state/<projectId>/         # RUNTIME：所有可重建的派生数据
     ├── index.db
     ├── runs/<YYYY-Www>.jsonl
@@ -1111,17 +1111,15 @@ CLI 启动时按下列顺序解析 workspace 路径：
     └── answer-cache/
 ```
 
-**为什么撤回"项目自包含"**：二次订正假设的是"用户在 workspace 内 git init 一个新 anydocs 项目"。但实际场景里，绝大多数 anydocs 项目（如 hermes-docs）已有自己的仓库；用户用 symlink 把 `projects/<name>` 指过去，旧布局让 `.anydocs-ask/` 跟着 symlink 回写源仓——污染 git status、6.8MB index.db 易被打进生产 git、用户清源仓时误删 runs/golden、`.gitignore` 还得手动加。三次订正切到 `state/` 后这些缺陷全部消失。
+项目通过 `workspace add <path> [--name <name>]` 注册（或在 Web 控制台首页 Add Project 表单），写入 `projects.json`。源码仓库路径任意，**不需要软链或移动文件**。
 
 #### 16.1.2 项目识别 + state-key 解析
 
-**Source 侧**（`projects/<name>/`）的判据未变：存在 `pages/` 且存在 `navigation/`，与 anydocs 主仓约定一致。
+**Source 侧**的合法判据：存在 `pages/` 且存在 `navigation/`，与 anydocs 主仓约定一致。`scanProjects()` 读 `projects.json`，路径不存在时显示 `valid=false`（stale entry）。
 
 **State-key**：`<workspace>/state/<projectId>/` 的 `<projectId>` 从 `<projectRoot>/anydocs.config.json` 的 `projectId` 字段读出（anydocs 格式必填字段）。bare-name `serve docs-zh` 与 path-form `serve /abs/docs-zh` 都查同一个 projectId → 落同一份 state。
 
 **冲突处理**：两个不同 projectRoot 解析出同一 projectId 视为人为错误。`workspace ls` 检测时打 ⚠ 标记并指引；`reindex` / `serve` 启动期检测到 projectRoot 与 `state/<id>/.source` （reindex 时落的 source pinning 文件）不一致时报错而非默默写。
-
-`projects/starter-demo/` 由 CLI `workspace init` 命令以 symlink 方式从代码仓 `fixtures/starter-docs/` 链入（开发者机器）；CI/生产环境无该 symlink。
 
 #### 16.1.3 多项目并列
 
@@ -1135,8 +1133,8 @@ anydocs-ask serve starter-demo --port 3102
 
 `<projectRoot>` 入参支持两种形态：
 
-- 绝对/相对路径（向后兼容；state 仍走 `<workspace>/state/<projectId>/`）
-- 仅 `<name>`：解析为 `<workspace>/projects/<name>`
+- 绝对/相对路径（state 仍走 `<workspace>/state/<projectId>/`）
+- 仅 `<name>`（裸名）：在 `projects.json` 注册表查找；未找到则回退 `<workspace>/projects/<name>` 并报 not-in-registry 提示
 
 任何跨项目共享状态（sqlite / answer cache / runs）都禁止——一进程一项目硬约束（PRD §5.5 / §12.2 决策 4）。
 
@@ -1155,8 +1153,10 @@ shell-exported 变量优先级最高（loadEnvFile 不覆盖）。**v1 不再读
 
 | 命令 | 行为 | 幂等 |
 |---|---|---|
-| `anydocs-ask workspace init [--workspace <path>]` | 创建 workspace 目录骨架；存在则只补缺失子目录 | ✅ |
-| `anydocs-ask workspace ls` | 列 `projects/*`（标记是否运行中、端口、最近 reindex 时间） | ✅ |
+| `anydocs-ask workspace init [--workspace <path>]` | 创建 workspace 目录骨架（`state/`）；存在则只补缺失子目录 | ✅ |
+| `anydocs-ask workspace ls` | 列 `projects.json` 注册的项目，标记 valid / indexed / 路径 | ✅ |
+| `anydocs-ask workspace add <path> [--name <n>]` | 将项目路径注册到 `projects.json`；自动校验 `pages/` + `navigation/` | ✅ |
+| `anydocs-ask workspace rm <name>` | 从注册表删除（`state/` 数据保留）| ✅ |
 | `anydocs-ask golden generate <project> --from structure\|runs\|inbox [--limit N] [--llm-rewrite]` | 生成 Golden 候选 → 写 `<workspace>/state/<projectId>/golden/cases.candidate.jsonl`，等待人工审 | ✅ |
 | `anydocs-ask golden review <project>` | 打开候选文件让作者编辑（`decision: approved/rejected`）；批准的并入 `cases.jsonl` | ✅ |
 | `anydocs-ask eval <project> [--golden <path>] [--baseline <date>]` | 跑 Golden，输出三指标 + diff baseline；落 `<workspace>/state/<projectId>/reports/<date>-eval.md` | ✅ |
@@ -1447,7 +1447,7 @@ anydocs-ask console [--workspace <path>] [--port 4100] [--idle-timeout-min 15]
 ```
 1. resolveWorkspace() —— 与 §16.1.1 同
 2. loadEnv()           —— 仅 <workspace>/.env（不加载任何 projectRoot/.env，console 是 meta 层）
-3. scanProjects()      —— 扫 <workspace>/projects/*，不启动任何子进程
+3. scanProjects()      —— 读 <workspace>/projects.json 注册表，不启动任何子进程
 4. startHonoApp()      —— 绑定 127.0.0.1:4100；JSX SSR 路由 + JSON 路由
 5. attachShutdown()    —— SIGINT/SIGTERM 时按 PID 表 SIGTERM 全部 child serve
 ```

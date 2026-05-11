@@ -56,10 +56,12 @@ curl http://127.0.0.1:$PORT/        # 应返回工作区首页 HTML
 
 ### 项目生命周期
 
-- **添加项目** — 把 anydocs 项目软链或复制到工作区（默认 `~/anydocs-ask-runtime/projects/<name>/`）。例如：
+- **添加项目** — 在控制台首页底部的 **Add Project** 表单填入路径（支持 `~` 展开），或用 CLI：
   ```bash
-  ln -s "$(pwd)/fixtures/starter-docs" ~/anydocs-ask-runtime/projects/starter-docs
+  anydocs-ask workspace add ./fixtures/starter-docs
+  anydocs-ask workspace add /abs/path/to/my-docs --name my-docs
   ```
+  项目路径写入工作区的 `projects.json` 注册表，无需软链或移动源码。
 - **启动 / 停止** — 在项目页点击按钮，或访问 `/p/<name>?autostart=1`。控制台会懒加载 spawn `anydocs-ask serve` 子进程，最多等待 30 秒完成预热。
 - **空闲回收** — 超过 `idleTimeoutMin`（默认 15 分钟）无活动后，子进程自动终止以释放内存。
 - **重新索引** — 子进程运行后，在项目页可触发；调用 `/v1/index/rebuild` 在进程内完成。
@@ -116,21 +118,24 @@ curl -X POST http://localhost:3100/v1/ask \
 
 ### `<projectRoot>` 是什么？——两种写法，二选一
 
-所有 CLI 子命令第一个位置参数都是 `<projectRoot>`，指向**一个 anydocs 项目目录**（必须包含 `anydocs.config.json`、`pages/`、`navigation/`）。允许两种形式，**靠是否含 `/` 自动判定**（`src/workspace.ts:86`）：
+所有 CLI 子命令第一个位置参数都是 `<projectRoot>`，指向**一个 anydocs 项目目录**（必须包含 `anydocs.config.json`、`pages/`、`navigation/`）。允许两种形式，**靠是否含 `/` 自动判定**（`src/workspace.ts`）：
 
 | 写法 | 例子 | 实际解析为 | 何时用 |
 |---|---|---|---|
-| **裸名称**（不含 `/`） | `my-docs` | `<workspace>/projects/my-docs/`（默认 `~/anydocs-ask-runtime/projects/my-docs/`） | 已经把项目软链 / 复制到工作区，想用简称 |
+| **裸名称**（不含 `/`） | `my-docs` | 在 `projects.json` 注册表中查找该名称对应的路径 | 已通过 `workspace add` 注册，想用简称 |
 | **文件系统路径**（含 `/` 或绝对路径） | `./fixtures/starter-docs`、`/abs/path/to/docs` | 按字面路径解析（相对路径基于 `cwd`） | 临时跑一次，不想接入工作区 |
 
 具体例子：
 
 ```bash
-# A. 裸名——前提：~/anydocs-ask-runtime/projects/my-docs/ 已存在
-anydocs-ask serve my-docs --port 3100
-anydocs-ask eval  my-docs
+# 先注册（一次性）
+anydocs-ask workspace add ./fixtures/starter-docs --name starter-docs
 
-# B. 路径——任意目录都行
+# A. 裸名——前提：已通过 workspace add 注册
+anydocs-ask serve starter-docs --port 3100
+anydocs-ask eval  starter-docs
+
+# B. 路径——任意目录都行，无需注册
 anydocs-ask serve ./fixtures/starter-docs --port 3100
 anydocs-ask serve /Users/me/work/product-docs
 ```
@@ -192,6 +197,8 @@ anydocs-ask status           <projectRoot>
 # 详见 ARCHITECTURE.md §16.1）
 anydocs-ask workspace init
 anydocs-ask workspace ls
+anydocs-ask workspace add    <path> [--name <name>]   # 注册项目路径到 projects.json
+anydocs-ask workspace rm     <name>                   # 移除注册（保留 state 数据）
 
 # Runs jsonl（每次 /v1/ask 追加一行；ARCH §16.4）
 anydocs-ask runs tail        <projectRoot> [--n 50]
