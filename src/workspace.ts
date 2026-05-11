@@ -32,6 +32,24 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 
+/**
+ * Minimal credential template written to <workspace>/.env on `workspace init`.
+ * Single source of truth — do not duplicate in .env.example files.
+ */
+export const WORKSPACE_ENV_TEMPLATE = `# anydocs-ask workspace credentials
+# Shared across all projects in this workspace.
+# Shell exports > per-project .env > this file.
+
+# Pick ONE auth path:
+
+# (A) Native Anthropic API key — https://api.anthropic.com
+ANTHROPIC_API_KEY=
+
+# (B) Internal Anthropic-compatible gateway (Bearer auth + custom base URL)
+# ANTHROPIC_AUTH_TOKEN=
+# ANTHROPIC_BASE_URL=https://gateway.your-company.example.com
+`;
+
 export const WORKSPACE_SUBDIRS = ['state'] as const;
 export type WorkspaceSubdir = (typeof WORKSPACE_SUBDIRS)[number];
 
@@ -81,6 +99,18 @@ export function ensureWorkspace(workspacePath: string): EnsureWorkspaceResult {
     }
   }
   return { rootCreated, subdirsCreated };
+}
+
+/**
+ * Write WORKSPACE_ENV_TEMPLATE to <workspace>/.env if it does not already
+ * exist. Returns true if the file was created, false if it was already there.
+ * Never overwrites an existing file so that credentials are never clobbered.
+ */
+export function ensureWorkspaceEnv(workspacePath: string): boolean {
+  const envPath = join(workspacePath, '.env');
+  if (existsSync(envPath)) return false;
+  writeFileSync(envPath, WORKSPACE_ENV_TEMPLATE, 'utf8');
+  return true;
 }
 
 export function isBareName(arg: string): boolean {
