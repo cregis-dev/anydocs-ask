@@ -23,8 +23,12 @@ export function buildDefaultLLM(config: ResolvedConfig): LLM {
     const authToken = process.env.ANTHROPIC_AUTH_TOKEN;
     const baseURL = process.env.ANTHROPIC_BASE_URL;
     if (!apiKey && !authToken) {
+      const keyEnv =
+        config.llm.apiKeyEnv === 'ANTHROPIC_API_KEY'
+          ? 'ANTHROPIC_API_KEY'
+          : `${config.llm.apiKeyEnv} (or ANTHROPIC_API_KEY)`;
       throw new Error(
-        `LLM provider 'anthropic' requires either '${config.llm.apiKeyEnv}' / 'ANTHROPIC_API_KEY' or 'ANTHROPIC_AUTH_TOKEN' env var. ` +
+        `LLM provider 'anthropic' requires either '${keyEnv}' or 'ANTHROPIC_AUTH_TOKEN' env var. ` +
           `For internal Anthropic-compatible gateways set ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL.`,
       );
     }
