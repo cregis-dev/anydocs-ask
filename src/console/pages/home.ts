@@ -1,10 +1,12 @@
 /**
  * Home page (project selector) — ARCH §17.3.1 GET /.
- * Card grid; each card shows name + status pills + indexed flag and links
- * into /p/:name. Invalid projects render with grayed treatment + reason.
+ *
+ * Sticky header (in layout) · workspace KPI strip · project card grid +
+ * inline "add project" card. Invalid projects render with red treatment +
+ * reason; clicking the row jumps to the standalone /p/:name diagnostic.
  */
 
-import { html } from 'hono/html';
+import { html, raw } from 'hono/html';
 import type { ProjectListing } from '../../workspace.ts';
 import type { RegisteredProcess } from '../registry.ts';
 import { layout, type Html, type NavContext } from './layout.ts';
@@ -18,11 +20,8 @@ export type HomeViewModel = {
   idleTimeoutMin: number;
   projects: ProjectListing[];
   running: Map<string, RegisteredProcess>;
-  /** Per-project state extras for card decoration. */
   projectStats?: Map<string, ProjectHomeStats>;
-  /** Workspace-level rollup for the top strip. */
   workspaceSummary?: WorkspaceSummary;
-  /** Config drawer (workspace-only context — no project anydocs.ask.json). */
   configView?: ConfigViewModel;
 };
 
@@ -38,14 +37,18 @@ export function renderHome(vm: HomeViewModel): Html {
     consolePort: vm.consolePort,
     idleTimeoutMin: vm.idleTimeoutMin,
   };
+  const empty = vm.projects.length === 0;
   const body = html`
-    <div class="pagehead">
-      <h1>projects</h1>
-      <span class="crumb mono">workspace · ${vm.workspacePath}</span>
+    <div class="page-head">
+      ${empty
+        ? html`<h1 class="page-title">projects <span class="sub">— no projects yet</span></h1>`
+        : html`<h1 class="page-title">projects</h1>`}
+      <div class="page-meta">${vm.workspacePath}</div>
     </div>
-    ${vm.workspaceSummary && vm.projects.length > 0 ? workspaceStrip(vm.workspaceSummary) : ''}
-    ${vm.projects.length === 0 ? emptyState() : projectGrid(vm)}
-    ${addProjectForm()}
+
+    ${!empty && vm.workspaceSummary ? workspaceStrip(vm.workspaceSummary) : ''}
+    ${empty ? emptyState() : projectGrid(vm)}
+    ${addFormScript()}
   `;
   return layout({
     title: 'projects',
@@ -57,96 +60,68 @@ export function renderHome(vm: HomeViewModel): Html {
 
 function workspaceStrip(s: WorkspaceSummary): Html {
   return html`
-    <div class="ws-strip">
-      <div class="ws-kpi">
-        <span class="ws-v">${s.projectsValid}/${s.projectsTotal}</span>
-        <span class="ws-k">valid projects</span>
+    <div class="strip" style="margin-bottom: var(--s-6);">
+      <div class="cell">
+        <div class="c-lab">valid · total</div>
+        <div class="c-val">${s.projectsValid}<span class="unit">/ ${s.projectsTotal}</span></div>
       </div>
-      <div class="ws-kpi">
-        <span class="ws-v">${s.projectsIndexed}</span>
-        <span class="ws-k">indexed</span>
+      <div class="cell">
+        <div class="c-lab">indexed</div>
+        <div class="c-val">${s.projectsIndexed}</div>
       </div>
-      <div class="ws-kpi">
-        <span class="ws-v">${s.projectsRunning}</span>
-        <span class="ws-k">running</span>
+      <div class="cell">
+        <div class="c-lab">running</div>
+        <div class="c-val" style="${s.projectsRunning > 0 ? 'color: var(--run);' : 'color: var(--fg-mute);'}">
+          ${s.projectsRunning}
+        </div>
       </div>
-      <div class="ws-kpi">
-        <span class="ws-v">${s.totalCases}</span>
-        <span class="ws-k">golden cases</span>
+      <div class="cell">
+        <div class="c-lab">golden cases</div>
+        <div class="c-val">${s.totalCases}</div>
       </div>
-      <div class="ws-kpi">
-        <span class="ws-v">${s.totalRuns7d}</span>
-        <span class="ws-k">runs · 7d</span>
+      <div class="cell">
+        <div class="c-lab">runs · 7d</div>
+        <div class="c-val">${s.totalRuns7d}</div>
       </div>
-      ${s.mostRecentProject
-        ? html`<div class="ws-kpi"><span class="ws-v mono" style="font-size: 13px;">${s.mostRecentProject}</span><span class="ws-k">most recent</span></div>`
-        : ''}
+      <div class="cell">
+        <div class="c-lab">most recent</div>
+        <div class="c-val" style="font-size: var(--t-14); font-family: var(--font-mono);">
+          ${s.mostRecentProject ?? '—'}
+        </div>
+      </div>
     </div>
-    <style>
-      .ws-strip { display: flex; gap: 18px; flex-wrap: wrap; padding: 12px 16px; margin: 0 0 14px; background: var(--bg-elev); border: 1px solid var(--bd); border-radius: 8px; }
-      .ws-kpi { display: flex; flex-direction: column; min-width: 100px; }
-      .ws-v { font-size: 17px; font-weight: 600; font-family: ui-monospace, monospace; letter-spacing: -0.01em; }
-      .ws-k { font-size: 11px; color: var(--fg-mute); text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }
-    </style>
   `;
 }
 
 function emptyState(): Html {
+  // Full-page empty state — single inline form for "add your first project".
   return html`
-    <div class="card">
-      <p class="empty" style="text-align:center;">还没有注册任何项目。</p>
-      <p class="muted" style="text-align:center;">使用下方表单或 CLI 添加第一个项目：<br /><code class="mono">anydocs-ask workspace add &lt;path&gt;</code></p>
-    </div>
-  `;
-}
-
-function addProjectForm(): Html {
-  return html`
-    <div class="card" style="margin-top:16px;">
-      <div class="pagehead" style="margin-bottom:10px;">
-        <h2 style="font-size:15px;margin:0;">Add Project</h2>
+    <div class="empty" style="border: 1px dashed var(--bd-strong); border-radius: var(--r-5); background: var(--bg-elev); padding: 64px 24px;">
+      <div class="e-ico" style="width: 56px; height: 56px;">
+        <svg style="width: 28px; height: 28px;"><use href="#i-folder"/></svg>
       </div>
-      <form id="add-proj-form" style="display:flex;flex-direction:column;gap:10px;">
-        <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;">
-          Path <span style="color:var(--fg-mute);font-size:11.5px;">absolute or ~/relative path to anydocs project root</span>
-          <input id="add-proj-path" type="text" placeholder="/path/to/my-docs" style="font-family:ui-monospace,monospace;font-size:13px;padding:5px 8px;border:1px solid var(--bd);border-radius:4px;background:var(--bg);color:var(--fg);" />
-        </label>
-        <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;">
-          Name <span style="color:var(--fg-mute);font-size:11.5px;">optional — defaults to directory name</span>
-          <input id="add-proj-name" type="text" placeholder="auto-detect" style="font-family:ui-monospace,monospace;font-size:13px;padding:5px 8px;border:1px solid var(--bd);border-radius:4px;background:var(--bg);color:var(--fg);" />
-        </label>
-        <div style="display:flex;align-items:center;gap:12px;">
-          <button type="submit" class="btn btn-primary">Add</button>
-          <span id="add-proj-msg" style="font-size:12.5px;"></span>
-        </div>
+      <h3>Add your first documentation project</h3>
+      <p>A project is a folder shaped like <code class="inline">pages/&lt;lang&gt;/*.json</code>
+        plus <code class="inline">navigation/&lt;lang&gt;.json</code>. Point at a local checkout,
+        and the console will index it and let you ask questions against it.</p>
+      <form id="add-proj-form" style="display: flex; gap: var(--s-2); align-items: center; width: 100%; max-width: 560px; margin-top: var(--s-4);">
+        <input id="add-proj-path" class="input mono" placeholder="~/workspace/your-docs" autocomplete="off" />
+        <input id="add-proj-name" class="input" placeholder="display name (optional)" style="max-width: 200px;" autocomplete="off" />
+        <button class="btn primary" type="submit">
+          <svg><use href="#i-plus"/></svg> add project
+        </button>
       </form>
+      <p style="margin-top: var(--s-3); font-size: var(--t-12); color: var(--fg-mute);">
+        Path must contain <code class="inline">pages/</code> and <code class="inline">navigation/</code>.
+        We won't write to it.
+      </p>
+      <p id="add-proj-msg" class="status" style="font-size: var(--t-12);"></p>
+      <details style="margin-top: var(--s-5); width: 100%; max-width: 560px; text-align: left;">
+        <summary style="font-size: var(--t-12); color: var(--fg-soft); cursor: pointer;">CLI equivalent</summary>
+        <pre class="block" style="margin-top: var(--s-2);"><span class="cmt"># add a project via CLI, same effect</span>
+anydocs-ask <span class="kw">workspace add</span> ~/workspace/your-docs --name your-docs</pre>
+      </details>
     </div>
-    <script>
-      document.getElementById('add-proj-form').addEventListener('submit', async function(e) {
-        e.preventDefault();
-        const path = document.getElementById('add-proj-path').value.trim();
-        const name = document.getElementById('add-proj-name').value.trim();
-        const msg = document.getElementById('add-proj-msg');
-        if (!path) { msg.style.color = 'var(--err)'; msg.textContent = 'path is required'; return; }
-        msg.style.color = 'var(--fg-mute)'; msg.textContent = 'adding…';
-        try {
-          const r = await fetch('/api/projects/add', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path, ...(name ? { name } : {}) }),
-          });
-          const j = await r.json();
-          if (j.ok) {
-            msg.style.color = 'var(--ok, #2a9)'; msg.textContent = 'added — reloading…';
-            setTimeout(() => location.reload(), 600);
-          } else {
-            msg.style.color = 'var(--err)'; msg.textContent = j.error ?? 'error';
-          }
-        } catch(err) {
-          msg.style.color = 'var(--err)'; msg.textContent = String(err);
-        }
-      });
-    </script>
   `;
 }
 
@@ -154,23 +129,7 @@ function projectGrid(vm: HomeViewModel): Html {
   const cards = vm.projects.map((p) =>
     projectCard(p, vm.running.get(p.name) ?? null, vm.projectStats?.get(p.name)),
   );
-  return html`
-    <div class="proj-grid">${cards}</div>
-    <style>
-      .proj-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
-      .proj-card { display: flex; flex-direction: column; min-height: 152px; }
-      .proj-card .head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
-      .proj-card .name { font-weight: 600; font-size: 15px; }
-      .proj-card .id { font-size: 11.5px; color: var(--fg-mute); }
-      .proj-card .pills { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 8px; }
-      .proj-card .stats { display: flex; gap: 12px; font-size: 11.5px; color: var(--fg-mute); margin-bottom: 10px; }
-      .proj-card .stats .v { color: var(--fg-soft); font-family: ui-monospace, monospace; font-weight: 500; }
-      .proj-card .footer { margin-top: auto; display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 12px; }
-      .proj-card.invalid { opacity: .68; }
-      .proj-card.invalid .name { color: var(--fg-soft); }
-      .proj-card .invalid-msg { color: var(--err); font-size: 12px; margin-bottom: 10px; }
-    </style>
-  `;
+  return html`<div class="proj-cards">${cards}${addCard()}</div>`;
 }
 
 function projectCard(
@@ -179,59 +138,117 @@ function projectCard(
   stats: ProjectHomeStats | undefined,
 ): Html {
   const live = running !== null && !running.exited;
-  const idAttr =
-    p.projectId && p.projectId !== p.name
-      ? html`<span class="id mono">id=${p.projectId}</span>`
-      : '';
+
   if (!p.valid) {
     return html`
-      <div class="card proj-card invalid">
-        <div class="head">
-          <span class="name mono">${p.name}</span>
-          ${idAttr}
+      <div class="card proj-card invalid" aria-disabled="true">
+        <div class="pc-hd">
+          <div class="pc-name">${p.name}</div>
+          <div class="pc-pills">
+            <span class="pill err"><span class="dot"></span>invalid</span>
+          </div>
         </div>
-        <div class="invalid-msg">missing: ${p.missing.join(', ')}</div>
-        <div class="footer">
-          <span class="muted mono" title="${p.path}">${shortPath(p.path)}</span>
-          <span class="muted">—</span>
+        <div class="pc-stats" style="color: var(--err);">
+          <span>missing: ${p.missing.join(', ')}</span>
+        </div>
+        <div class="pc-path" title="${p.path}">${shortPath(p.path)}</div>
+        <div class="pc-foot">
+          <span class="tag err">cannot open</span>
+          <span class="muted" style="font-size: var(--t-12);">fix files, refresh</span>
         </div>
       </div>
     `;
   }
+
   const pills = html`
-    <span class="pill"><span class="dot ${live ? 'run' : 'idle'}"></span>${live ? `running · :${running!.port}` : 'idle'}</span>
+    ${live
+      ? html`<span class="pill run"><span class="dot"></span>running · :${running!.port}</span>`
+      : html`<span class="pill"><span class="dot"></span>idle</span>`}
     ${p.indexed
-      ? html`<span class="pill"><span class="dot run"></span>indexed</span>`
-      : html`<span class="pill"><span class="dot idle"></span>not indexed</span>`}
+      ? html`<span class="pill ok"><span class="dot"></span>indexed</span>`
+      : html`<span class="pill warn"><span class="dot"></span>not indexed</span>`}
   `;
   const statsRow = stats
     ? html`
-        <div class="stats">
-          <span><span class="v">${stats.cases}</span> cases</span>
-          <span><span class="v">${stats.runs7d}</span> runs·7d</span>
+        <div class="pc-stats">
+          <span><b>${stats.cases}</b> cases</span>
+          <span><b>${stats.runs7d}</b> runs · 7d</span>
           ${stats.lastEvalDate
-            ? html`<span>eval <span class="v">${stats.lastEvalDate}</span></span>`
-            : html`<span class="muted">no eval yet</span>`}
+            ? html`<span>eval <b>${stats.lastEvalDate}</b></span>`
+            : html`<span class="mono" style="color: var(--fg-mute);">no eval yet</span>`}
         </div>
       `
     : '';
-  const action = live
-    ? html`<a class="btn btn-primary" href="/p/${p.name}">open →</a>`
-    : html`<a class="btn btn-primary" href="/p/${p.name}?autostart=1">open + start →</a>`;
+  const linkLabel = live ? 'open' : p.indexed ? 'open + start' : 'open + index';
+  const href = live ? `/p/${p.name}` : `/p/${p.name}?autostart=1`;
+  const runCls = live ? ' run' : '';
   return html`
-    <div class="card proj-card">
-      <div class="head">
-        <span class="name mono">${p.name}</span>
-        ${idAttr}
+    <a class="card proj-card${raw(runCls)}" href="${href}">
+      <div class="pc-hd">
+        <div class="pc-name">${p.name}</div>
+        <div class="pc-pills">${pills}</div>
       </div>
-      <div class="pills">${pills}</div>
       ${statsRow}
-      <div class="footer">
-        <span class="muted mono" title="${p.path}">${shortPath(p.path)}</span>
-        ${action}
+      <div class="pc-path" title="${p.path}">${shortPath(p.path)}</div>
+      <div class="pc-foot">
+        <span class="tag">${p.indexed ? 'indexed' : 'unindexed'}</span>
+        <span class="pc-link">${linkLabel} <svg><use href="#i-arr-r"/></svg></span>
       </div>
+    </a>
+  `;
+}
+
+function addCard(): Html {
+  return html`
+    <div class="add-card">
+      <h3>
+        <svg style="width: 14px; height: 14px; color: var(--fg-soft);"><use href="#i-plus"/></svg>
+        add another project
+      </h3>
+      <p>Point at a folder with <code class="inline">pages/</code> and <code class="inline">navigation/</code>.</p>
+      <form id="add-proj-form" class="row" style="flex-direction: column; gap: var(--s-2);">
+        <input id="add-proj-path" class="input mono" placeholder="~/workspace/your-docs" autocomplete="off" />
+        <div style="display: flex; gap: var(--s-2);">
+          <input id="add-proj-name" class="input" placeholder="display name (optional)" style="flex: 1;" autocomplete="off" />
+          <button class="btn primary" type="submit">add</button>
+        </div>
+        <p id="add-proj-msg" class="status" style="font-size: var(--t-12); margin: 0;"></p>
+      </form>
     </div>
   `;
+}
+
+function addFormScript(): Html {
+  return html`<script>${raw(`
+    (function(){
+      var form = document.getElementById('add-proj-form');
+      if (!form) return;
+      form.addEventListener('submit', async function(e){
+        e.preventDefault();
+        var path = (document.getElementById('add-proj-path').value || '').trim();
+        var name = (document.getElementById('add-proj-name').value || '').trim();
+        var msg = document.getElementById('add-proj-msg');
+        if (!path) { msg.className = 'status err'; msg.textContent = 'path is required'; return; }
+        msg.className = 'status'; msg.textContent = 'adding…';
+        try {
+          var res = await fetch('/api/projects/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(Object.assign({ path: path }, name ? { name: name } : {})),
+          });
+          var j = await res.json();
+          if (j.ok) {
+            msg.className = 'status ok'; msg.textContent = 'added — reloading…';
+            setTimeout(function(){ location.reload(); }, 500);
+          } else {
+            msg.className = 'status err'; msg.textContent = j.error || 'error';
+          }
+        } catch (err) {
+          msg.className = 'status err'; msg.textContent = String(err);
+        }
+      });
+    })();
+  `)}</script>`;
 }
 
 function shortPath(p: string): string {

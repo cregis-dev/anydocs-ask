@@ -21,16 +21,16 @@ export function renderRuns(args: {
   const ordered = [...records].reverse(); // newest first
   const payload = raw(JSON.stringify(ordered));
   const body = html`
-    <div class="pagehead">
-      <span class="crumb mono">
-        <a href="/">projects</a> /
-        <a href="/p/${args.projectName}">${args.projectName}</a> /
-      </span>
-      <h1>recent runs</h1>
+    <div class="page-head">
+      <div class="crumbs">
+        <a href="/">projects</a><span class="sep">/</span>
+        <a href="/p/${args.projectName}">${args.projectName}</a><span class="sep">/</span>
+        <span class="here">recent runs</span>
+      </div>
       <span class="muted mono">${ordered.length}/${args.limit}</span>
     </div>
     ${ordered.length === 0
-      ? html`<div class="card"><p class="empty">尚无 runs（或本周文件不存在）。</p></div>`
+      ? html`<div class="card"><div class="card-bd"><p class="empty" style="padding:24px 0;">尚无 runs（或本周文件不存在）。</p></div></div>`
       : runsCard(ordered)}
     <script>${raw(`window.__RUNS__ = ${payload};`)}</script>
     <script type="module">${raw(RUNS_SCRIPT)}</script>
@@ -41,23 +41,23 @@ export function renderRuns(args: {
 function runsCard(records: RunRecord[]): Html {
   return html`
     <div class="card flush">
-      <div class="card-head" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+      <div class="card-hd" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
         <h2 style="margin:0;">runs</h2>
-        <input id="filter-q" type="search" placeholder="filter query…" style="flex:1; min-width:160px; max-width:320px;" />
-        <select id="filter-kind" class="proj-switcher">
+        <input id="filter-q" class="input" type="search" placeholder="filter query…" style="flex:1; min-width:160px; max-width:320px;" />
+        <select id="filter-kind" class="select" style="width: auto;">
           <option value="">all kinds</option>
           <option value="answer">answer</option>
           <option value="clarify">clarify</option>
           <option value="error">error</option>
         </select>
-        <select id="filter-conf" class="proj-switcher">
+        <select id="filter-conf" class="select" style="width: auto;">
           <option value="">conf any</option>
           <option value="0.8">conf ≥ 0.8</option>
           <option value="0.6">conf ≥ 0.6</option>
           <option value="0.4">conf ≥ 0.4</option>
         </select>
       </div>
-      <table id="runs-table">
+      <table class="tbl" id="runs-table">
         <thead>
           <tr>
             <th style="width: 70px;">ts</th>
