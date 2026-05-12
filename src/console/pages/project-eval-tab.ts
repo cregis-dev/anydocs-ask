@@ -36,10 +36,9 @@ export function renderEvalTab(vm: EvalTabViewModel): Html {
   return html`
     <div class="eval-tab">
       ${metricRow(latest, pinnedSummary, pinned)}
-      ${goldenSummaryCard(goldenStats)}
-      ${workshopCard(vm.candidates)}
       ${runCard(history, pinned)}
       ${latestReportCard(vm.projectName, latest, vm.latestReportBody)}
+      ${goldenCasesCard(goldenStats, vm.candidates)}
       ${historyCard(vm.projectName, history, pinned?.filename ?? null)}
     </div>
     <style>
@@ -65,8 +64,8 @@ export function renderEvalTab(vm: EvalTabViewModel): Html {
       .eval-history .pin-btn { font-size: 11px; padding: 2px 8px; }
       .gw-card .gw-summary { display:flex; gap:14px; font-size:12.5px; margin-bottom:10px; color: var(--fg-soft); }
       .gw-card .gw-summary .v { font-family: ui-monospace, monospace; font-weight: 600; color: var(--fg); }
-      .gw-candidate { display: grid; grid-template-columns: 28px 1fr auto; gap: 10px; padding: 10px 12px; border: 1px solid var(--bd-soft); border-radius: 6px; margin-bottom: 8px; background: var(--bg-soft); }
-      .gw-candidate .badge { font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 4px; background: var(--bg-elev); color: var(--fg-mute); align-self: start; }
+      .gw-candidate { display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto; gap: 12px; padding: 10px 12px; border: 1px solid var(--bd-soft); border-radius: 6px; margin-bottom: 8px; background: var(--bg-soft); align-items: start; }
+      .gw-candidate .badge { font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 4px; background: var(--bg-elev); color: var(--fg-mute); align-self: start; max-width: 130px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .gw-candidate .meta { font-size: 11.5px; color: var(--fg-mute); margin-top: 4px; word-break: break-word; }
       .gw-candidate .query { font-size: 13px; font-weight: 500; word-break: break-word; }
       .gw-candidate .actions { display: flex; gap: 6px; align-self: start; }
@@ -103,7 +102,7 @@ function latestCard(
     return html`
       <div class="card metric-card">
         <h2 style="margin:0 0 8px;">latest eval</h2>
-        <p class="empty" style="padding:14px 0;">尚无 eval 记录。点下方 <strong>Run eval</strong> 跑第一次。</p>
+        <p class="empty" style="padding:14px 0;">No eval reports yet. Click <strong>▶ run</strong> below to produce the first one.</p>
       </div>
     `;
   }
@@ -152,9 +151,10 @@ function baselineCard(
     return html`
       <div class="card metric-card">
         <h2 style="margin: 0 0 8px;">baseline</h2>
-        <p style="font-size: 13px; margin: 4px 0 0;"><span class="muted">未 pin</span></p>
+        <p style="font-size: 13px; margin: 4px 0 0;"><span class="muted">not pinned</span></p>
         <p class="muted" style="font-size: 11.5px; margin: 8px 0 0;">
-          eval 默认对比"上一份报告"。在下面 history 表点 <code>pin</code> 钉一份当金准。
+          Eval compares against the previous report by default. Click <code>pin</code>
+          in the history table to lock a baseline.
         </p>
         ${latest
           ? html`<p class="muted" style="font-size: 11.5px; margin: 6px 0 0;">last vs prior: see report below</p>`
@@ -193,42 +193,127 @@ function baselineCard(
   `;
 }
 
-function goldenSummaryCard(stats: {
+type GoldenStats = {
   totalCases: number;
   byLang: Record<string, number>;
   byTag: Record<string, number>;
   byCreatedBy: Record<string, number>;
   lastEditISO: string | null;
   malformed: number;
-}): Html {
+};
+
+/**
+ * Unified Golden cases card — two tabs:
+ *   • Approved (cases.jsonl)   the input set Run Eval consumes
+ *   • Pending  (cases.candidate.jsonl)  workshop / review queue
+ * Default tab is whichever side has work waiting: pending if any, else approved.
+ */
+function goldenCasesCard(stats: GoldenStats, candidates: CandidateSnapshot): Html {
+  const approvedCount = stats.totalCases;
+  const pendingCount = candidates.pending.length;
+  // Show pending tab by default when there are unreviewed candidates — that's
+  // the next thing the author should look at. Otherwise approved.
+  const defaultTab: 'approved' | 'pending' = pendingCount > 0 ? 'pending' : 'approved';
+  return html`
+    <div class="card gc-card">
+      <div class="card-head" style="padding: 0 0 10px; border-bottom: 1px solid var(--bd-soft); margin: -2px 0 10px;">
+        <h2 style="margin: 0;">Golden cases</h2>
+        <span class="muted" style="font-size: 11.5px; margin-left: 10px;">eval 用的题目集合</span>
+      </div>
+      <div class="tabs gc-tabs" role="tablist" style="margin: 0 0 12px;">
+        <button role="tab" data-gc-tab="approved" aria-selected="${defaultTab === 'approved'}">
+          Approved <span class="muted" style="font-weight: 400;">${approvedCount}</span>
+        </button>
+        <button role="tab" data-gc-tab="pending" aria-selected="${defaultTab === 'pending'}">
+          Pending review <span class="muted" style="font-weight: 400;">${pendingCount}</span>
+          ${pendingCount > 0
+            ? html`<span class="gc-dot" style="background: var(--warn); width: 6px; height: 6px; border-radius: 50%; display: inline-block; margin-left: 4px; vertical-align: 2px;"></span>`
+            : ''}
+        </button>
+      </div>
+      <div data-gc-panel="approved" ${defaultTab === 'approved' ? '' : 'hidden'}>
+        ${approvedPanel(stats)}
+      </div>
+      <div data-gc-panel="pending" ${defaultTab === 'pending' ? '' : 'hidden'}>
+        ${pendingPanel(candidates)}
+      </div>
+    </div>
+    <script>(function(){
+      var tabs = document.querySelectorAll('.gc-tabs [data-gc-tab]');
+      var panels = document.querySelectorAll('[data-gc-panel]');
+      tabs.forEach(function(b){
+        b.addEventListener('click', function(){
+          var t = b.getAttribute('data-gc-tab');
+          tabs.forEach(function(x){ x.setAttribute('aria-selected', x.getAttribute('data-gc-tab') === t ? 'true' : 'false'); });
+          panels.forEach(function(p){ p.hidden = p.getAttribute('data-gc-panel') !== t; });
+        });
+      });
+    })();</script>
+  `;
+}
+
+function approvedPanel(stats: GoldenStats): Html {
   if (stats.totalCases === 0) {
     return html`
-      <div class="card">
-        <h2 style="margin: 0 0 8px;">golden 题集</h2>
-        <p class="empty" style="padding: 10px 0;">
-          尚无已批准 case。先 <strong>golden ← structure</strong> 或 <strong>golden ← runs</strong> 生成候选，<br />
-          再编辑 <code class="mono">cases.candidate.jsonl</code> 把 decision 改为 <code>approved</code>，<br />
-          运行 <code class="mono">anydocs-ask golden review</code> 入库。
-        </p>
-      </div>
+      <p class="empty" style="padding: 10px 0;">
+        还没有审批通过的 case。先到 <strong>Pending review</strong> tab 生成候选并审批。
+      </p>
     `;
   }
   const lastEdit = stats.lastEditISO ? stats.lastEditISO.slice(0, 10) : '—';
   return html`
-    <div class="card">
-      <h2 style="margin: 0 0 8px; display:flex; justify-content:space-between; align-items:baseline;">
-        <span>golden 题集</span>
-        <span class="muted mono" style="font-size: 11.5px;">${stats.totalCases} cases · last ${lastEdit}</span>
-      </h2>
-      <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; font-size: 12.5px;">
-        ${bucketBlock('by lang', stats.byLang)}
-        ${bucketBlock('by tag', stats.byTag)}
-        ${bucketBlock('by source', stats.byCreatedBy)}
-      </div>
-      ${stats.malformed > 0
-        ? html`<p style="color: var(--err); font-size: 11.5px; margin-top: 10px;">⚠ ${stats.malformed} malformed line(s) in cases.jsonl — see <code>anydocs-ask golden review</code></p>`
+    <p class="muted" style="font-size: 11.5px; margin: 0 0 10px;">
+      ${stats.totalCases} cases · last edited ${lastEdit}
+      <span style="float: right;"><code class="mono">cases.jsonl</code></span>
+    </p>
+    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; font-size: 12.5px;">
+      ${bucketBlock('by lang', stats.byLang)}
+      ${bucketBlock('by tag', stats.byTag)}
+      ${bucketBlock('by source', stats.byCreatedBy)}
+    </div>
+    ${stats.malformed > 0
+      ? html`<p style="color: var(--err); font-size: 11.5px; margin-top: 10px;">⚠ ${stats.malformed} malformed line(s) — fix with <code>anydocs-ask golden review</code></p>`
+      : ''}
+  `;
+}
+
+function pendingPanel(snap: CandidateSnapshot): Html {
+  const hasAny = snap.total > 0;
+  const hasApproved = snap.approved > 0;
+  return html`
+    <div class="gw-summary">
+      <span>pending <span class="v">${snap.pending.length}</span></span>
+      <span>approved <span class="v">${snap.approved}</span></span>
+      <span>rejected <span class="v">${snap.rejected}</span></span>
+      ${snap.malformed > 0
+        ? html`<span style="color: var(--err);">malformed <span class="v">${snap.malformed}</span></span>`
+        : ''}
+      <span style="flex: 1;"></span>
+      <span class="muted mono" style="font-size: 11.5px;">cases.candidate.jsonl</span>
+    </div>
+    <div class="btn-row" style="margin-bottom: 10px; flex-wrap: wrap;">
+      <button id="btn-gen-structure">+ from structure</button>
+      <button id="btn-gen-runs">+ from runs</button>
+      <span id="gw-gen-status" class="status muted" style="font-size: 12px;"></span>
+      ${hasApproved
+        ? html`
+            <span style="flex:1;"></span>
+            <button id="btn-gw-flush" class="btn-primary">flush ${snap.approved} approved → cases.jsonl</button>
+          `
         : ''}
     </div>
+    ${!hasAny
+      ? html`<p class="empty-q">还没有候选。点上方按钮生成(默认无 LLM 改写;要 <code>--llm-rewrite</code> 请走命令行)。</p>`
+      : snap.pending.length === 0
+        ? html`<p class="empty-q">全部已审。${hasApproved ? '点 flush 把 approved 移入 cases.jsonl。' : ''}</p>`
+        : html`${snap.pending.slice(0, 50).map((c) => candidateRow(c))}
+            ${snap.pending.length > 50
+              ? html`<p class="muted" style="font-size: 11.5px;">... 另 ${snap.pending.length - 50} 条未显示(继续审上面 50 条后会自动加载下一批)</p>`
+              : ''}`}
+    <p class="muted" style="font-size: 11px; margin-top: 10px;">
+      UI approve/reject 等价改 jsonl 行的 <code>decision</code> 字段;flush 等价
+      <code class="mono">anydocs-ask golden review</code>。
+    </p>
   `;
 }
 
@@ -250,50 +335,6 @@ function bucketBlock(label: string, bucket: Record<string, number>): Html {
           </div>
         `,
       )}
-    </div>
-  `;
-}
-
-function workshopCard(snap: CandidateSnapshot): Html {
-  const hasAny = snap.total > 0;
-  const hasApproved = snap.approved > 0;
-  return html`
-    <div class="card gw-card">
-      <div class="card-head" style="padding: 0 0 10px; border-bottom: 1px solid var(--bd-soft); margin: -2px 0 10px; display:flex; justify-content:space-between; align-items:baseline;">
-        <h2 style="margin: 0;">golden workshop</h2>
-        <span class="muted" style="font-size: 11.5px;">cases.candidate.jsonl</span>
-      </div>
-      <div class="gw-summary">
-        <span>pending <span class="v">${snap.pending.length}</span></span>
-        <span>approved <span class="v">${snap.approved}</span></span>
-        <span>rejected <span class="v">${snap.rejected}</span></span>
-        ${snap.malformed > 0
-          ? html`<span style="color: var(--err);">malformed <span class="v">${snap.malformed}</span></span>`
-          : ''}
-      </div>
-      <div class="btn-row" style="margin-bottom: 10px; flex-wrap: wrap;">
-        <button id="btn-gen-structure">+ from structure</button>
-        <button id="btn-gen-runs">+ from runs</button>
-        <span id="gw-gen-status" class="status muted" style="font-size: 12px;"></span>
-        ${hasApproved
-          ? html`
-              <span style="flex:1;"></span>
-              <button id="btn-gw-flush" class="btn-primary">flush ${snap.approved} approved → cases.jsonl</button>
-            `
-          : ''}
-      </div>
-      ${!hasAny
-        ? html`<p class="empty-q">尚无候选。点上方按钮生成（默认无 LLM 改写；要 <code>--llm-rewrite</code> 走命令行）。</p>`
-        : snap.pending.length === 0
-          ? html`<p class="empty-q">全部已审。${hasApproved ? '点 flush 把 approved 移入 cases.jsonl。' : ''}</p>`
-          : html`${snap.pending.slice(0, 50).map((c) => candidateRow(c))}
-              ${snap.pending.length > 50
-                ? html`<p class="muted" style="font-size: 11.5px;">... 另 ${snap.pending.length - 50} 条未显示（继续审上面 50 条后会自动加载下一批）</p>`
-                : ''}`}
-      <p class="muted" style="font-size: 11px; margin-top: 10px;">
-        UI approve/reject 等价改 jsonl 行的 <code>decision</code> 字段；flush 等价
-        <code class="mono">anydocs-ask golden review</code>。
-      </p>
     </div>
   `;
 }
@@ -333,21 +374,23 @@ function runCard(history: EvalReportSummary[], pinned: { filename: string } | nu
       ),
   ];
   return html`
-    <div class="card">
-      <h2 style="margin: 0 0 8px;">run eval</h2>
+    <div class="card" style="border-color: var(--accent); box-shadow: 0 0 0 1px var(--run-bg);">
+      <h2 style="margin: 0 0 8px; color: var(--accent);">Run eval</h2>
       <div class="btn-row" style="align-items: center;">
-        <label style="display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px;">
-          baseline:
+        <button id="btn-run-eval" class="btn-primary" style="font-size: 14px; padding: 8px 18px;">▶ run</button>
+        <label style="display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--fg-soft);">
+          compare against
           <select id="eval-baseline-select" class="proj-switcher" style="min-width: 240px;">
             ${options}
           </select>
         </label>
-        <button id="btn-run-eval" class="btn-primary">▶ run</button>
         <span id="eval-run-status" class="status muted"></span>
       </div>
       <p class="muted" style="font-size: 11.5px; margin: 8px 0 0;">
-        runs 全部已批准 cases；中型 docs 大概 10–30s。LLM 改写候选请走命令行
-        <code class="mono">anydocs-ask eval &lt;name&gt; --baseline &lt;path&gt;</code>。
+        Runs every approved case · medium docs take 10–30s.
+        <details style="display:inline;"><summary style="display:inline; cursor:pointer; color: var(--fg-soft);">CLI equivalent</summary>
+          <code class="mono" style="display:block; margin-top:4px;">anydocs-ask eval &lt;name&gt; --baseline &lt;path&gt;</code>
+        </details>
       </p>
     </div>
   `;
