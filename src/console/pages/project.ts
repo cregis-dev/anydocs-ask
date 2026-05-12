@@ -647,7 +647,7 @@ function bindOp(id, path) {
         if (!logEl) return;
         const span = document.createElement('span');
         if (cls) span.className = cls;
-        span.textContent = line + '\n';
+        span.textContent = line + '\\n';
         logEl.appendChild(span);
         // Stay pinned at bottom unless the user has manually scrolled up.
         const atBottom = logEl.scrollHeight - logEl.clientHeight - logEl.scrollTop < 30;
@@ -655,7 +655,13 @@ function bindOp(id, path) {
       };
       let lastResult = null;
       try {
-        const url = '/api/projects/' + encodeURIComponent(cfg.name) + '/golden/generate/stream?from=' + source;
+        const limitInput = $('gw-gen-limit');
+        let limitParam = '';
+        if (limitInput && source === 'structure') {
+          const v = parseInt(limitInput.value, 10);
+          if (Number.isFinite(v) && v > 0) limitParam = '&limit=' + v;
+        }
+        const url = '/api/projects/' + encodeURIComponent(cfg.name) + '/golden/generate/stream?from=' + source + limitParam;
         const res = await fetch(url, { method: 'POST' });
         if (!res.ok || !res.body) {
           const text = await res.text().catch(() => '');
@@ -670,7 +676,7 @@ function bindOp(id, path) {
             if (done) break;
             buf += decoder.decode(value, { stream: true });
             let nl;
-            while ((nl = buf.indexOf('\n')) !== -1) {
+            while ((nl = buf.indexOf('\\n')) !== -1) {
               const line = buf.slice(0, nl);
               buf = buf.slice(nl + 1);
               if (!line) continue;
@@ -762,6 +768,173 @@ function bindOp(id, path) {
       } catch (e) {
         alert('network error: ' + (e && e.message ? e.message : e));
         flush.disabled = false;
+      }
+    });
+  }
+})();
+
+// Golden Workshop: client-side pagination over the rendered pending rows.
+// Server emits all rows (data-idx=0..N-1); JS shows pageSize at a time so a
+// 530-candidate batch isn't a 530-row wall. Page persists in location.hash
+// fragment (#eval / #eval-p3) so approve/reject reload doesn't lose place.
+(function bindGwPager() {
+  const listEl = $('gw-pending-list');
+  if (!listEl) return;
+  const rows = Array.from(listEl.querySelectorAll('.gw-candidate'));
+  if (rows.length === 0) return;
+  const pageSize = Math.max(1, parseInt(listEl.dataset.pageSize, 10) || 20);
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const prev = $('gw-pager-prev');
+  const next = $('gw-pager-next');
+  const info = $('gw-pager-info');
+
+  function readPage() {
+    try {
+      const m = (location.hash || '').match(/[?&]gp=(\\d+)/);
+      if (m) {
+        const p = parseInt(m[1], 10);
+        if (Number.isFinite(p)) return Math.min(Math.max(1, p), totalPages);
+      }
+    } catch (_) {}
+    return 1;
+  }
+  function writePage(p) {
+    // Keep the existing tab fragment (e.g. "#eval") and replace any prior gp=.
+    let h = location.hash || '';
+    h = h.replace(/[?&]gp=\\d+/g, '');
+    if (h && !h.includes('?')) h = h + '?gp=' + p;
+    else if (h) h = h + '&gp=' + p;
+    else h = '#eval?gp=' + p;
+    history.replaceState({}, '', location.pathname + h);
+  }
+
+  let page = readPage();
+  function render() {
+    const start = (page - 1) * pageSize;
+    const end = start + pageSize;
+    rows.forEach((r, i) => { r.style.display = (i >= start && i < end) ? '' : 'none'; });
+    if (info) info.textContent = page + ' / ' + totalPages + ' · ' + rows.length + ' rows';
+    if (prev) prev.disabled = page <= 1;
+    if (next) next.disabled = page >= totalPages;
+  }
+  if (prev) prev.addEventListener('click', () => { if (page > 1) { page--; writePage(page); render(); } });
+  if (next) next.addEventListener('click', () => { if (page < totalPages) { page++; writePage(page); render(); } });
+  render();
+})();
+
+// Golden Workshop: edit modal — POST /golden/candidate/update with a patch
+// of the editable fields. Read-only fields (template_id, created_by,
+// reviewed_at, reviewer, decision) display in the modal header but are not
+// part of the patch.
+(function bindGwEdit() {
+  const backdrop = $('gw-edit-backdrop');
+  if (!backdrop) return;
+  const pending = Array.isArray(window.__GW_PENDING__) ? window.__GW_PENDING__ : [];
+  const byId = new Map(pending.map((c) => [c.id, c]));
+
+  const elId = $('gw-edit-id');
+  const elTemplate = $('gw-edit-template');
+  const elCreatedBy = $('gw-edit-created-by');
+  const elQuery = $('gw-edit-query');
+  const elLang = $('gw-edit-lang');
+  const elContext = $('gw-edit-context');
+  const elAudience = $('gw-edit-audience');
+  const elVersion = $('gw-edit-version');
+  const elTags = $('gw-edit-tags');
+  const elMustCite = $('gw-edit-mustcite');
+  const elMustContain = $('gw-edit-mustcontain');
+  const elForbid = $('gw-edit-forbid');
+  const elNote = $('gw-edit-note');
+  const elStatus = $('gw-edit-status');
+  const btnSave = $('gw-edit-save');
+  const btnCancel = $('gw-edit-cancel');
+
+  let currentId = null;
+
+  function open(id) {
+    const c = byId.get(id);
+    if (!c) { alert('candidate not found in client cache: ' + id); return; }
+    currentId = id;
+    if (elId) elId.textContent = c.id;
+    if (elTemplate) elTemplate.textContent = c.template_id || '—';
+    if (elCreatedBy) elCreatedBy.textContent = c.created_by || '—';
+    if (elQuery) elQuery.value = c.query || '';
+    if (elLang) elLang.value = c.lang || 'en';
+    if (elContext) elContext.value = c.context_pageId || '';
+    const f = c.filters || {};
+    if (elAudience) elAudience.value = f.audience || '';
+    if (elVersion) elVersion.value = f.version || '';
+    if (elTags) elTags.value = Array.isArray(c.tags) ? c.tags.join(', ') : '';
+    const exp = c.expected || {};
+    if (elMustCite) elMustCite.value = (exp.must_cite_pages || []).join(', ');
+    if (elMustContain) elMustContain.value = (exp.must_contain || []).join(', ');
+    if (elForbid) elForbid.value = (exp.forbid_contain || []).join(', ');
+    if (elNote) elNote.value = c.note || '';
+    if (elStatus) { elStatus.textContent = ''; elStatus.className = 'status'; }
+    backdrop.classList.add('show');
+    backdrop.setAttribute('aria-hidden', 'false');
+    if (elQuery) elQuery.focus();
+  }
+  function close() {
+    currentId = null;
+    backdrop.classList.remove('show');
+    backdrop.setAttribute('aria-hidden', 'true');
+  }
+  function csvToArr(s) {
+    return String(s || '').split(',').map((x) => x.trim()).filter((x) => x.length > 0);
+  }
+
+  document.querySelectorAll('.gw-candidate button[data-edit]').forEach((b) => {
+    b.addEventListener('click', (ev) => {
+      const row = ev.currentTarget.closest('.gw-candidate');
+      if (row && row.dataset.id) open(row.dataset.id);
+    });
+  });
+
+  if (btnCancel) btnCancel.addEventListener('click', close);
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && backdrop.classList.contains('show')) close();
+  });
+
+  if (btnSave) {
+    btnSave.addEventListener('click', async () => {
+      if (!currentId) return;
+      const patch = {
+        query: elQuery ? elQuery.value : undefined,
+        lang: elLang ? elLang.value : undefined,
+        context_pageId: elContext ? elContext.value : undefined,
+        filters: {
+          audience: elAudience ? elAudience.value : undefined,
+          version: elVersion ? elVersion.value : undefined,
+        },
+        tags: elTags ? csvToArr(elTags.value) : undefined,
+        expected: {
+          must_cite_pages: elMustCite ? csvToArr(elMustCite.value) : undefined,
+          must_contain: elMustContain ? csvToArr(elMustContain.value) : undefined,
+          forbid_contain: elForbid ? csvToArr(elForbid.value) : undefined,
+        },
+        note: elNote ? elNote.value : undefined,
+      };
+      btnSave.disabled = true;
+      if (elStatus) { elStatus.textContent = 'saving...'; elStatus.className = 'status muted'; }
+      try {
+        const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/golden/candidate/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: currentId, patch }),
+        });
+        const body = await res.json();
+        if (!res.ok || body.ok === false) {
+          if (elStatus) { elStatus.textContent = (body && body.error) || res.statusText; elStatus.className = 'status err'; }
+          btnSave.disabled = false;
+          return;
+        }
+        if (elStatus) { elStatus.textContent = 'saved · reloading'; elStatus.className = 'status ok'; }
+        setTimeout(() => location.reload(), 300);
+      } catch (e) {
+        if (elStatus) { elStatus.textContent = 'network error: ' + (e && e.message ? e.message : e); elStatus.className = 'status err'; }
+        btnSave.disabled = false;
       }
     });
   }
