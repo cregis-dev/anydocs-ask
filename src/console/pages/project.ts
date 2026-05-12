@@ -647,7 +647,7 @@ function bindOp(id, path) {
         if (!logEl) return;
         const span = document.createElement('span');
         if (cls) span.className = cls;
-        span.textContent = line + '\n';
+        span.textContent = line + '\\n';
         logEl.appendChild(span);
         // Stay pinned at bottom unless the user has manually scrolled up.
         const atBottom = logEl.scrollHeight - logEl.clientHeight - logEl.scrollTop < 30;
@@ -670,7 +670,7 @@ function bindOp(id, path) {
             if (done) break;
             buf += decoder.decode(value, { stream: true });
             let nl;
-            while ((nl = buf.indexOf('\n')) !== -1) {
+            while ((nl = buf.indexOf('\\n')) !== -1) {
               const line = buf.slice(0, nl);
               buf = buf.slice(nl + 1);
               if (!line) continue;
