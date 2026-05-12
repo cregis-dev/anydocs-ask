@@ -42,17 +42,57 @@ export type GoldenGenerateOptions = {
    * without explicit opt-in. ARCH §17.8.
    */
   includeConsole?: boolean;
+  /**
+   * When llmRewrite is true and the LLM step fails (missing creds, network,
+   * malformed response), downgrade to template-only candidates instead of
+   * exiting non-zero. CLI keeps the strict "report don't fudge" behavior
+   * (PRD §12.9 verdict #7); Console flips this on so the one-click button
+   * stays usable when keys are absent.
+   */
+  fallbackOnLlmError?: boolean;
+  /**
+   * Progress reporter for long-running phases (load_project, template_gen,
+   * llm_rewrite per batch, final write). Lines are newline-terminated. The
+   * CLI uses the default (write to process.stdout); the Console streams the
+   * same lines as NDJSON via /golden/generate/stream so the UI shows real
+   * batch-level progress instead of a frozen spinner.
+   *
+   * Actionable errors (file already exists, no runs in window, 0 candidates)
+   * also go through this channel so the streaming UI surfaces a helpful
+   * message instead of "exited with code 1". They additionally write to
+   * stderr so CLI users still get them through `2>` redirection.
+   */
+  reporter?: (line: string) => void;
 };
 
 const FROM_RUNS_DEFAULT_SINCE = '14d';
+
+/**
+ * Emit an actionable error: through `report` so the streaming console UI
+ * sees it as a log line, AND to stderr so CLI users still get it on the
+ * usual error channel for `2>` redirection / exit-code-paired logging.
+ */
+function emitError(report: (s: string) => void, msg: string): void {
+  report(msg);
+  process.stderr.write(msg);
+}
 
 export async function runGoldenGenerate(opts: GoldenGenerateOptions): Promise<number> {
   const projectRoot = resolve(opts.projectRoot);
   const stateRoot = resolve(opts.stateRoot);
   const paths = goldenPaths(stateRoot);
+  // CLI keeps the historical `anydocs-ask: ` / `anydocs-ask golden generate: `
+  // prefixes on its launch + summary lines so existing scripts that grep them
+  // keep working. Streaming context (reporter set) drops the prefix because
+  // the UI log box already labels the operation.
+  const report = opts.reporter ?? ((s: string) => void process.stdout.write(s));
+  const cliPrefix = opts.reporter === undefined ? 'anydocs-ask: ' : '';
+  const cliSummaryPrefix =
+    opts.reporter === undefined ? 'anydocs-ask golden generate: ' : '';
 
   if (existsSync(paths.candidates) && !opts.force) {
-    process.stderr.write(
+    emitError(
+      report,
       `error: ${paths.candidates} already exists.\n` +
         `       Run 'anydocs-ask golden review ${opts.projectRoot}' to flush ` +
         `decided candidates first, or pass --force to overwrite.\n`,
@@ -61,7 +101,8 @@ export async function runGoldenGenerate(opts: GoldenGenerateOptions): Promise<nu
   }
 
   if (opts.from === 'inbox') {
-    process.stderr.write(
+    emitError(
+      report,
       `error: --from inbox is v1.5 (depends on §15 feedback inbox); ` +
         `use --from structure or --from runs in v1.\n`,
     );
@@ -72,16 +113,27 @@ export async function runGoldenGenerate(opts: GoldenGenerateOptions): Promise<nu
     return await runFromRuns(projectRoot, stateRoot, opts);
   }
 
+  report(`loading project ${projectRoot}...\n`);
   const project = await loadProject(projectRoot);
-  for (const w of project.warnings) process.stderr.write(`[ask] ${w}\n`);
+  // Project-load warnings (duplicate page id, broken nav ref, etc.) — useful
+  // signal whether you're in CLI or streaming UI, route through both channels.
+  for (const w of project.warnings) emitError(report, `[ask] ${w}\n`);
+  const pageCount = Array.from(project.pagesByLangAndId.values()).reduce(
+    (acc, m) => acc + m.size,
+    0,
+  );
+  report(`  ${pageCount} pages, ${project.navigationsByLang.size} navigation(s)\n`);
 
+  report(`generating template candidates...\n`);
   let candidates = generateFromStructure(project, { limit: opts.limit });
   if (candidates.length === 0) {
-    process.stderr.write(
+    emitError(
+      report,
       `error: navigation produced 0 candidate questions; check that ${projectRoot}/navigation/*.json reference published pages.\n`,
     );
     return 1;
   }
+  report(`  ${candidates.length} template candidates emitted\n`);
 
   if (opts.llmRewrite) {
     const { config } = await loadConfig(projectRoot);
@@ -89,32 +141,46 @@ export async function runGoldenGenerate(opts: GoldenGenerateOptions): Promise<nu
     try {
       llm = buildDefaultLLM(config);
     } catch (err) {
-      process.stderr.write(
-        `error: LLM rewrite requires Anthropic credentials.\n` +
-          `       ${(err as Error).message}\n` +
-          `       Pass --no-llm-rewrite to fall back to template-only candidates ` +
-          `(lower quality but no API call).\n`,
-      );
-      return 1;
+      if (opts.fallbackOnLlmError) {
+        report(
+          `LLM rewrite unavailable (${(err as Error).message}); falling back to template-only candidates.\n`,
+        );
+      } else {
+        process.stderr.write(
+          `error: LLM rewrite requires Anthropic credentials.\n` +
+            `       ${(err as Error).message}\n` +
+            `       Pass --no-llm-rewrite to fall back to template-only candidates ` +
+            `(lower quality but no API call).\n`,
+        );
+        return 1;
+      }
     }
-    process.stdout.write(
-      `anydocs-ask: rewriting ${candidates.length} candidates via ${config.llm.provider}/${config.llm.model}...\n`,
-    );
-    try {
-      candidates = await rewriteCandidatesWithLLM(candidates, { llm });
-    } catch (err) {
-      process.stderr.write(
-        `error: LLM rewrite failed: ${(err as Error).message}\n` +
-          `       Pass --no-llm-rewrite to skip this step.\n`,
+    if (llm) {
+      report(
+        `${cliPrefix}rewriting ${candidates.length} candidates via ${config.llm.provider}/${config.llm.model}...\n`,
       );
-      return 1;
+      try {
+        candidates = await rewriteCandidatesWithLLM(candidates, { llm, reporter: report });
+      } catch (err) {
+        if (opts.fallbackOnLlmError) {
+          report(
+            `LLM rewrite failed (${(err as Error).message}); keeping template-only candidates.\n`,
+          );
+        } else {
+          process.stderr.write(
+            `error: LLM rewrite failed: ${(err as Error).message}\n` +
+              `       Pass --no-llm-rewrite to skip this step.\n`,
+          );
+          return 1;
+        }
+      }
     }
   }
 
   const written = writeCandidates(stateRoot, candidates);
-  process.stdout.write(
-    `anydocs-ask golden generate: wrote ${candidates.length} candidates to ${written}\n` +
-      `  next: edit decision: "approved" / "rejected" inline, then run 'anydocs-ask golden review ${opts.projectRoot}'.\n`,
+  report(
+    `${cliSummaryPrefix}wrote ${candidates.length} candidates to ${written}\n` +
+      `next: edit decision "approved" / "rejected" inline, then run 'anydocs-ask golden review ${opts.projectRoot}'.\n`,
   );
   return 0;
 }
@@ -124,10 +190,14 @@ async function runFromRuns(
   stateRoot: string,
   opts: GoldenGenerateOptions,
 ): Promise<number> {
+  const report = opts.reporter ?? ((s: string) => void process.stdout.write(s));
+  const cliSummaryPrefix =
+    opts.reporter === undefined ? 'anydocs-ask golden generate: ' : '';
   const sinceArg = opts.since ?? FROM_RUNS_DEFAULT_SINCE;
   const sinceMs = parseSince(sinceArg);
   if (sinceMs === null) {
-    process.stderr.write(
+    emitError(
+      report,
       `invalid --since '${sinceArg}'; expected ISO date or duration (7d / 48h / 30m).\n`,
     );
     return 2;
@@ -137,6 +207,7 @@ async function runFromRuns(
   // Console-origin runs are excluded by default — promoting author dogfood
   // queries into the regression set without opt-in would let test prompts
   // leak into golden (ARCH §17.8).
+  report(`scanning runs since ${sinceArg}...\n`);
   const records: RunRecord[] = [];
   let consoleSkipped = 0;
   for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
@@ -149,7 +220,8 @@ async function runFromRuns(
     records.push(r);
   }
   if (records.length === 0) {
-    process.stderr.write(
+    emitError(
+      report,
       `error: no runs since ${sinceArg}. serve the project, answer ≥1 query, ` +
         (consoleSkipped > 0
           ? `\n       (skipped ${consoleSkipped} console runs; pass --include-console to include them)`
@@ -160,8 +232,8 @@ async function runFromRuns(
   }
 
   const { rows: existingCases } = readApproved(stateRoot);
-  process.stdout.write(
-    `anydocs-ask golden generate --from runs: ${records.length} runs since ${sinceArg}` +
+  report(
+    `${records.length} runs since ${sinceArg}` +
       (consoleSkipped > 0 ? ` (excluded ${consoleSkipped} console-origin)` : '') +
       `, ${existingCases.length} approved cases for dedup\n`,
   );
@@ -171,7 +243,7 @@ async function runFromRuns(
     existingCases,
   });
 
-  process.stdout.write(
+  report(
     `  filter: total=${stats.total} ` +
       `non-answer=${stats.droppedNonAnswer} ` +
       `low-conf=${stats.droppedLowConf} ` +
@@ -181,7 +253,10 @@ async function runFromRuns(
   );
 
   if (candidates.length === 0) {
-    process.stderr.write(
+    // return 0 (success: nothing to do), but still surface the explanation so
+    // a streaming UI doesn't show ✓ done with an empty log.
+    emitError(
+      report,
       `(no candidates produced; loosen --since or check that runs have confidence ≥0.7 ` +
         `and answer.md ≤600 chars.)\n`,
     );
@@ -189,9 +264,9 @@ async function runFromRuns(
   }
 
   const written = writeCandidates(stateRoot, candidates);
-  process.stdout.write(
-    `anydocs-ask golden generate: wrote ${candidates.length} candidates to ${written}\n` +
-      `  next: edit decision: "approved"/"rejected" inline (verify must_cite_pages — ` +
+  report(
+    `${cliSummaryPrefix}wrote ${candidates.length} candidates to ${written}\n` +
+      `next: edit decision "approved"/"rejected" inline (verify must_cite_pages — ` +
       `they reflect what the system did, not necessarily what was correct), then ` +
       `'anydocs-ask golden review ${opts.projectRoot}'.\n`,
   );

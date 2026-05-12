@@ -1556,7 +1556,7 @@ ProcessRegistry {
 6. history 表：列所有 eval 报告 + 每行 pin 按钮 + sparkline（`▁▂▄▅▆▇` unicode block，趋势 ≥3 报告时显示）
 7. **Golden Workshop**（2026-05-12 加入；PRD §13.6 #4 锁解除）：
    - candidate jsonl 状态 (pending/approved/rejected/malformed) 计数行
-   - "+ from structure" / "+ from runs" 按钮触发 `goldenGenerate()`
+   - "+ from structure" / "+ from runs" 按钮触发 `goldenGenerate()`，**默认开启 LLM 改写**；无 Anthropic 凭据或调用失败时自动降级为模板原句（`fallbackOnLlmError`），与 CLI 的 "report don't fudge" 严格语义有意区分——console 是一键工具，作者更需要"按下就出候选"
    - pending 候选列表（前 50 条）：每行 template_id badge + query + lang/must_cite_pages 元数据 + approve/reject 按钮
    - flush 按钮：等价 `golden review`，approved 移入 cases.jsonl，reviewer="console"
 

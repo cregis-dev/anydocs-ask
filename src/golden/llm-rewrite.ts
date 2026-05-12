@@ -26,6 +26,13 @@ export type RewriteOptions = {
   /** Hard cap on rewrite batch size to avoid token blow-ups on very large
    *  projects. Caller chunks above this. Default 200. */
   batchSize?: number;
+  /**
+   * Progress reporter. Called with already-newline-terminated lines so the
+   * caller (CLI: stdout; Console: NDJSON stream) doesn't have to reformat.
+   * Default writes to process.stdout. Errors still go to stderr at the
+   * `runGoldenGenerate` layer — the reporter is for progress only.
+   */
+  reporter?: (line: string) => void;
 };
 
 export async function rewriteCandidatesWithLLM(
@@ -38,13 +45,14 @@ export async function rewriteCandidatesWithLLM(
   // per ~100-page project) but turned out fragile against gateways that cap
   // output tokens around 8K-16K.
   const batchSize = opts.batchSize ?? 50;
+  const report = opts.reporter ?? ((s: string) => void process.stdout.write(s));
 
   const out: GoldenCaseCandidate[] = [];
   const total = Math.ceil(candidates.length / batchSize);
   for (let i = 0; i < candidates.length; i += batchSize) {
     const batch = candidates.slice(i, i + batchSize);
     const idx = Math.floor(i / batchSize) + 1;
-    process.stdout.write(`  rewrite batch ${idx}/${total} (${batch.length} items)...`);
+    report(`  rewrite batch ${idx}/${total} (${batch.length} items)...\n`);
     const t0 = Date.now();
     let lastErr: unknown;
     let rewritten: GoldenCaseCandidate[] | null = null;
@@ -59,16 +67,18 @@ export async function rewriteCandidatesWithLLM(
         lastErr = err;
         if (attempt < 3) {
           const backoffMs = 2000 * 2 ** (attempt - 1);
-          process.stdout.write(` retry ${attempt}/2 after ${backoffMs}ms (${(err as Error).message})...`);
+          report(
+            `    retry ${attempt}/2 after ${backoffMs}ms (${(err as Error).message})\n`,
+          );
           await new Promise((r) => setTimeout(r, backoffMs));
         }
       }
     }
     if (rewritten === null) {
-      process.stdout.write(` FAIL in ${Date.now() - t0}ms\n`);
+      report(`    FAIL in ${Date.now() - t0}ms\n`);
       throw lastErr;
     }
-    process.stdout.write(` ok in ${Date.now() - t0}ms\n`);
+    report(`    ok in ${Date.now() - t0}ms\n`);
     out.push(...rewritten);
   }
   return out;
