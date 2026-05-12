@@ -33,3 +33,6 @@ coverage/
 
 # Transformers.js / model cache (when @xenova/transformers drops into project)
 .cache/
+
+# Local test scratch (screenshots, scratch scripts, etc.)
+tests/.tmp/
