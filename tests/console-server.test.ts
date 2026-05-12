@@ -735,6 +735,12 @@ function makeStubOps(overrides: Partial<ConsoleOps> = {}): {
         calls.goldenGenerate += 1;
         return ok;
       }),
+    goldenGenerateStream: overrides.goldenGenerateStream ??
+      (async (_opts, onEvent) => {
+        calls.goldenGenerate += 1;
+        onEvent({ type: 'log', line: 'stub log' });
+        onEvent({ type: 'result', ok: true, message: 'stub' });
+      }),
   };
   return { ops, calls };
 }
@@ -1131,16 +1137,24 @@ test('POST /api/projects/:name/analyze: forwards ?since to ops.analyzeRuns', asy
   }
 });
 
-test('POST /api/projects/:name/golden/generate: from=structure default, llmRewrite=false', async () => {
+test('POST /api/projects/:name/golden/generate: from=structure default, llmRewrite=true with auto-fallback', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
-    let sawOpts: { from: string; llmRewrite: boolean; limit?: number } | null = null;
+    let sawOpts: {
+      from: string;
+      llmRewrite: boolean;
+      fallbackOnLlmError?: boolean;
+      limit?: number;
+    } | null = null;
     const { ops } = makeStubOps({
       goldenGenerate: async (opts) => {
         sawOpts = {
           from: opts.from,
           llmRewrite: opts.llmRewrite,
+          ...(opts.fallbackOnLlmError !== undefined
+            ? { fallbackOnLlmError: opts.fallbackOnLlmError }
+            : {}),
           ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
         };
         return { ok: true, message: 'wrote candidates' };
@@ -1154,7 +1168,8 @@ test('POST /api/projects/:name/golden/generate: from=structure default, llmRewri
     });
     await app.request('/api/projects/docs-zh/golden/generate', { method: 'POST' });
     assert.equal(sawOpts!.from, 'structure');
-    assert.equal(sawOpts!.llmRewrite, false);
+    assert.equal(sawOpts!.llmRewrite, true);
+    assert.equal(sawOpts!.fallbackOnLlmError, true);
     assert.equal(sawOpts!.limit, undefined);
 
     await app.request('/api/projects/docs-zh/golden/generate?from=runs&limit=20', {
@@ -1162,6 +1177,136 @@ test('POST /api/projects/:name/golden/generate: from=structure default, llmRewri
     });
     assert.equal(sawOpts!.from, 'runs');
     assert.equal(sawOpts!.limit, 20);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/golden/generate/stream: multi-line reporter writes split into separate log events', async () => {
+  // The reporter contract is "newline-terminated", but runGoldenGenerate
+  // does emit multi-line blocks (e.g. the final wrote/next summary). The
+  // streaming wrapper must split those into one log event per line, otherwise
+  // the UI log box gets one giant blob.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const { ops } = makeStubOps({
+      goldenGenerateStream: async (_opts, onEvent) => {
+        // Mirror what defaultOps.goldenGenerateStream does: callers may write
+        // a single chunk containing multiple newlines, and each line should
+        // become its own event.
+        const chunk = 'line one\nline two\nline three\n';
+        let pending = '';
+        pending += chunk;
+        let nl: number;
+        while ((nl = pending.indexOf('\n')) !== -1) {
+          onEvent({ type: 'log', line: pending.slice(0, nl) });
+          pending = pending.slice(nl + 1);
+        }
+        onEvent({ type: 'result', ok: true });
+      },
+    });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      ops,
+    });
+    const res = await app.request('/api/projects/docs-zh/golden/generate/stream', {
+      method: 'POST',
+    });
+    const events = (await res.text())
+      .split('\n')
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l) as { type: string; line?: string });
+    const logLines = events.filter((e) => e.type === 'log').map((e) => e.line);
+    assert.deepEqual(logLines, ['line one', 'line two', 'line three']);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/golden/generate/stream: error from runner surfaces as log event before result', async () => {
+  // Regression: when runGoldenGenerate fails on an actionable check (file
+  // already exists, no runs, etc.), the streaming UI must see the helpful
+  // message — not just "exited with code 1". The runner emits the message
+  // through reporter (= log event), then returns non-zero (= result.ok=false).
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const { ops } = makeStubOps({
+      goldenGenerateStream: async (_opts, onEvent) => {
+        onEvent({
+          type: 'log',
+          line: 'error: cases.candidate.jsonl already exists. Run golden review first.',
+        });
+        onEvent({ type: 'result', ok: false, error: 'golden generate exited with code 1' });
+      },
+    });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      ops,
+    });
+    const res = await app.request('/api/projects/docs-zh/golden/generate/stream', {
+      method: 'POST',
+    });
+    const events = (await res.text())
+      .split('\n')
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l) as { type: string; line?: string; ok?: boolean });
+    assert.equal(events.length, 2);
+    assert.equal(events[0]!.type, 'log');
+    assert.match(events[0]!.line!, /already exists/);
+    assert.equal(events[1]!.type, 'result');
+    assert.equal(events[1]!.ok, false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/golden/generate/stream: NDJSON log + result events', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    let sawOpts: { from: string; llmRewrite: boolean; fallbackOnLlmError?: boolean } | null = null;
+    const { ops } = makeStubOps({
+      goldenGenerateStream: async (opts, onEvent) => {
+        sawOpts = {
+          from: opts.from,
+          llmRewrite: opts.llmRewrite,
+          ...(opts.fallbackOnLlmError !== undefined
+            ? { fallbackOnLlmError: opts.fallbackOnLlmError }
+            : {}),
+        };
+        onEvent({ type: 'log', line: 'loading project...' });
+        onEvent({ type: 'log', line: '  rewrite batch 1/2 (50 items)...' });
+        onEvent({ type: 'log', line: '    ok in 1234ms' });
+        onEvent({ type: 'result', ok: true, message: 'wrote /tmp/cases.candidate.jsonl' });
+      },
+    });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      ops,
+    });
+    const res = await app.request('/api/projects/docs-zh/golden/generate/stream', {
+      method: 'POST',
+    });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') ?? '', /application\/x-ndjson/);
+    const body = await res.text();
+    const lines = body.split('\n').filter((l) => l.length > 0);
+    const events = lines.map((l) => JSON.parse(l) as { type: string });
+    assert.equal(events.length, 4);
+    assert.equal(events[0]!.type, 'log');
+    assert.equal(events[3]!.type, 'result');
+    assert.equal((events[3] as { ok: boolean }).ok, true);
+    assert.equal(sawOpts!.from, 'structure');
+    assert.equal(sawOpts!.llmRewrite, true);
+    assert.equal(sawOpts!.fallbackOnLlmError, true);
   } finally {
     await cleanup();
   }

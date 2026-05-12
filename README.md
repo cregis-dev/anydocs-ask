@@ -78,7 +78,9 @@ curl http://127.0.0.1:4100/         # 应返回工作区首页 HTML
 
 - **Eval** — 对 golden 集执行完整评测，生成带日期的报告；可钉固一份历史报告作为对比基线。
 - **Analyze** — 汇总最近 N 天的查询流量，输出 D1–D5 五个维度的分析。
-- **Golden Workshop** — 逐条审核候选条目，批准或拒绝后一键刷入 golden 集（等价于 `golden review` + `golden flush`）。
+- **Golden Workshop** — 逐条审核候选条目，批准或拒绝后一键刷入 golden 集（等价于 `golden review` + `golden flush`）。生成候选默认走 LLM 改写以提升查询质量，无凭据/调用失败时自动降级为模板原句；UI 实时流式展示每个 batch 的进度。
+
+> **生成候选耗时提示：** Console 默认开启 LLM 改写。小项目（≤ 50 页）通常 30–90 秒完成（含网关偶发的 1–2 次重试），大项目按 50 条/批处理，整体随项目规模线性增长。需更快产出可在 CLI 用 `--no-llm-rewrite` 跳过 LLM 步骤。
 
 ### 配置
 

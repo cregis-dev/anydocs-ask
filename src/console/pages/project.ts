@@ -608,36 +608,108 @@ function bindOp(id, path) {
     }
   });
 })();
-// Golden Workshop generators (Eval tab buttons mirror sidebar ones but with
-// dedicated status line; both go through the same /golden/generate endpoint).
+// Golden Workshop generators — stream NDJSON from /golden/generate/stream
+// so the log box ticks with real progress (project load → template gen →
+// per-batch LLM rewrite → write). LLM rewrite can be 30-60s on a large
+// project, so a static spinner is misleading; line-by-line logs let the
+// author see exactly which batch they're on.
 (function bindGwGenerators() {
-  function bind(id, path) {
+  const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  function bind(id, source) {
     const btn = $(id);
     const status = $('gw-gen-status');
+    const logEl = $('gw-gen-log');
     if (!btn) return;
     btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      if (status) { status.textContent = id.replace('btn-gen-', '') + '...'; status.className = 'status muted'; }
+      // Reset UI: clear log, disable both gen buttons (avoid parallel runs).
+      const structureBtn = $('btn-gen-structure');
+      const runsBtn = $('btn-gen-runs');
+      if (structureBtn) structureBtn.disabled = true;
+      if (runsBtn) runsBtn.disabled = true;
+      if (logEl) {
+        logEl.hidden = false;
+        logEl.textContent = '';
+        logEl.scrollTop = 0;
+      }
       const t0 = Date.now();
+      let spinnerIdx = 0;
+      const tick = () => {
+        const dt = ((Date.now() - t0) / 1000).toFixed(1);
+        if (status) {
+          status.textContent = SPINNER[spinnerIdx % SPINNER.length] + ' ' + source + ' running... ' + dt + 's';
+          status.className = 'status muted';
+        }
+        spinnerIdx++;
+      };
+      tick();
+      const spinnerTimer = setInterval(tick, 120);
+      const appendLine = (line, cls) => {
+        if (!logEl) return;
+        const span = document.createElement('span');
+        if (cls) span.className = cls;
+        span.textContent = line + '\n';
+        logEl.appendChild(span);
+        // Stay pinned at bottom unless the user has manually scrolled up.
+        const atBottom = logEl.scrollHeight - logEl.clientHeight - logEl.scrollTop < 30;
+        if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+      };
+      let lastResult = null;
       try {
-        const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + path, { method: 'POST' });
-        const body = await res.json();
-        const dt = Date.now() - t0;
-        if (!res.ok || body.ok === false) {
-          if (status) { status.textContent = 'failed (' + dt + 'ms): ' + (body.error || res.statusText); status.className = 'status err'; }
+        const url = '/api/projects/' + encodeURIComponent(cfg.name) + '/golden/generate/stream?from=' + source;
+        const res = await fetch(url, { method: 'POST' });
+        if (!res.ok || !res.body) {
+          const text = await res.text().catch(() => '');
+          appendLine('HTTP ' + res.status + ': ' + (text || res.statusText), 'err');
+          lastResult = { ok: false, error: 'HTTP ' + res.status };
         } else {
-          if (status) { status.textContent = 'done (' + dt + 'ms): ' + (body.message || 'ok'); status.className = 'status ok'; }
-          setTimeout(() => location.reload(), 600);
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            let nl;
+            while ((nl = buf.indexOf('\n')) !== -1) {
+              const line = buf.slice(0, nl);
+              buf = buf.slice(nl + 1);
+              if (!line) continue;
+              let ev;
+              try { ev = JSON.parse(line); } catch { appendLine(line, 'dim'); continue; }
+              if (ev.type === 'log') {
+                appendLine(ev.line, /(^|\s)ok in /.test(ev.line) ? 'ok' : (/FAIL|fail|error/i.test(ev.line) ? 'err' : null));
+              } else if (ev.type === 'result') {
+                lastResult = ev;
+              }
+            }
+          }
+          if (buf.trim()) {
+            try { const ev = JSON.parse(buf); if (ev.type === 'result') lastResult = ev; } catch { appendLine(buf, 'dim'); }
+          }
         }
       } catch (e) {
-        if (status) { status.textContent = 'network error: ' + (e && e.message ? e.message : e); status.className = 'status err'; }
+        appendLine('network error: ' + (e && e.message ? e.message : e), 'err');
+        lastResult = { ok: false, error: (e && e.message) || String(e) };
       } finally {
-        btn.disabled = false;
+        clearInterval(spinnerTimer);
+      }
+      const dt = ((Date.now() - t0) / 1000).toFixed(1);
+      if (lastResult && lastResult.ok) {
+        appendLine('✓ done in ' + dt + 's', 'ok');
+        if (status) { status.textContent = 'done in ' + dt + 's'; status.className = 'status ok'; }
+        // Brief pause so the user sees the final state before reload swaps the DOM.
+        setTimeout(() => location.reload(), 800);
+      } else {
+        const err = (lastResult && lastResult.error) || 'unknown error';
+        appendLine('✗ failed (' + dt + 's): ' + err, 'err');
+        if (status) { status.textContent = 'failed (' + dt + 's)'; status.className = 'status err'; }
+        if (structureBtn) structureBtn.disabled = false;
+        if (runsBtn) runsBtn.disabled = false;
       }
     });
   }
-  bind('btn-gen-structure', '/golden/generate?from=structure');
-  bind('btn-gen-runs', '/golden/generate?from=runs');
+  bind('btn-gen-structure', 'structure');
+  bind('btn-gen-runs', 'runs');
 })();
 
 // Golden Workshop approve / reject on candidate rows (PRD §13.6 第 4 行

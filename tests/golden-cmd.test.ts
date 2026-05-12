@@ -158,6 +158,96 @@ test('golden generate refuses to clobber without --force', async () => {
   }
 });
 
+test('golden generate refuses to clobber: error reaches reporter for streaming UI', async () => {
+  // Regression: previously the "candidates already exist" error went only to
+  // stderr, so the streaming console UI showed an empty log + a generic
+  // "exited with code 1" message. The reporter must see the actionable hint.
+  const { root, cleanup } = await buildProject();
+  try {
+    // Lay down candidate file via a normal first run.
+    const first = captureIo(() =>
+      runGoldenGenerate({
+        projectRoot: root,
+        stateRoot: root,
+        from: 'structure',
+        llmRewrite: false,
+        force: false,
+      }),
+    );
+    await first.promise;
+    first.reset();
+
+    const lines: string[] = [];
+    const { promise, reset } = captureIo(() =>
+      runGoldenGenerate({
+        projectRoot: root,
+        stateRoot: root,
+        from: 'structure',
+        llmRewrite: false,
+        force: false,
+        reporter: (s) => lines.push(s),
+      }),
+    );
+    const code = await promise;
+    const { err } = reset();
+    assert.equal(code, 1);
+    // Both channels must see it: streaming UI (reporter) and CLI users (stderr).
+    assert.match(lines.join(''), /already exists/);
+    assert.match(err, /already exists/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('golden generate CLI mode keeps `anydocs-ask: ` prefix on summary line', async () => {
+  // Backwards compat: scripts that grep `anydocs-ask golden generate:` in
+  // stdout should keep working. Streaming context drops the prefix.
+  const { root, cleanup } = await buildProject();
+  try {
+    const { promise, reset } = captureIo(() =>
+      runGoldenGenerate({
+        projectRoot: root,
+        stateRoot: root,
+        from: 'structure',
+        llmRewrite: false,
+        force: false,
+      }),
+    );
+    const code = await promise;
+    const { out } = reset();
+    assert.equal(code, 0);
+    assert.match(out, /anydocs-ask golden generate: wrote /);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('golden generate streaming context drops the `anydocs-ask: ` prefix', async () => {
+  const { root, cleanup } = await buildProject();
+  try {
+    const lines: string[] = [];
+    const { promise, reset } = captureIo(() =>
+      runGoldenGenerate({
+        projectRoot: root,
+        stateRoot: root,
+        from: 'structure',
+        llmRewrite: false,
+        force: false,
+        reporter: (s) => lines.push(s),
+      }),
+    );
+    const code = await promise;
+    reset();
+    assert.equal(code, 0);
+    const text = lines.join('');
+    // Summary line is present without the CLI prefix.
+    assert.match(text, /^wrote /m);
+    assert.doesNotMatch(text, /anydocs-ask golden generate:/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('golden generate --force overwrites existing candidate file', async () => {
   const { root, cleanup } = await buildProject();
   try {

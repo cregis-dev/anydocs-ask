@@ -73,6 +73,10 @@ export function renderEvalTab(vm: EvalTabViewModel): Html {
       .gw-candidate .actions .approve { background: var(--ok); border-color: var(--ok); color: white; }
       .gw-candidate .actions .reject { background: var(--err-bg); border-color: var(--err); color: var(--err); }
       .gw-card .empty-q { color: var(--fg-mute); font-size: 12.5px; padding: 18px 0; text-align: center; }
+      .gw-gen-log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; line-height: 1.55; max-height: 220px; overflow-y: auto; background: var(--bg-elev); border: 1px solid var(--bd-soft); border-radius: 6px; padding: 10px 12px; margin: 0 0 12px; white-space: pre-wrap; word-break: break-word; color: var(--fg-soft); }
+      .gw-gen-log .ok { color: var(--ok); }
+      .gw-gen-log .err { color: var(--err); }
+      .gw-gen-log .dim { color: var(--fg-mute); }
     </style>
   `;
 }
@@ -302,8 +306,9 @@ function pendingPanel(snap: CandidateSnapshot): Html {
           `
         : ''}
     </div>
+    <pre id="gw-gen-log" class="gw-gen-log" hidden></pre>
     ${!hasAny
-      ? html`<p class="empty-q">还没有候选。点上方按钮生成(默认无 LLM 改写;要 <code>--llm-rewrite</code> 请走命令行)。</p>`
+      ? html`<p class="empty-q">还没有候选。点上方按钮生成(默认走 LLM 改写,无 Anthropic 凭据时自动降级为模板原句)。</p>`
       : snap.pending.length === 0
         ? html`<p class="empty-q">全部已审。${hasApproved ? '点 flush 把 approved 移入 cases.jsonl。' : ''}</p>`
         : html`${snap.pending.slice(0, 50).map((c) => candidateRow(c))}
