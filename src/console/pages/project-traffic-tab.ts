@@ -26,11 +26,17 @@ export type TrafficTabViewModel = {
 
 export function renderTrafficTab(vm: TrafficTabViewModel): Html {
   const { window: w } = vm;
+  const noRuns = w.records.length === 0;
+  // Hide analyze section entirely when there's nothing yet to analyze AND no
+  // historical reports — otherwise it's a tease ("▶ run analyze" with nothing
+  // for it to chew on). Once any runs exist OR a prior analyze landed, the
+  // section reappears.
+  const showAnalyze = !noRuns || vm.analyzeHistory.length > 0;
   return html`
     <div class="traffic-tab">
-      ${healthStrip(w)}
-      ${w.records.length === 0 ? emptyState(w.sinceISO) : trafficTable(w)}
-      ${analyzeCard(vm.projectName, vm.analyzeHistory, vm.latestAnalyzeBody)}
+      ${noRuns ? '' : healthStrip(w)}
+      ${noRuns ? emptyState(w.sinceISO) : trafficTable(w)}
+      ${showAnalyze ? analyzeCard(vm.projectName, vm.analyzeHistory, vm.latestAnalyzeBody) : ''}
     </div>
     <script>${raw(`window.__TRAFFIC__ = ${rawJSON(w.records)};`)}</script>
     <script type="module">${raw(TRAFFIC_SCRIPT)}</script>
@@ -107,12 +113,15 @@ function healthStrip(w: TrafficWindow): Html {
 
 function emptyState(sinceISO: string): Html {
   return html`
-    <div class="card">
-      <p class="empty">since ${sinceISO} 暂无 runs.</p>
-      <p class="muted" style="font-size: 12px;">
-        作者本机 dogfood：右上打开 Ask tab 的 <strong>persist</strong> 开关，提问会写
-        <code>source=console</code> 行<br />
-        真实流量：让 Reader / 直 curl 子进程 <code class="mono">/v1/ask</code>
+    <div class="card" style="text-align: center; padding: 32px 24px;">
+      <div style="font-size: 22px; line-height: 1; margin-bottom: 10px; opacity: .5;">📊</div>
+      <h2 style="margin: 0 0 6px; font-size: 15px; text-transform: none; letter-spacing: 0; color: var(--fg);">No traffic yet</h2>
+      <p class="muted" style="font-size: 12.5px; max-width: 480px; margin: 0 auto;">
+        since <code class="mono">${sinceISO}</code> · ask 一些问题就会出现在这里。
+      </p>
+      <p class="muted" style="font-size: 11.5px; max-width: 520px; margin: 12px auto 0; line-height: 1.6;">
+        Dogfood：到 <strong>Ask</strong> tab 打开 <em>persist</em> 开关后提问,会落 <code>source=console</code>。<br />
+        真实流量：让 Reader / 客户端调用 <code class="mono">/v1/ask</code>(子进程 :port)即可。
       </p>
     </div>
   `;
@@ -216,8 +225,8 @@ function analyzeCard(
           `
         : ''}
       <p class="muted" style="font-size: 11px; margin-top: 10px;">
-        诊断三维度：D1 召回失败 / D2 延迟异常 / D3 反问悬崖。<br />
-        默认排除 <code>source=console</code> 流量；勾上 \"include console\" 把作者 dogfood 也纳入。
+        Three axes: D1 recall failures · D2 latency anomalies · D3 clarify cliffs.<br />
+        Excludes <code>source=console</code> by default — tick "include console" to mix in your own dogfood traffic.
       </p>
     </div>
   `;

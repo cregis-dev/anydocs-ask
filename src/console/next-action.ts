@@ -52,8 +52,8 @@ export function computeNextAction(inputs: NextActionInputs): NextAction | null {
     return {
       level: 'err',
       title: 'Project files invalid',
-      detail: '修复 pages/ 和 navigation/ 缺失项后再继续。',
-      cta: { label: 'open Index', targetTab: 'index' },
+      detail: 'Fix the missing pages/ and navigation/ entries, then reload.',
+      cta: { label: 'Open Index', targetTab: 'index' },
     };
   }
 
@@ -61,9 +61,9 @@ export function computeNextAction(inputs: NextActionInputs): NextAction | null {
   if (idx && idx.totalPages === 0) {
     return {
       level: 'warn',
-      title: '还没放 docs',
-      detail: '把 anydocs 格式的 page 文件放到 projects/<name>/pages/<lang>/ 后点 reindex。',
-      cta: { label: 'open Index', targetTab: 'index' },
+      title: 'No docs yet',
+      detail: 'Drop anydocs page files into projects/<name>/pages/<lang>/ and click reindex.',
+      cta: { label: 'Open Index', targetTab: 'index' },
     };
   }
 
@@ -74,9 +74,9 @@ export function computeNextAction(inputs: NextActionInputs): NextAction | null {
     if (missingFile) {
       return {
         level: 'err',
-        title: 'Navigation 引用了缺失的 page 文件',
-        detail: 'Index tab 验证卡列出了具体缺哪些；补齐 page JSON 后 reindex。',
-        cta: { label: 'open Index', targetTab: 'index' },
+        title: 'Navigation points at missing page files',
+        detail: 'See the validation card on Index for the list, add the JSON, then reindex.',
+        cta: { label: 'Open Index', targetTab: 'index' },
       };
     }
     if (idx.dbStatus) {
@@ -90,9 +90,9 @@ export function computeNextAction(inputs: NextActionInputs): NextAction | null {
       if (Math.abs(idx.dbStatus.page_count - expectedInDb) >= 1) {
         return {
           level: 'warn',
-          title: `disk 与 DB 页数不一致 (expected ${expectedInDb}, got ${idx.dbStatus.page_count})`,
-          detail: '点 reindex 同步 SQLite 索引。',
-          cta: { label: 'open Index', targetTab: 'index' },
+          title: `Disk and DB page counts disagree (expected ${expectedInDb}, got ${idx.dbStatus.page_count})`,
+          detail: 'Click reindex to resync the SQLite index.',
+          cta: { label: 'Open Index', targetTab: 'index' },
         };
       }
       // Differences absorbed by unpublished / orphan are not "next actions"
@@ -105,9 +105,9 @@ export function computeNextAction(inputs: NextActionInputs): NextAction | null {
   if (!inputs.childLive && idx && idx.totalPages > 0) {
     return {
       level: 'info',
-      title: '项目尚未启动',
-      detail: '点 start 后即可在 Ask tab dogfood / 在 Eval tab 跑评测。',
-      cta: { label: 'open Ask', targetTab: 'ask' },
+      title: 'Project is not running',
+      detail: 'Start the child runtime to ask questions in Ask, or run eval in Eval.',
+      cta: { label: 'Start project', targetTab: 'ask' },
     };
   }
 
@@ -115,28 +115,28 @@ export function computeNextAction(inputs: NextActionInputs): NextAction | null {
   if (ev && ev.goldenStats.totalCases === 0) {
     return {
       level: 'info',
-      title: '还没 golden 题集',
+      title: 'No golden cases yet',
       detail:
-        '左侧 Golden / Analyze 卡里点 "golden ← structure" 生成候选；编辑器里把 decision 改 approved 后跑 anydocs-ask golden review 入库。',
-      cta: { label: 'open Eval', targetTab: 'eval' },
+        'Go to Eval → Golden cases → Pending review, click "+ from structure" to seed candidates, then approve them.',
+      cta: { label: 'Open Eval', targetTab: 'eval' },
     };
   }
 
   if (ev && ev.goldenStats.totalCases > 0 && ev.history.length === 0) {
     return {
       level: 'info',
-      title: '题集已就位，先跑首次 eval',
-      detail: 'Eval tab 里点 ▶ run 生成 baseline 报告。',
-      cta: { label: 'open Eval', targetTab: 'eval' },
+      title: 'Cases ready — run your first eval',
+      detail: 'Click ▶ run on the Eval tab to produce a baseline report.',
+      cta: { label: 'Run eval', targetTab: 'eval' },
     };
   }
 
   if (ev && ev.history.length >= 2 && !ev.pinned) {
     return {
       level: 'info',
-      title: '建议钉一个 baseline',
-      detail: '钉住一份满意的 eval 报告，避免后续随"上一份"漂。Eval tab history 表点 pin。',
-      cta: { label: 'open Eval', targetTab: 'eval' },
+      title: 'Consider pinning a baseline',
+      detail: 'Pin a known-good eval report so later runs do not drift against "previous". Click pin in the history table.',
+      cta: { label: 'Open Eval', targetTab: 'eval' },
     };
   }
 
@@ -145,18 +145,18 @@ export function computeNextAction(inputs: NextActionInputs): NextAction | null {
   if (tr && tr.totals.countReader >= 50 && tr.totals.errorRate > 0.05) {
     return {
       level: 'err',
-      title: `近 ${tr.days} 天 error 率 ${(tr.totals.errorRate * 100).toFixed(1)}%`,
-      detail: '去 Traffic tab 筛 kind=error 查具体请求。',
-      cta: { label: 'open Traffic', targetTab: 'traffic' },
+      title: `Last ${tr.days}d error rate ${(tr.totals.errorRate * 100).toFixed(1)}%`,
+      detail: 'Filter kind=error on Traffic to see the failing requests.',
+      cta: { label: 'Open Traffic', targetTab: 'traffic' },
     };
   }
 
   if (tr && tr.totals.countReader >= 20 && tr.totals.meanConfidence !== null && tr.totals.meanConfidence < 0.5) {
     return {
       level: 'warn',
-      title: `近 ${tr.days} 天 mean confidence ${tr.totals.meanConfidence.toFixed(2)}`,
-      detail: '召回质量偏低；Traffic tab 看低置信度请求 + analyze runs 跑诊断。',
-      cta: { label: 'open Traffic', targetTab: 'traffic' },
+      title: `Last ${tr.days}d mean confidence ${tr.totals.meanConfidence.toFixed(2)}`,
+      detail: 'Retrieval quality looks low — review low-confidence requests on Traffic and run Analyze.',
+      cta: { label: 'Open Traffic', targetTab: 'traffic' },
     };
   }
 

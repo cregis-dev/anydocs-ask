@@ -153,17 +153,32 @@ function statusCard(
   live: boolean,
   running: RegisteredProcess | null,
 ): Html {
+  // projectId line is only shown when it diverges from the project name;
+  // otherwise it's a noisy duplicate. Full path is collapsed to a single
+  // line with ellipsis (hover-title surfaces the full string) so the
+  // sidebar doesn't run multi-line under typical macOS HOME paths.
+  const showProjectId = project.projectId && project.projectId !== project.name;
   return html`
     <div class="card">
       <h2>status</h2>
       <dl class="kv">
-        <dt>path</dt><dd class="mono">${project.path}</dd>
-        <dt>projectId</dt><dd class="mono">${project.projectId ?? '—'}</dd>
+        <dt>path</dt>
+        <dd class="mono path-cell" title="${project.path}">${shortPath(project.path)}</dd>
+        ${showProjectId
+          ? html`<dt>id</dt><dd class="mono">${project.projectId}</dd>`
+          : ''}
         <dt>indexed</dt><dd>${project.indexed ? html`<span class="tag ok">yes</span>` : html`<span class="tag">no</span>`}</dd>
         <dt>process</dt><dd>${live && running ? html`<span class="tag run">:${running.port}</span> <span class="muted mono">pid ${running.pid}</span>` : html`<span class="tag">stopped</span>`}</dd>
       </dl>
     </div>
+    <style>.path-cell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }</style>
   `;
+}
+
+function shortPath(p: string): string {
+  const home = process.env.HOME;
+  if (home && p.startsWith(home)) return '~' + p.slice(home.length);
+  return p;
 }
 
 function lifecycleCard(live: boolean): Html {
@@ -189,14 +204,9 @@ function opsCard(): Html {
 }
 
 function reportsCard(name: string, reports: ReportListing[]): Html {
-  if (reports.length === 0) {
-    return html`
-      <div class="card">
-        <h2>reports</h2>
-        <p class="empty" style="padding: 8px 0;">尚无报告。</p>
-      </div>
-    `;
-  }
+  // Empty state used to render a noisy "no reports yet" card that ate sidebar
+  // height for no value. Hide entirely until at least one report exists.
+  if (reports.length === 0) return html``;
   const grouped = groupByKind(reports);
   const blocks = (['eval', 'analyze', 'golden'] as const).map((kind) => {
     const list = grouped[kind] ?? [];
@@ -291,10 +301,15 @@ function mainCol(
 }
 
 function askCard(live: boolean): Html {
+  // When the child runtime isn't up, swap the (disabled) textarea + ask button
+  // for a single "Start project" CTA so newcomers don't keep poking a dead form.
+  // Same pattern reused on Index / Eval / Traffic tabs would feel redundant —
+  // those tabs surface their own "child idle" hints inline.
+  if (!live) return askStartGate();
   return html`
     <div class="card">
       <div class="card-head" style="padding: 0 0 10px; border-bottom: 1px solid var(--bd-soft); margin: -2px 0 12px; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
-        <h2 style="margin: 0;">ask 体验台</h2>
+        <h2 style="margin: 0;">Ask</h2>
         <label id="persist-toggle-wrap" style="display:inline-flex; align-items:center; gap:6px; font-size: 12px; cursor: pointer; user-select: none;">
           <input type="checkbox" id="persist-toggle" style="margin: 0; accent-color: var(--err);" />
           <span id="persist-toggle-label" class="muted">dry-run · 不写 runs</span>
@@ -309,10 +324,9 @@ function askCard(live: boolean): Html {
         id="ask-q"
         rows="3"
         placeholder="试一个问题，例如：JWT 怎么续期&#10;Cmd/Ctrl + Enter 提交"
-        ${live ? '' : 'disabled'}
       ></textarea>
       <div class="btn-row" style="margin-top: 8px;">
-        <button id="btn-ask" class="btn-primary" ${live ? '' : 'disabled'}>ask <span class="muted" style="font-size: 11px; font-weight: normal; margin-left: 4px;">⌘↵</span></button>
+        <button id="btn-ask" class="btn-primary">ask <span class="muted" style="font-size: 11px; font-weight: normal; margin-left: 4px;">⌘↵</span></button>
         <span id="ask-status" class="status muted"></span>
       </div>
 
@@ -340,6 +354,29 @@ function askCard(live: boolean): Html {
           </p>
         </div>
       </div>
+    </div>
+  `;
+}
+
+/**
+ * Stopped-state replacement for the Ask card. Single big primary button —
+ * removes the "disabled textarea sitting there doing nothing" UX where new
+ * users repeatedly poke the form trying to figure out why nothing happens.
+ * Wires to the same #btn-start handler the sidebar lifecycle card uses.
+ */
+function askStartGate(): Html {
+  return html`
+    <div class="card" style="text-align: center; padding: 36px 24px;">
+      <div style="font-size: 24px; line-height: 1; margin-bottom: 10px;">▶</div>
+      <h2 style="margin: 0 0 6px; font-size: 16px; text-transform: none; letter-spacing: 0; color: var(--fg);">项目未启动</h2>
+      <p class="muted" style="font-size: 13px; max-width: 420px; margin: 0 auto 18px;">
+        Start project to ask questions, run eval, and record traffic.
+        First boot loads the embedding model and indexes pages — usually 5–30s.
+      </p>
+      <button id="btn-start-ask" class="btn-primary" style="padding: 8px 22px; font-size: 14px;">
+        ▶ Start project
+      </button>
+      <p class="status muted" id="lifecycle-status-ask" style="margin-top: 12px; font-size: 12px; min-height: 16px;"></p>
     </div>
   `;
 }
@@ -458,29 +495,39 @@ function onWarmReady(body) {
   }
 }
 
-function lifecycleClick(action) {
+function lifecycleClick(action, btnId) {
   return async () => {
-    const btn = $('btn-' + action);
-    const status = $('lifecycle-status');
+    const btn = $(btnId || ('btn-' + action));
+    // Two possible status surfaces depending on which start trigger fired —
+    // the sidebar lifecycle card vs the in-tab start gate. Whichever exists.
+    const status = $('lifecycle-status') || $('lifecycle-status-ask');
     if (!btn) return;
     btn.disabled = true;
-    status.textContent = action + '...';
-    status.className = 'status muted';
+    if (status) {
+      status.textContent = action + '...';
+      status.className = 'status muted';
+    }
     try {
       const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/' + action, { method: 'POST' });
       const body = await res.json();
       if (!res.ok || body.ok === false) {
-        status.textContent = body.error || res.statusText;
-        status.className = 'status err';
+        if (status) {
+          status.textContent = body.error || res.statusText;
+          status.className = 'status err';
+        }
         btn.disabled = false;
         return;
       }
-      status.textContent = action + ' ok';
-      status.className = 'status ok';
+      if (status) {
+        status.textContent = action + ' ok';
+        status.className = 'status ok';
+      }
       setTimeout(() => location.reload(), 350);
     } catch (e) {
-      status.textContent = 'network error: ' + (e && e.message ? e.message : e);
-      status.className = 'status err';
+      if (status) {
+        status.textContent = 'network error: ' + (e && e.message ? e.message : e);
+        status.className = 'status err';
+      }
       btn.disabled = false;
     }
   };
@@ -488,6 +535,7 @@ function lifecycleClick(action) {
 
 if ($('btn-start')) $('btn-start').addEventListener('click', lifecycleClick('start'));
 if ($('btn-stop')) $('btn-stop').addEventListener('click', lifecycleClick('stop'));
+if ($('btn-start-ask')) $('btn-start-ask').addEventListener('click', lifecycleClick('start', 'btn-start-ask'));
 
 function bindOp(id, path) {
   const btn = $(id);

@@ -26,11 +26,16 @@
  *
  * Environment variables: each command loads `.env` files in order
  * (<workspace>/.env, then <projectRoot>/.env). Missing files are silently
- * skipped. Existing process.env entries are NOT overridden — shell exports
- * beat <projectRoot>/.env beat <workspace>/.env beat nothing.
+ * skipped. Values defined in a .env file OVERRIDE any pre-existing
+ * process.env entries — the workspace/project .env is the authoritative
+ * source for anydocs-ask. Rationale: shell-rc exports for other tools
+ * (e.g. Claude Code's ANTHROPIC_BASE_URL=https://api.anthropic.com)
+ * silently mismatching the project's intended gateway is a footgun;
+ * users who put a value in .env clearly intend it to take effect.
+ * Precedence: <projectRoot>/.env beats <workspace>/.env beats shell.
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runServe } from './commands/serve.ts';
 import { runReindex } from './commands/reindex.ts';
@@ -53,16 +58,34 @@ import {
 
 function tryLoadEnvFile(path: string): boolean {
   if (!existsSync(path)) return false;
-  // process.loadEnvFile is stable in Node 21.7+. We don't override existing
-  // process.env entries (loadEnvFile's documented behavior), which is exactly
-  // what we want: shell-exported vars beat .env beat nothing.
+  // Custom loader instead of process.loadEnvFile because (a) the latter
+  // treats existing entries — even empty-string placeholders — as set, and
+  // (b) we want .env to OVERRIDE shell exports, not the other way around.
+  // Rationale: a global shell-rc `export ANTHROPIC_BASE_URL=...` for one
+  // tool silently breaks another tool's local gateway config. If you've
+  // gone to the trouble of writing a value into <workspace>/.env, you
+  // clearly want it to take effect inside this command.
+  let raw: string;
   try {
-    process.loadEnvFile(path);
-    return true;
+    raw = readFileSync(path, 'utf8');
   } catch (err) {
     process.stderr.write(`[ask] warning: failed to read ${path}: ${(err as Error).message}\n`);
     return false;
   }
+  for (const line of raw.split(/\r?\n/)) {
+    const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
+    if (!m) continue; // comment / blank / unparseable
+    const key = m[1]!;
+    let val = m[2]!;
+    if (
+      (val.startsWith('"') && val.endsWith('"')) ||
+      (val.startsWith("'") && val.endsWith("'"))
+    ) {
+      val = val.slice(1, -1);
+    }
+    process.env[key] = val;
+  }
+  return true;
 }
 
 type ParsedArgs = {
@@ -152,6 +175,13 @@ async function main(): Promise<number> {
     const ensured = ensureWorkspace(workspace.path);
     if (ensured.rootCreated) {
       process.stdout.write(`anydocs-ask: created workspace at ${workspace.path}\n`);
+    }
+    // Load <workspace>/.env so in-process console ops (eval/analyze/golden)
+    // see ANTHROPIC_API_KEY etc. Spawned `serve` children additionally load
+    // their own <projectRoot>/.env via the cli.ts serve branch below.
+    const wsEnv = join(workspace.path, '.env');
+    if (tryLoadEnvFile(wsEnv)) {
+      process.stdout.write(`anydocs-ask: loaded env from ${wsEnv}\n`);
     }
     const portRaw = typeof flags.port === 'string' ? Number(flags.port) : undefined;
     const idleRaw =

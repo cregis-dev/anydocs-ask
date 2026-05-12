@@ -108,7 +108,7 @@ test('missing page file → err banner', () => {
   });
   const r = computeNextAction(inputs({ indexSnapshot: idx }));
   assert.equal(r?.level, 'err');
-  assert.match(r?.title ?? '', /缺失/);
+  assert.match(r?.title ?? '', /missing page/i);
 });
 
 // ----------------------------------------------------------------------
@@ -192,7 +192,7 @@ test('golden exists but no eval history → run first eval', () => {
     goldenStats: { ...emptyEval.goldenStats, totalCases: 5 },
   };
   const r = computeNextAction(inputs({ indexSnapshot: idx, evalSnapshot: ev }));
-  assert.match(r?.title ?? '', /baseline|首次 eval/);
+  assert.match(r?.title ?? '', /baseline|first eval/i);
 });
 
 test('traffic with high error rate → err banner pointing to traffic tab', () => {
