@@ -72,6 +72,24 @@ export function renderEvalTab(vm: EvalTabViewModel): Html {
       .gw-candidate .actions button { font-size: 11.5px; padding: 3px 10px; }
       .gw-candidate .actions .approve { background: var(--ok); border-color: var(--ok); color: white; }
       .gw-candidate .actions .reject { background: var(--err-bg); border-color: var(--err); color: var(--err); }
+      .gw-candidate .actions .edit { background: var(--bg-elev); }
+      .gw-pager { display: flex; gap: 8px; align-items: center; justify-content: center; margin: 10px 0 4px; font-size: 12px; }
+      .gw-pager button { padding: 3px 10px; font-size: 11.5px; }
+      .gw-pager .info { color: var(--fg-mute); font-family: ui-monospace, monospace; }
+      .gw-gen-limit { width: 60px; padding: 3px 6px; font: inherit; font-size: 12px; border: 1px solid var(--bd); border-radius: 4px; background: var(--bg-elev); color: var(--fg); }
+      .gw-modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: none; z-index: 100; align-items: center; justify-content: center; padding: 20px; }
+      .gw-modal-backdrop.show { display: flex; }
+      .gw-modal { background: var(--bg-elev); border: 1px solid var(--bd); border-radius: 8px; box-shadow: var(--shadow-elev); width: 100%; max-width: 640px; max-height: calc(100vh - 40px); display: flex; flex-direction: column; }
+      .gw-modal h3 { margin: 0; padding: 14px 18px; border-bottom: 1px solid var(--bd-soft); font-size: 14px; }
+      .gw-modal .body { padding: 14px 18px; overflow-y: auto; }
+      .gw-modal .row { display: grid; grid-template-columns: 120px 1fr; gap: 10px; align-items: baseline; padding: 6px 0; }
+      .gw-modal .row label { font-size: 12px; color: var(--fg-soft); }
+      .gw-modal .row input, .gw-modal .row select, .gw-modal .row textarea { width: 100%; padding: 5px 8px; font: inherit; font-size: 12.5px; border: 1px solid var(--bd); border-radius: 4px; background: var(--bg); color: var(--fg); }
+      .gw-modal .row textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; min-height: 32px; resize: vertical; }
+      .gw-modal .row .hint { font-size: 10.5px; color: var(--fg-mute); margin-top: 2px; }
+      .gw-modal .row .ro { color: var(--fg-mute); font-family: ui-monospace, monospace; font-size: 12px; }
+      .gw-modal .foot { padding: 12px 18px; border-top: 1px solid var(--bd-soft); display: flex; gap: 10px; justify-content: flex-end; align-items: center; }
+      .gw-modal .foot .status { flex: 1; font-size: 11.5px; }
       .gw-card .empty-q { color: var(--fg-mute); font-size: 12.5px; padding: 18px 0; text-align: center; }
       .gw-gen-log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; line-height: 1.55; max-height: 220px; overflow-y: auto; background: var(--bg-elev); border: 1px solid var(--bd-soft); border-radius: 6px; padding: 10px 12px; margin: 0 0 12px; white-space: pre-wrap; word-break: break-word; color: var(--fg-soft); }
       .gw-gen-log .ok { color: var(--ok); }
@@ -281,9 +299,12 @@ function approvedPanel(stats: GoldenStats): Html {
   `;
 }
 
+const PENDING_PAGE_SIZE = 20;
+
 function pendingPanel(snap: CandidateSnapshot): Html {
   const hasAny = snap.total > 0;
   const hasApproved = snap.approved > 0;
+  const pendingJson = raw(JSON.stringify(snap.pending));
   return html`
     <div class="gw-summary">
       <span>pending <span class="v">${snap.pending.length}</span></span>
@@ -295,8 +316,12 @@ function pendingPanel(snap: CandidateSnapshot): Html {
       <span style="flex: 1;"></span>
       <span class="muted mono" style="font-size: 11.5px;">cases.candidate.jsonl</span>
     </div>
-    <div class="btn-row" style="margin-bottom: 10px; flex-wrap: wrap;">
+    <div class="btn-row" style="margin-bottom: 10px; flex-wrap: wrap; align-items: center;">
       <button id="btn-gen-structure">+ from structure</button>
+      <label class="muted" style="font-size: 11.5px; display: inline-flex; align-items: center; gap: 4px;">
+        limit
+        <input id="gw-gen-limit" class="gw-gen-limit" type="number" min="1" max="500" value="50" />
+      </label>
       <button id="btn-gen-runs">+ from runs</button>
       <span id="gw-gen-status" class="status muted" style="font-size: 12px;"></span>
       ${hasApproved
@@ -311,14 +336,88 @@ function pendingPanel(snap: CandidateSnapshot): Html {
       ? html`<p class="empty-q">还没有候选。点上方按钮生成(默认走 LLM 改写,无 Anthropic 凭据时自动降级为模板原句)。</p>`
       : snap.pending.length === 0
         ? html`<p class="empty-q">全部已审。${hasApproved ? '点 flush 把 approved 移入 cases.jsonl。' : ''}</p>`
-        : html`${snap.pending.slice(0, 50).map((c) => candidateRow(c))}
-            ${snap.pending.length > 50
-              ? html`<p class="muted" style="font-size: 11.5px;">... 另 ${snap.pending.length - 50} 条未显示(继续审上面 50 条后会自动加载下一批)</p>`
-              : ''}`}
+        : html`
+            <div id="gw-pending-list" data-page-size="${PENDING_PAGE_SIZE}">
+              ${snap.pending.map((c, idx) => candidateRow(c, idx))}
+            </div>
+            ${snap.pending.length > PENDING_PAGE_SIZE
+              ? html`
+                  <div class="gw-pager" id="gw-pager">
+                    <button id="gw-pager-prev" type="button">‹ prev</button>
+                    <span class="info" id="gw-pager-info"></span>
+                    <button id="gw-pager-next" type="button">next ›</button>
+                  </div>
+                `
+              : ''}
+          `}
+    <script>${raw(`window.__GW_PENDING__ = ${pendingJson};`)}</script>
+    ${snap.pending.length > 0 ? editModal() : ''}
     <p class="muted" style="font-size: 11px; margin-top: 10px;">
-      UI approve/reject 等价改 jsonl 行的 <code>decision</code> 字段;flush 等价
+      UI approve/reject/edit 等价改 jsonl 行的对应字段;flush 等价
       <code class="mono">anydocs-ask golden review</code>。
     </p>
+  `;
+}
+
+function editModal(): Html {
+  return html`
+    <div class="gw-modal-backdrop" id="gw-edit-backdrop" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="gw-modal">
+        <h3>Edit candidate <span class="ro" id="gw-edit-id" style="margin-left: 8px;"></span></h3>
+        <div class="body">
+          <div class="row"><label>template_id</label><span class="ro" id="gw-edit-template"></span></div>
+          <div class="row"><label>created_by</label><span class="ro" id="gw-edit-created-by"></span></div>
+          <div class="row">
+            <label>query *</label>
+            <textarea id="gw-edit-query" rows="2"></textarea>
+          </div>
+          <div class="row">
+            <label>lang</label>
+            <select id="gw-edit-lang">
+              <option value="zh">zh</option>
+              <option value="en">en</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>context_pageId</label>
+            <input id="gw-edit-context" type="text" placeholder="(none)" />
+          </div>
+          <div class="row">
+            <label>filters.audience</label>
+            <input id="gw-edit-audience" type="text" placeholder="(none)" />
+          </div>
+          <div class="row">
+            <label>filters.version</label>
+            <input id="gw-edit-version" type="text" placeholder="(none)" />
+          </div>
+          <div class="row">
+            <label>tags</label>
+            <input id="gw-edit-tags" type="text" placeholder="comma-separated" />
+          </div>
+          <div class="row">
+            <label>must_cite_pages</label>
+            <textarea id="gw-edit-mustcite" rows="2" placeholder="comma-separated page slugs"></textarea>
+          </div>
+          <div class="row">
+            <label>must_contain</label>
+            <textarea id="gw-edit-mustcontain" rows="2" placeholder="comma-separated substrings"></textarea>
+          </div>
+          <div class="row">
+            <label>forbid_contain</label>
+            <textarea id="gw-edit-forbid" rows="2" placeholder="comma-separated substrings"></textarea>
+          </div>
+          <div class="row">
+            <label>note</label>
+            <textarea id="gw-edit-note" rows="2"></textarea>
+          </div>
+        </div>
+        <div class="foot">
+          <span class="status" id="gw-edit-status"></span>
+          <button type="button" id="gw-edit-cancel">cancel</button>
+          <button type="button" id="gw-edit-save" class="btn-primary">save</button>
+        </div>
+      </div>
+    </div>
   `;
 }
 
@@ -344,10 +443,10 @@ function bucketBlock(label: string, bucket: Record<string, number>): Html {
   `;
 }
 
-function candidateRow(c: GoldenCaseCandidate): Html {
+function candidateRow(c: GoldenCaseCandidate, idx: number): Html {
   const must = c.expected?.must_cite_pages ?? [];
   return html`
-    <div class="gw-candidate" data-id="${c.id}">
+    <div class="gw-candidate" data-id="${c.id}" data-idx="${idx}">
       <span class="badge mono">${c.template_id ?? c.created_by}</span>
       <div>
         <div class="query">${c.query}</div>
@@ -358,6 +457,7 @@ function candidateRow(c: GoldenCaseCandidate): Html {
         </div>
       </div>
       <div class="actions">
+        <button class="edit" data-edit="1">edit</button>
         <button class="approve" data-decide="approved">approve</button>
         <button class="reject" data-decide="rejected">reject</button>
       </div>

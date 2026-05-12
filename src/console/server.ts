@@ -52,6 +52,8 @@ import {
   decideCandidate,
   flushApproved,
   loadCandidates,
+  updateCandidate,
+  type CandidateUpdate,
 } from './golden-workshop-state.ts';
 
 export type ConsoleAppDeps = {
@@ -638,6 +640,32 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const r = decideCandidate(ctx.stateRoot, body.id, d);
     if (!r.ok) return c.json({ ok: false, error: r.error }, 404);
     return c.json({ ok: true, before: r.before, after: r.after });
+  });
+
+  // Console-only edit: mutate non-provenance fields of one candidate row.
+  // CLI counterpart would be hand-editing cases.candidate.jsonl; this
+  // endpoint validates the patch then atomically rewrites the file.
+  app.post('/api/projects/:name/golden/candidate/update', async (c) => {
+    const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
+    if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
+    let body: { id?: unknown; patch?: unknown } | null = null;
+    try {
+      body = (await c.req.json()) as { id?: unknown; patch?: unknown };
+    } catch {
+      return c.json({ ok: false, error: 'invalid JSON body' }, 400);
+    }
+    if (!body || typeof body.id !== 'string') {
+      return c.json({ ok: false, error: 'body.id (string) required' }, 400);
+    }
+    if (!body.patch || typeof body.patch !== 'object') {
+      return c.json({ ok: false, error: 'body.patch (object) required' }, 400);
+    }
+    const r = updateCandidate(ctx.stateRoot, body.id, body.patch as CandidateUpdate);
+    if (!r.ok) {
+      const code = /not found/.test(r.error) ? 404 : 400;
+      return c.json({ ok: false, error: r.error }, code);
+    }
+    return c.json({ ok: true, updated: r.updated });
   });
 
   app.post('/api/projects/:name/golden/flush', (c) => {
