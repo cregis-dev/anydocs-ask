@@ -271,6 +271,50 @@ test('GET /p/:name: project tabs (Ask/Index/Eval/Traffic) + scoped JS handler so
   }
 });
 
+test('GET /p/:name: bootstrap <script type=module> parses + carries citeSectionLabel helper', async () => {
+  // The project page emits BOOTSTRAP_SCRIPT inside a TS template literal.
+  // PR #16 shipped a syntax error there (a stray real newline from an
+  // unescaped \n) that killed every button. This guards the whole script
+  // parses, and that the F4 same-page-citation disambiguator is wired in.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    const body = await res.text();
+
+    // The page emits more than one <script type="module"> (traffic tab has
+    // its own). Validate every one parses, then pin the F4 helper to the
+    // bootstrap script (the one with window.__CONSOLE__).
+    const blocks = [...body.matchAll(/<script type="module">([\s\S]*?)<\/script>/g)].map(
+      (mm) => mm[1]!,
+    );
+    assert.ok(blocks.length > 0, 'expected at least one <script type="module"> block');
+    for (const script of blocks) {
+      // strip ESM import/export lines — new Function() can't parse module
+      // syntax, but the rest of the body must still be syntactically valid.
+      const stripped = script
+        .split('\n')
+        .filter((l) => !/^\s*(import|export)\s/.test(l))
+        .join('\n');
+      assert.doesNotThrow(
+        () => new Function(stripped),
+        'every module <script> body must be syntactically valid JS',
+      );
+    }
+    const bootstrap = blocks.find((s) => s.includes('window.__CONSOLE__'));
+    assert.ok(bootstrap, 'expected the bootstrap script (window.__CONSOLE__)');
+    assert.match(bootstrap!, /function citeSectionLabel/);
+    assert.match(bootstrap!, /lastIndexOf\('\/p\['\)/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('GET /p/:name: invalid project hides action buttons', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
