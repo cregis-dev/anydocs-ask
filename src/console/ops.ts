@@ -21,10 +21,30 @@ export type OpResult =
   | { ok: true; reportPath?: string; message?: string }
   | { ok: false; error: string };
 
+/**
+ * NDJSON events emitted by the streaming variant of golden generate.
+ * `log` lines mirror the CLI stdout (newline-terminated, may be multi-line
+ * indented). `result` is the final terminator — always exactly one per stream.
+ */
+export type GoldenGenerateEvent =
+  | { type: 'log'; line: string }
+  | { type: 'result'; ok: true; message?: string }
+  | { type: 'result'; ok: false; error: string };
+
 export type ConsoleOps = {
   eval: (opts: EvalOptions) => Promise<OpResult>;
   analyzeRuns: (opts: AnalyzeRunsOptions) => Promise<OpResult>;
   goldenGenerate: (opts: GoldenGenerateOptions) => Promise<OpResult>;
+  /**
+   * Streaming variant of goldenGenerate. Emits log lines as they happen
+   * (project load → templates → per-batch LLM progress → write) and a final
+   * `result` event. Promise resolves after the result event is emitted.
+   * The HTTP layer wraps each event as one NDJSON line.
+   */
+  goldenGenerateStream: (
+    opts: GoldenGenerateOptions,
+    onEvent: (e: GoldenGenerateEvent) => void,
+  ) => Promise<void>;
 };
 
 export const defaultOps: ConsoleOps = {
@@ -63,6 +83,44 @@ export const defaultOps: ConsoleOps = {
         : { ok: true, message: 'golden generate completed (no candidate file found)' };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
+    }
+  },
+  goldenGenerateStream: async (opts, onEvent) => {
+    // Buffer partial lines so a single multi-line write surfaces as multiple
+    // events. The reporter contract is "newline-terminated" but the runner
+    // does write multi-line blocks (e.g. the final "wrote N candidates / next: ..."
+    // summary), so splitting here keeps the UI log box tidy.
+    let pending = '';
+    const reporter = (chunk: string) => {
+      pending += chunk;
+      let nl: number;
+      while ((nl = pending.indexOf('\n')) !== -1) {
+        const line = pending.slice(0, nl);
+        pending = pending.slice(nl + 1);
+        onEvent({ type: 'log', line });
+      }
+    };
+    try {
+      const code = await runGoldenGenerate({ ...opts, reporter });
+      if (pending.length > 0) {
+        onEvent({ type: 'log', line: pending });
+        pending = '';
+      }
+      if (code !== 0) {
+        onEvent({ type: 'result', ok: false, error: `golden generate exited with code ${code}` });
+        return;
+      }
+      const candidatePath = join(opts.stateRoot, 'golden', 'cases.candidate.jsonl');
+      onEvent({
+        type: 'result',
+        ok: true,
+        message: existsSync(candidatePath)
+          ? `wrote ${candidatePath}`
+          : 'golden generate completed (no candidate file found)',
+      });
+    } catch (err) {
+      if (pending.length > 0) onEvent({ type: 'log', line: pending });
+      onEvent({ type: 'result', ok: false, error: (err as Error).message });
     }
   },
 };

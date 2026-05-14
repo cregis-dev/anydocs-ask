@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { Hono } from 'hono';
+import { stream } from 'hono/streaming';
 import {
   addToProjectRegistry,
   assertProjectRoot,
@@ -51,6 +52,8 @@ import {
   decideCandidate,
   flushApproved,
   loadCandidates,
+  updateCandidate,
+  type CandidateUpdate,
 } from './golden-workshop-state.ts';
 
 export type ConsoleAppDeps = {
@@ -639,6 +642,32 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     return c.json({ ok: true, before: r.before, after: r.after });
   });
 
+  // Console-only edit: mutate non-provenance fields of one candidate row.
+  // CLI counterpart would be hand-editing cases.candidate.jsonl; this
+  // endpoint validates the patch then atomically rewrites the file.
+  app.post('/api/projects/:name/golden/candidate/update', async (c) => {
+    const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
+    if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
+    let body: { id?: unknown; patch?: unknown } | null = null;
+    try {
+      body = (await c.req.json()) as { id?: unknown; patch?: unknown };
+    } catch {
+      return c.json({ ok: false, error: 'invalid JSON body' }, 400);
+    }
+    if (!body || typeof body.id !== 'string') {
+      return c.json({ ok: false, error: 'body.id (string) required' }, 400);
+    }
+    if (!body.patch || typeof body.patch !== 'object') {
+      return c.json({ ok: false, error: 'body.patch (object) required' }, 400);
+    }
+    const r = updateCandidate(ctx.stateRoot, body.id, body.patch as CandidateUpdate);
+    if (!r.ok) {
+      const code = /not found/.test(r.error) ? 404 : 400;
+      return c.json({ ok: false, error: r.error }, code);
+    }
+    return c.json({ ok: true, updated: r.updated });
+  });
+
   app.post('/api/projects/:name/golden/flush', (c) => {
     const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
     if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
@@ -650,6 +679,10 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     }
   });
 
+  // Blocking variant — the UI now uses the streaming endpoint below, but this
+  // route stays for external API callers and CI scripts that want a single
+  // request/response without parsing NDJSON. Same defaults, same result shape;
+  // long-running rewrites just hold the connection open until completion.
   app.post('/api/projects/:name/golden/generate', async (c) => {
     const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
     if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
@@ -667,10 +700,57 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       stateRoot: ctx.stateRoot,
       from: fromRaw,
       ...(limit !== undefined ? { limit } : {}),
-      llmRewrite: false, // console default: no LLM cost; CLI handles --llm-rewrite
+      // Console default: LLM rewrite on for higher-quality candidates, but
+      // auto-degrade to template-only when creds are missing or the call
+      // fails. The CLI keeps strict "report don't fudge" semantics — see
+      // commands/golden.ts fallbackOnLlmError docstring.
+      llmRewrite: true,
+      fallbackOnLlmError: true,
       force: false,
     });
     return c.json(r, r.ok ? 200 : 500);
+  });
+
+  // Streaming variant: NDJSON, one event per line. The UI uses this so the
+  // user can watch project-load → templates → per-batch LLM progress unfold
+  // (especially for big projects where the LLM rewrite phase can be 30-60s).
+  app.post('/api/projects/:name/golden/generate/stream', async (c) => {
+    const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
+    if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
+    const fromRaw = c.req.query('from') ?? 'structure';
+    if (fromRaw !== 'structure' && fromRaw !== 'runs') {
+      return c.json({ ok: false, error: 'from must be structure or runs' }, 400);
+    }
+    const limitRaw = c.req.query('limit');
+    const limit = limitRaw !== undefined ? Number(limitRaw) : undefined;
+    if (limit !== undefined && (!Number.isFinite(limit) || limit < 1)) {
+      return c.json({ ok: false, error: 'limit must be a positive integer' }, 400);
+    }
+    c.header('Content-Type', 'application/x-ndjson; charset=utf-8');
+    // Disable any intermediate buffering — proxies/CDNs sometimes hold
+    // chunked responses; the dev console is local so we still set this for
+    // correctness if someone proxies through nginx.
+    c.header('Cache-Control', 'no-cache, no-transform');
+    c.header('X-Accel-Buffering', 'no');
+    return stream(c, async (s) => {
+      await ops.goldenGenerateStream(
+        {
+          projectRoot: ctx.projectRoot,
+          stateRoot: ctx.stateRoot,
+          from: fromRaw,
+          ...(limit !== undefined ? { limit } : {}),
+          llmRewrite: true,
+          fallbackOnLlmError: true,
+          force: false,
+        },
+        (ev) => {
+          // Fire-and-forget; Hono buffers and flushes per write. The await
+          // returns a promise that resolves when the chunk is pushed to the
+          // underlying socket — we don't need to block per-event.
+          void s.write(JSON.stringify(ev) + '\n');
+        },
+      );
+    });
   });
 
   return app;

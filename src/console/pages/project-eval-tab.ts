@@ -41,6 +41,7 @@ export function renderEvalTab(vm: EvalTabViewModel): Html {
       ${goldenCasesCard(goldenStats, vm.candidates)}
     </div>
     ${tabSwitchScript()}
+    ${gwExtraStyles()}
   `;
 }
 
@@ -401,9 +402,12 @@ function approvedPanel(stats: GoldenSetStats): Html {
   `;
 }
 
+const PENDING_PAGE_SIZE = 20;
+
 function pendingPanel(snap: CandidateSnapshot): Html {
   const hasAny = snap.total > 0;
   const hasApproved = snap.approved > 0;
+  const pendingJson = raw(JSON.stringify(snap.pending));
   return html`
     <div class="card-bd" style="display: flex; gap: var(--s-4); align-items: center; flex-wrap: wrap; border-bottom: 1px solid var(--bd-soft); padding: var(--s-3) var(--s-5);">
       <div style="display: flex; gap: var(--s-4); font-size: var(--t-13);">
@@ -414,8 +418,12 @@ function pendingPanel(snap: CandidateSnapshot): Html {
           ? html`<span style="color: var(--err);">⚠ ${snap.malformed} malformed</span>`
           : ''}
       </div>
-      <div style="margin-left: auto; display: flex; gap: var(--s-2);">
+      <div style="margin-left: auto; display: flex; gap: var(--s-2); align-items: center;">
         <button id="btn-gen-structure" class="btn"><svg><use href="#i-plus"/></svg> from structure</button>
+        <label class="muted" style="display: inline-flex; align-items: center; gap: 4px; font-size: var(--t-12);">
+          limit
+          <input id="gw-gen-limit" class="input" type="number" min="1" max="500" value="50" style="width: 64px; padding: 4px 6px;" />
+        </label>
         <button id="btn-gen-runs" class="btn"><svg><use href="#i-plus"/></svg> from runs</button>
         ${hasApproved
           ? html`<button id="btn-gw-flush" class="btn primary">flush ${snap.approved} → cases.jsonl</button>`
@@ -423,23 +431,30 @@ function pendingPanel(snap: CandidateSnapshot): Html {
       </div>
     </div>
     <p id="gw-gen-status" class="status" style="padding: 0 var(--s-5); margin: var(--s-2) 0 0;"></p>
+    <pre id="gw-gen-log" class="gw-gen-log" hidden></pre>
     <div class="card-bd flush">
       ${!hasAny
         ? html`<div class="empty"><div class="e-ico"><svg><use href="#i-plus"/></svg></div><h3>No candidates yet</h3><p>Click "from structure" or "from runs" above to seed.
-          The default skips LLM rewriting — pass <code class="inline">--llm-rewrite</code> on the CLI for that.</p></div>`
+          Generation runs LLM rewrite by default; it falls back to template phrasing when Anthropic credentials are absent.</p></div>`
         : snap.pending.length === 0
           ? html`<div class="empty"><div class="e-ico"><svg><use href="#i-check"/></svg></div><h3>All reviewed</h3><p>${hasApproved ? 'Click flush to move approved candidates into cases.jsonl.' : ''}</p></div>`
           : html`
-            <div class="cand-list">
-              ${snap.pending.slice(0, 50).map((c) => candidateRow(c))}
-              ${snap.pending.length > 50
-                ? html`<div style="padding: var(--s-3) var(--s-5); text-align: center; color: var(--fg-soft); font-size: var(--t-13); border-top: 1px solid var(--bd-soft);">
-                    showing 50 of ${snap.pending.length} · review above to reveal more
-                  </div>`
-                : ''}
+            <div class="cand-list" id="gw-pending-list" data-page-size="${PENDING_PAGE_SIZE}">
+              ${snap.pending.map((c, idx) => candidateRow(c, idx))}
             </div>
+            ${snap.pending.length > PENDING_PAGE_SIZE
+              ? html`
+                  <div class="gw-pager" id="gw-pager">
+                    <button id="gw-pager-prev" class="btn sm" type="button">‹ prev</button>
+                    <span class="info" id="gw-pager-info"></span>
+                    <button id="gw-pager-next" class="btn sm" type="button">next ›</button>
+                  </div>
+                `
+              : ''}
           `}
     </div>
+    <script>${raw(`window.__GW_PENDING__ = ${pendingJson};`)}</script>
+    ${snap.pending.length > 0 ? editModal() : ''}
   `;
 }
 
@@ -470,10 +485,10 @@ function bucketBlock(label: string, bucket: Record<string, number>): Html {
   `;
 }
 
-function candidateRow(c: GoldenCaseCandidate): Html {
+function candidateRow(c: GoldenCaseCandidate, idx: number): Html {
   const must = c.expected?.must_cite_pages ?? [];
   return html`
-    <div class="cand-row gw-candidate" data-id="${c.id}">
+    <div class="cand-row gw-candidate" data-id="${c.id}" data-idx="${idx}">
       <span class="c-badge">
         <span class="tag">${c.template_id ?? c.created_by}</span>
       </span>
@@ -486,6 +501,7 @@ function candidateRow(c: GoldenCaseCandidate): Html {
         </div>
       </div>
       <div class="c-act">
+        <button class="btn sm ghost" data-edit="1">edit</button>
         <button class="btn sm" data-decide="approved">
           <svg><use href="#i-check"/></svg> approve
         </button>
@@ -514,4 +530,122 @@ function tabSwitchScript(): Html {
       });
     })();
   `)}</script>`;
+}
+
+// Edit-candidate modal. Read-only fields (template_id, created_by) show in
+// the header for context; the rest are editable and POSTed as a patch by
+// bindGwEdit in project.ts BOOTSTRAP_SCRIPT.
+function editModal(): Html {
+  return html`
+    <div class="gw-modal-backdrop" id="gw-edit-backdrop" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="gw-modal">
+        <h3>Edit candidate <span class="ro" id="gw-edit-id" style="margin-left: 8px;"></span></h3>
+        <div class="body">
+          <div class="row"><label>template_id</label><span class="ro" id="gw-edit-template"></span></div>
+          <div class="row"><label>created_by</label><span class="ro" id="gw-edit-created-by"></span></div>
+          <div class="row">
+            <label>query *</label>
+            <textarea id="gw-edit-query" class="textarea" rows="2" style="min-height: 0;"></textarea>
+          </div>
+          <div class="row">
+            <label>lang</label>
+            <select id="gw-edit-lang" class="select">
+              <option value="zh">zh</option>
+              <option value="en">en</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>context_pageId</label>
+            <input id="gw-edit-context" class="input" type="text" placeholder="(none)" />
+          </div>
+          <div class="row">
+            <label>filters.audience</label>
+            <input id="gw-edit-audience" class="input" type="text" placeholder="(none)" />
+          </div>
+          <div class="row">
+            <label>filters.version</label>
+            <input id="gw-edit-version" class="input" type="text" placeholder="(none)" />
+          </div>
+          <div class="row">
+            <label>tags</label>
+            <input id="gw-edit-tags" class="input" type="text" placeholder="comma-separated" />
+          </div>
+          <div class="row">
+            <label>must_cite_pages</label>
+            <textarea id="gw-edit-mustcite" class="textarea mono" rows="2" placeholder="comma-separated page slugs" style="min-height: 0;"></textarea>
+          </div>
+          <div class="row">
+            <label>must_contain</label>
+            <textarea id="gw-edit-mustcontain" class="textarea mono" rows="2" placeholder="comma-separated substrings" style="min-height: 0;"></textarea>
+          </div>
+          <div class="row">
+            <label>forbid_contain</label>
+            <textarea id="gw-edit-forbid" class="textarea mono" rows="2" placeholder="comma-separated substrings" style="min-height: 0;"></textarea>
+          </div>
+          <div class="row">
+            <label>note</label>
+            <textarea id="gw-edit-note" class="textarea" rows="2" style="min-height: 0;"></textarea>
+          </div>
+        </div>
+        <div class="foot">
+          <span class="status" id="gw-edit-status"></span>
+          <button type="button" id="gw-edit-cancel" class="btn">cancel</button>
+          <button type="button" id="gw-edit-save" class="btn primary">save</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// Scoped styles for the golden-workshop additions merged from main: the
+// streaming generate log, the pending-review pager, and the edit modal.
+// These cohabit with the design-system tokens in layout.ts BASE_CSS.
+function gwExtraStyles(): Html {
+  return html`<style>${raw(`
+    .gw-gen-log {
+      font-family: var(--font-mono); font-size: var(--t-12); line-height: 1.55;
+      max-height: 220px; overflow-y: auto;
+      background: var(--bg-elev); border: 1px solid var(--bd-soft);
+      border-radius: var(--r-3); padding: var(--s-3);
+      margin: var(--s-2) var(--s-5) 0; white-space: pre-wrap; word-break: break-word;
+      color: var(--fg-soft);
+    }
+    .gw-gen-log .ok { color: var(--ok); }
+    .gw-gen-log .err { color: var(--err); }
+    .gw-gen-log .dim { color: var(--fg-mute); }
+    .gw-pager {
+      display: flex; gap: var(--s-2); align-items: center; justify-content: center;
+      padding: var(--s-3) var(--s-5); font-size: var(--t-12);
+      border-top: 1px solid var(--bd-soft);
+    }
+    .gw-pager .info { color: var(--fg-mute); font-family: var(--font-mono); }
+    .gw-modal-backdrop {
+      position: fixed; inset: 0; background: rgba(20,20,18,.36);
+      display: none; z-index: 100; align-items: center; justify-content: center;
+      padding: var(--s-5);
+    }
+    .gw-modal-backdrop.show { display: flex; }
+    .gw-modal {
+      background: var(--bg-elev); border: 1px solid var(--bd);
+      border-radius: var(--r-5); box-shadow: var(--sh-pop);
+      width: 100%; max-width: 640px; max-height: calc(100vh - 40px);
+      display: flex; flex-direction: column;
+    }
+    .gw-modal h3 {
+      margin: 0; padding: var(--s-4) var(--s-5);
+      border-bottom: 1px solid var(--bd-soft); font-size: var(--t-15); font-weight: 600;
+    }
+    .gw-modal .body { padding: var(--s-4) var(--s-5); overflow-y: auto; }
+    .gw-modal .row {
+      display: grid; grid-template-columns: 130px 1fr;
+      gap: var(--s-3); align-items: baseline; padding: 6px 0;
+    }
+    .gw-modal .row label { font-size: var(--t-12); color: var(--fg-soft); }
+    .gw-modal .row .ro { color: var(--fg-mute); font-family: var(--font-mono); font-size: var(--t-12); }
+    .gw-modal .foot {
+      padding: var(--s-3) var(--s-5); border-top: 1px solid var(--bd-soft);
+      display: flex; gap: var(--s-2); justify-content: flex-end; align-items: center;
+    }
+    .gw-modal .foot .status { flex: 1; }
+  `)}</style>`;
 }

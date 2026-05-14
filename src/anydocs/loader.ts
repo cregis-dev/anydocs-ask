@@ -24,6 +24,12 @@ export type LoadedProject = {
   navigationsByLang: Map<DocsLang, NavigationDoc>;
   /** lang -> page_id -> PageDoc. Same page_id can appear under multiple langs. */
   pagesByLangAndId: Map<DocsLang, Map<string, PageDoc>>;
+  /** anydocs.config.json#defaultLanguage when present and valid. Used by
+   *  downstream tools (e.g. golden generator) to prioritize the project's
+   *  primary surface when truncating results. Null when the field is missing,
+   *  not a DocsLang, or the config file failed to read — callers should fall
+   *  back to whatever order navigationsByLang happens to enumerate. */
+  defaultLanguage: DocsLang | null;
   warnings: string[];
 };
 
@@ -95,7 +101,44 @@ export async function loadProject(projectRoot: string): Promise<LoadedProject> {
     }
   }
 
-  return { projectRoot: root, navigationsByLang, pagesByLangAndId, warnings };
+  const defaultLanguage = await readDefaultLanguage(root, warnings);
+
+  return { projectRoot: root, navigationsByLang, pagesByLangAndId, defaultLanguage, warnings };
+}
+
+/**
+ * Best-effort read of anydocs.config.json#defaultLanguage. Loader stays
+ * non-fatal — a missing / malformed config does not block the project from
+ * loading; we just return null and let callers decide what to do.
+ */
+async function readDefaultLanguage(
+  projectRoot: string,
+  warnings: string[],
+): Promise<DocsLang | null> {
+  const configPath = join(projectRoot, 'anydocs.config.json');
+  let raw: string;
+  try {
+    raw = await fs.readFile(configPath, 'utf8');
+  } catch {
+    return null; // file may not exist (e.g. starter fixtures used in tests)
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    warnings.push(`anydocs.config.json: JSON parse failed (${describeError(err)})`);
+    return null;
+  }
+  if (parsed === null || typeof parsed !== 'object') return null;
+  const dl = (parsed as { defaultLanguage?: unknown }).defaultLanguage;
+  if (typeof dl !== 'string') return null;
+  if (!isDocsLang(dl)) {
+    warnings.push(
+      `anydocs.config.json: defaultLanguage "${dl}" is not one of ${DOCS_LANGS.join(', ')}; ignoring`,
+    );
+    return null;
+  }
+  return dl;
 }
 
 // ---------------------------------------------------------------------------

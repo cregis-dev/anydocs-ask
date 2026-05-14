@@ -182,10 +182,31 @@ export async function askWithTrace(
     formatHint,
   });
 
-  const llmOutput = await deps.llm.generate({
-    systemPrompt: prompt.system,
-    userPrompt: prompt.user,
-  });
+  let llmOutput;
+  try {
+    llmOutput = await deps.llm.generate({
+      systemPrompt: prompt.system,
+      userPrompt: prompt.user,
+    });
+  } catch (err) {
+    // LLM call failure (gateway returned garbage / timed out / threw mid-
+    // stream). Distinct from `llm_unavailable` which is the *construction*
+    // failure (no API key / bad config) — that one short-circuits before
+    // askWithTrace runs. Returning an error result here lets the HTTP layer
+    // append a kind='error' record with the partial retrieval trace so
+    // analyze D1 / D2 stay honest about upstream instability (ARCH §16.4).
+    return {
+      result: errorResult('llm_failed', (err as Error).message),
+      trace: {
+        fused: fusedTrace,
+        subtree_ask_triggered: false,
+        top_final_score,
+        confidence,
+        tokens_in: null,
+        tokens_out: null,
+      },
+    };
+  }
 
   const post = postprocess({
     answerLang: queryLang,

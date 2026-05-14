@@ -35,6 +35,9 @@ function buildProject(args: {
   navItemsEn?: NavigationDoc['items'];
   pagesZh?: PageDoc[];
   pagesEn?: PageDoc[];
+  /** Mirrors anydocs.config.json#defaultLanguage; drives generator lang
+   *  ordering (see generator.ts orderLangs). */
+  defaultLanguage?: DocsLang | null;
 }): LoadedProject {
   const navigationsByLang = new Map<DocsLang, NavigationDoc>();
   if (args.navItemsZh) navigationsByLang.set('zh', { version: 1, items: args.navItemsZh });
@@ -42,7 +45,13 @@ function buildProject(args: {
   const pagesByLangAndId = new Map<DocsLang, Map<string, PageDoc>>();
   if (args.pagesZh) pagesByLangAndId.set('zh', new Map(args.pagesZh.map((p) => [p.id, p])));
   if (args.pagesEn) pagesByLangAndId.set('en', new Map(args.pagesEn.map((p) => [p.id, p])));
-  return { projectRoot: '/fake', navigationsByLang, pagesByLangAndId, warnings: [] };
+  return {
+    projectRoot: '/fake',
+    navigationsByLang,
+    pagesByLangAndId,
+    defaultLanguage: args.defaultLanguage ?? null,
+    warnings: [],
+  };
 }
 
 async function withTmpProject(): Promise<{ root: string; cleanup: () => Promise<void> }> {
@@ -154,6 +163,62 @@ test('generator: --limit truncates after deterministic walk order', () => {
   });
   const cands = generateFromStructure(project, { limit: 6 });
   assert.equal(cands.length, 6);
+});
+
+test('generator: --limit with multiple langs round-robins so each lang gets a fair share', () => {
+  // Regression for dogfood-2026-05-14 F2: a zh-default project with both
+  // en + zh navs used to emit ALL en candidates first because en happened
+  // to live earlier in the Map; --limit 30 truncated to 30/30 English on a
+  // Chinese-default project, defeating the purpose of the limit.
+  const project = buildProject({
+    navItemsZh: [{ type: 'page', pageId: 'auth' }],
+    pagesZh: [page('auth', 'zh', '鉴权')],
+    navItemsEn: [{ type: 'page', pageId: 'auth' }],
+    pagesEn: [page('auth', 'en', 'Authentication')],
+    defaultLanguage: 'zh',
+  });
+  const cands = generateFromStructure(project, { limit: 4 });
+  assert.equal(cands.length, 4);
+  const zhCount = cands.filter((c) => c.lang === 'zh').length;
+  const enCount = cands.filter((c) => c.lang === 'en').length;
+  assert.equal(zhCount, 2, `expected balanced share, got zh=${zhCount}`);
+  assert.equal(enCount, 2, `expected balanced share, got en=${enCount}`);
+});
+
+test('generator: defaultLanguage emits first within each round-robin slice', () => {
+  // With equal-sized per-lang lists, the first candidate must come from the
+  // project's primary surface — matching the same-lang-first principle in
+  // retrieval (PRD §4.8).
+  const project = buildProject({
+    navItemsZh: [{ type: 'page', pageId: 'auth' }],
+    pagesZh: [page('auth', 'zh', '鉴权')],
+    navItemsEn: [{ type: 'page', pageId: 'auth' }],
+    pagesEn: [page('auth', 'en', 'Authentication')],
+    defaultLanguage: 'zh',
+  });
+  const cands = generateFromStructure(project);
+  // 8 total (4 templates per lang). zh slot wins each round.
+  assert.equal(cands[0]?.lang, 'zh');
+  assert.equal(cands[1]?.lang, 'en');
+  assert.equal(cands[2]?.lang, 'zh');
+  assert.equal(cands[3]?.lang, 'en');
+});
+
+test('generator: defaultLanguage=null falls back to enumeration order, still interleaved', () => {
+  // No anydocs.config.json hint — generator can't know which is primary, so
+  // it interleaves in whatever order navigationsByLang enumerates. The key
+  // invariant is *fair share at low limit*, not which lang wins ties.
+  const project = buildProject({
+    navItemsZh: [{ type: 'page', pageId: 'auth' }],
+    pagesZh: [page('auth', 'zh', '鉴权')],
+    navItemsEn: [{ type: 'page', pageId: 'auth' }],
+    pagesEn: [page('auth', 'en', 'Authentication')],
+    defaultLanguage: null,
+  });
+  const cands = generateFromStructure(project, { limit: 4 });
+  assert.equal(cands.length, 4);
+  assert.equal(cands.filter((c) => c.lang === 'zh').length, 2);
+  assert.equal(cands.filter((c) => c.lang === 'en').length, 2);
 });
 
 test('generator: link nodes are ignored', () => {

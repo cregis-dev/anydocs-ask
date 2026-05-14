@@ -570,36 +570,114 @@ if ($('btn-start-ask-secondary')) $('btn-start-ask-secondary').addEventListener(
     }
   });
 })();
-
-// Golden Workshop generators
+// Golden Workshop generators — stream NDJSON from /golden/generate/stream
+// so the log box ticks with real progress (project load → template gen →
+// per-batch LLM rewrite → write). LLM rewrite can be 30-60s on a large
+// project, so a static spinner is misleading; line-by-line logs let the
+// author see exactly which batch they're on.
 (function bindGwGenerators() {
-  function bind(id, path) {
+  const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  function bind(id, source) {
     const btn = $(id);
     const status = $('gw-gen-status');
+    const logEl = $('gw-gen-log');
     if (!btn) return;
     btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      if (status) { status.textContent = id.replace('btn-gen-', '') + '...'; status.className = 'status'; }
+      // Reset UI: clear log, disable both gen buttons (avoid parallel runs).
+      const structureBtn = $('btn-gen-structure');
+      const runsBtn = $('btn-gen-runs');
+      if (structureBtn) structureBtn.disabled = true;
+      if (runsBtn) runsBtn.disabled = true;
+      if (logEl) {
+        logEl.hidden = false;
+        logEl.textContent = '';
+        logEl.scrollTop = 0;
+      }
       const t0 = Date.now();
+      let spinnerIdx = 0;
+      const tick = () => {
+        const dt = ((Date.now() - t0) / 1000).toFixed(1);
+        if (status) {
+          status.textContent = SPINNER[spinnerIdx % SPINNER.length] + ' ' + source + ' running... ' + dt + 's';
+          status.className = 'status muted';
+        }
+        spinnerIdx++;
+      };
+      tick();
+      const spinnerTimer = setInterval(tick, 120);
+      const appendLine = (line, cls) => {
+        if (!logEl) return;
+        const span = document.createElement('span');
+        if (cls) span.className = cls;
+        span.textContent = line + '\\n';
+        logEl.appendChild(span);
+        // Stay pinned at bottom unless the user has manually scrolled up.
+        const atBottom = logEl.scrollHeight - logEl.clientHeight - logEl.scrollTop < 30;
+        if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+      };
+      let lastResult = null;
       try {
-        const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + path, { method: 'POST' });
-        const body = await res.json();
-        const dt = Date.now() - t0;
-        if (!res.ok || body.ok === false) {
-          if (status) { status.textContent = 'failed (' + dt + 'ms): ' + (body.error || res.statusText); status.className = 'status err'; }
+        const limitInput = $('gw-gen-limit');
+        let limitParam = '';
+        if (limitInput && source === 'structure') {
+          const v = parseInt(limitInput.value, 10);
+          if (Number.isFinite(v) && v > 0) limitParam = '&limit=' + v;
+        }
+        const url = '/api/projects/' + encodeURIComponent(cfg.name) + '/golden/generate/stream?from=' + source + limitParam;
+        const res = await fetch(url, { method: 'POST' });
+        if (!res.ok || !res.body) {
+          const text = await res.text().catch(() => '');
+          appendLine('HTTP ' + res.status + ': ' + (text || res.statusText), 'err');
+          lastResult = { ok: false, error: 'HTTP ' + res.status };
         } else {
-          if (status) { status.textContent = 'done (' + dt + 'ms): ' + (body.message || 'ok'); status.className = 'status ok'; }
-          setTimeout(() => location.reload(), 600);
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            let nl;
+            while ((nl = buf.indexOf('\\n')) !== -1) {
+              const line = buf.slice(0, nl);
+              buf = buf.slice(nl + 1);
+              if (!line) continue;
+              let ev;
+              try { ev = JSON.parse(line); } catch { appendLine(line, 'dim'); continue; }
+              if (ev.type === 'log') {
+                appendLine(ev.line, /(^|\s)ok in /.test(ev.line) ? 'ok' : (/FAIL|fail|error/i.test(ev.line) ? 'err' : null));
+              } else if (ev.type === 'result') {
+                lastResult = ev;
+              }
+            }
+          }
+          if (buf.trim()) {
+            try { const ev = JSON.parse(buf); if (ev.type === 'result') lastResult = ev; } catch { appendLine(buf, 'dim'); }
+          }
         }
       } catch (e) {
-        if (status) { status.textContent = 'network error: ' + (e && e.message ? e.message : e); status.className = 'status err'; }
+        appendLine('network error: ' + (e && e.message ? e.message : e), 'err');
+        lastResult = { ok: false, error: (e && e.message) || String(e) };
       } finally {
-        btn.disabled = false;
+        clearInterval(spinnerTimer);
+      }
+      const dt = ((Date.now() - t0) / 1000).toFixed(1);
+      if (lastResult && lastResult.ok) {
+        appendLine('✓ done in ' + dt + 's', 'ok');
+        if (status) { status.textContent = 'done in ' + dt + 's'; status.className = 'status ok'; }
+        // Brief pause so the user sees the final state before reload swaps the DOM.
+        setTimeout(() => location.reload(), 800);
+      } else {
+        const err = (lastResult && lastResult.error) || 'unknown error';
+        appendLine('✗ failed (' + dt + 's): ' + err, 'err');
+        if (status) { status.textContent = 'failed (' + dt + 's)'; status.className = 'status err'; }
+        if (structureBtn) structureBtn.disabled = false;
+        if (runsBtn) runsBtn.disabled = false;
       }
     });
   }
-  bind('btn-gen-structure', '/golden/generate?from=structure');
-  bind('btn-gen-runs', '/golden/generate?from=runs');
+  bind('btn-gen-structure', 'structure');
+  bind('btn-gen-runs', 'runs');
 })();
 
 // Golden Workshop approve / reject + flush
@@ -650,6 +728,173 @@ if ($('btn-start-ask-secondary')) $('btn-start-ask-secondary').addEventListener(
       } catch (e) {
         alert('network error: ' + (e && e.message ? e.message : e));
         flush.disabled = false;
+      }
+    });
+  }
+})();
+
+// Golden Workshop: client-side pagination over the rendered pending rows.
+// Server emits all rows (data-idx=0..N-1); JS shows pageSize at a time so a
+// 530-candidate batch isn't a 530-row wall. Page persists in location.hash
+// fragment (#eval / #eval-p3) so approve/reject reload doesn't lose place.
+(function bindGwPager() {
+  const listEl = $('gw-pending-list');
+  if (!listEl) return;
+  const rows = Array.from(listEl.querySelectorAll('.gw-candidate'));
+  if (rows.length === 0) return;
+  const pageSize = Math.max(1, parseInt(listEl.dataset.pageSize, 10) || 20);
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const prev = $('gw-pager-prev');
+  const next = $('gw-pager-next');
+  const info = $('gw-pager-info');
+
+  function readPage() {
+    try {
+      const m = (location.hash || '').match(/[?&]gp=(\\d+)/);
+      if (m) {
+        const p = parseInt(m[1], 10);
+        if (Number.isFinite(p)) return Math.min(Math.max(1, p), totalPages);
+      }
+    } catch (_) {}
+    return 1;
+  }
+  function writePage(p) {
+    // Keep the existing tab fragment (e.g. "#eval") and replace any prior gp=.
+    let h = location.hash || '';
+    h = h.replace(/[?&]gp=\\d+/g, '');
+    if (h && !h.includes('?')) h = h + '?gp=' + p;
+    else if (h) h = h + '&gp=' + p;
+    else h = '#eval?gp=' + p;
+    history.replaceState({}, '', location.pathname + h);
+  }
+
+  let page = readPage();
+  function render() {
+    const start = (page - 1) * pageSize;
+    const end = start + pageSize;
+    rows.forEach((r, i) => { r.style.display = (i >= start && i < end) ? '' : 'none'; });
+    if (info) info.textContent = page + ' / ' + totalPages + ' · ' + rows.length + ' rows';
+    if (prev) prev.disabled = page <= 1;
+    if (next) next.disabled = page >= totalPages;
+  }
+  if (prev) prev.addEventListener('click', () => { if (page > 1) { page--; writePage(page); render(); } });
+  if (next) next.addEventListener('click', () => { if (page < totalPages) { page++; writePage(page); render(); } });
+  render();
+})();
+
+// Golden Workshop: edit modal — POST /golden/candidate/update with a patch
+// of the editable fields. Read-only fields (template_id, created_by,
+// reviewed_at, reviewer, decision) display in the modal header but are not
+// part of the patch.
+(function bindGwEdit() {
+  const backdrop = $('gw-edit-backdrop');
+  if (!backdrop) return;
+  const pending = Array.isArray(window.__GW_PENDING__) ? window.__GW_PENDING__ : [];
+  const byId = new Map(pending.map((c) => [c.id, c]));
+
+  const elId = $('gw-edit-id');
+  const elTemplate = $('gw-edit-template');
+  const elCreatedBy = $('gw-edit-created-by');
+  const elQuery = $('gw-edit-query');
+  const elLang = $('gw-edit-lang');
+  const elContext = $('gw-edit-context');
+  const elAudience = $('gw-edit-audience');
+  const elVersion = $('gw-edit-version');
+  const elTags = $('gw-edit-tags');
+  const elMustCite = $('gw-edit-mustcite');
+  const elMustContain = $('gw-edit-mustcontain');
+  const elForbid = $('gw-edit-forbid');
+  const elNote = $('gw-edit-note');
+  const elStatus = $('gw-edit-status');
+  const btnSave = $('gw-edit-save');
+  const btnCancel = $('gw-edit-cancel');
+
+  let currentId = null;
+
+  function open(id) {
+    const c = byId.get(id);
+    if (!c) { alert('candidate not found in client cache: ' + id); return; }
+    currentId = id;
+    if (elId) elId.textContent = c.id;
+    if (elTemplate) elTemplate.textContent = c.template_id || '—';
+    if (elCreatedBy) elCreatedBy.textContent = c.created_by || '—';
+    if (elQuery) elQuery.value = c.query || '';
+    if (elLang) elLang.value = c.lang || 'en';
+    if (elContext) elContext.value = c.context_pageId || '';
+    const f = c.filters || {};
+    if (elAudience) elAudience.value = f.audience || '';
+    if (elVersion) elVersion.value = f.version || '';
+    if (elTags) elTags.value = Array.isArray(c.tags) ? c.tags.join(', ') : '';
+    const exp = c.expected || {};
+    if (elMustCite) elMustCite.value = (exp.must_cite_pages || []).join(', ');
+    if (elMustContain) elMustContain.value = (exp.must_contain || []).join(', ');
+    if (elForbid) elForbid.value = (exp.forbid_contain || []).join(', ');
+    if (elNote) elNote.value = c.note || '';
+    if (elStatus) { elStatus.textContent = ''; elStatus.className = 'status'; }
+    backdrop.classList.add('show');
+    backdrop.setAttribute('aria-hidden', 'false');
+    if (elQuery) elQuery.focus();
+  }
+  function close() {
+    currentId = null;
+    backdrop.classList.remove('show');
+    backdrop.setAttribute('aria-hidden', 'true');
+  }
+  function csvToArr(s) {
+    return String(s || '').split(',').map((x) => x.trim()).filter((x) => x.length > 0);
+  }
+
+  document.querySelectorAll('.gw-candidate button[data-edit]').forEach((b) => {
+    b.addEventListener('click', (ev) => {
+      const row = ev.currentTarget.closest('.gw-candidate');
+      if (row && row.dataset.id) open(row.dataset.id);
+    });
+  });
+
+  if (btnCancel) btnCancel.addEventListener('click', close);
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && backdrop.classList.contains('show')) close();
+  });
+
+  if (btnSave) {
+    btnSave.addEventListener('click', async () => {
+      if (!currentId) return;
+      const patch = {
+        query: elQuery ? elQuery.value : undefined,
+        lang: elLang ? elLang.value : undefined,
+        context_pageId: elContext ? elContext.value : undefined,
+        filters: {
+          audience: elAudience ? elAudience.value : undefined,
+          version: elVersion ? elVersion.value : undefined,
+        },
+        tags: elTags ? csvToArr(elTags.value) : undefined,
+        expected: {
+          must_cite_pages: elMustCite ? csvToArr(elMustCite.value) : undefined,
+          must_contain: elMustContain ? csvToArr(elMustContain.value) : undefined,
+          forbid_contain: elForbid ? csvToArr(elForbid.value) : undefined,
+        },
+        note: elNote ? elNote.value : undefined,
+      };
+      btnSave.disabled = true;
+      if (elStatus) { elStatus.textContent = 'saving...'; elStatus.className = 'status muted'; }
+      try {
+        const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/golden/candidate/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: currentId, patch }),
+        });
+        const body = await res.json();
+        if (!res.ok || body.ok === false) {
+          if (elStatus) { elStatus.textContent = (body && body.error) || res.statusText; elStatus.className = 'status err'; }
+          btnSave.disabled = false;
+          return;
+        }
+        if (elStatus) { elStatus.textContent = 'saved · reloading'; elStatus.className = 'status ok'; }
+        setTimeout(() => location.reload(), 300);
+      } catch (e) {
+        if (elStatus) { elStatus.textContent = 'network error: ' + (e && e.message ? e.message : e); elStatus.className = 'status err'; }
+        btnSave.disabled = false;
       }
     });
   }
@@ -904,6 +1149,18 @@ function renderAnswer(body) {
   }
 }
 
+// in_page_path is "<headingId>/p[N]" (section chunk) or "p[N]" (page-top
+// chunk). Pull the heading part so two citations from the same page render
+// with distinct section labels next to the title — otherwise two chunks of
+// one page look like a duplicate citation (dogfood 2026-05-14 F4). Bare
+// "p[N]" has no useful disambiguator, so return ''. lastIndexOf avoids a
+// regex (backslashes would need double-escaping inside BOOTSTRAP_SCRIPT).
+function citeSectionLabel(inPath) {
+  if (!inPath) return '';
+  const i = inPath.lastIndexOf('/p[');
+  return i > 0 ? inPath.slice(0, i) : '';
+}
+
 function renderCitations(body) {
   const list = $('ask-cite-list');
   const empty = $('ask-cite-empty');
@@ -922,12 +1179,14 @@ function renderCitations(body) {
     div.className = 'cite-item';
     const crumb = Array.isArray(c.breadcrumb) ? c.breadcrumb.map((b) => b.title).join(' › ') : '';
     const inPath = c.in_page_path || '';
+    const section = citeSectionLabel(inPath);
     const langTag = c.source_lang && c.source_lang !== c.lang ? '<span class="tag warn">cross-lang ' + escapeHtml(c.source_lang) + '→' + escapeHtml(c.lang) + '</span>' : '';
+    const titleSuffix = section ? ' <span style="font-weight:400; color:var(--fg-mute);">· ' + escapeHtml(section) + '</span>' : '';
     div.innerHTML =
       '<span class="cite">' + escapeHtml(c.citation_id || '·') + '</span>' +
       '<div>' +
       '  <div class="meta">' + escapeHtml(c.page_id || '') + (inPath ? ' · ' + escapeHtml(inPath) : '') + ' ' + langTag + '</div>' +
-      '  <div style="font-weight:600; margin-bottom:4px;">' + escapeHtml(c.title || '') + '</div>' +
+      '  <div style="font-weight:600; margin-bottom:4px;">' + escapeHtml(c.title || '') + titleSuffix + '</div>' +
       (crumb ? '<div class="muted" style="font-size:11.5px; margin-bottom:6px;">' + escapeHtml(crumb) + '</div>' : '') +
       '  <div class="snippet">' + escapeHtml(c.snippet || '') + '</div>' +
       '</div>';

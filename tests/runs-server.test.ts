@@ -46,8 +46,9 @@ async function buildProject(): Promise<{ root: string; cleanup: () => Promise<vo
   return { root, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
 }
 
-async function setup(opts: { runsEnabled: boolean }): Promise<{
+async function setup(opts: { runsEnabled: boolean; llm?: MockLLM }): Promise<{
   runtime: Runtime;
+  llm: MockLLM;
   cleanup: () => Promise<void>;
   projectRoot: string;
   stateRoot: string;
@@ -57,18 +58,20 @@ async function setup(opts: { runsEnabled: boolean }): Promise<{
   const { config } = await loadConfig(root);
   config.runs.enabled = opts.runsEnabled;
   const db = openDatabase({ dbPath: ':memory:' });
+  const llm = opts.llm ?? new MockLLM({ model: 'mock-llm' });
   const runtime = new Runtime({
     projectRoot: root,
     stateRoot,
     config,
     db,
     embedder: new MockEmbedder(),
-    llm: new MockLLM({ model: 'mock-llm' }),
+    llm,
     skipWatcher: true,
   });
   await runtime.start();
   return {
     runtime,
+    llm,
     projectRoot: root,
     stateRoot,
     cleanup: async () => {
@@ -115,6 +118,44 @@ test('/v1/ask happy path appends one RunRecord with retrieval trace + answer fie
     assert.ok(Array.isArray(r.retrieval.fused));
     // request_id is uuid-shaped
     assert.match(r.request_id, /^[0-9a-f-]{36}$/i);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('/v1/ask LLM throw: 503 + appends one RunRecord with kind=error/llm_failed + partial trace', async () => {
+  // Regression for dogfood-2026-05-14 F1: a mid-call LLM throw (gateway
+  // garbage response, transient timeout) used to propagate out as Hono 500
+  // and the runs ledger lost the row entirely. Analyze D1/D2 could not see
+  // upstream instability. The fix synthesizes an error result with the
+  // partial retrieval trace so the row still lands.
+  const llm = new MockLLM({
+    model: 'throwing-mock',
+    responder: () => {
+      throw new Error('gateway returned non-object response (model=mock): undefined');
+    },
+  });
+  const { runtime, cleanup, stateRoot } = await setup({ runsEnabled: true, llm });
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    assert.equal(res.status, 503);
+    const body = (await res.json()) as { type: string; code?: string; message?: string };
+    assert.equal(body.type, 'error');
+    assert.equal(body.code, 'llm_failed');
+    assert.match(body.message ?? '', /gateway/i);
+
+    const file = findRunsFile(stateRoot);
+    assert.ok(file, 'expected a runs file (the throw must not skip appendRun)');
+    const r = JSON.parse(readFileSync(file!, 'utf8').trim()) as RunRecord;
+    assert.equal(r.answer.kind, 'error');
+    assert.equal(r.answer.error_code, 'llm_failed');
+    // partial trace must survive: retrieval ran before the LLM died
+    assert.ok(r.retrieval.fused.length > 0, 'partial fused trace should be present');
   } finally {
     await cleanup();
   }

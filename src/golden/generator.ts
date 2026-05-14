@@ -76,21 +76,56 @@ export function generateFromStructure(
   project: LoadedProject,
   opts: GenerateOptions = {},
 ): GoldenCaseCandidate[] {
-  const out: GoldenCaseCandidate[] = [];
-  const langs = opts.langs ?? Array.from(project.navigationsByLang.keys());
+  // langs to actually walk. We always order with project.defaultLanguage first
+  // (when known), so that --limit truncation favors the project's primary
+  // surface — fixing the lang-bias bug where en-first-in-Map plus a small
+  // --limit produced 30/30 English candidates for a zh-default project
+  // (dogfood-2026-05-14 F2).
+  const langsAvailable = orderLangs(
+    opts.langs ?? Array.from(project.navigationsByLang.keys()),
+    project.defaultLanguage,
+  );
 
-  for (const lang of langs) {
+  // Per-lang collect, then round-robin interleave so a small --limit gives
+  // each lang a roughly equal share instead of all candidates from whichever
+  // lang happens to walk first.
+  const byLang: GoldenCaseCandidate[][] = [];
+  for (const lang of langsAvailable) {
     const nav = project.navigationsByLang.get(lang);
     if (!nav) continue;
     const pages = project.pagesByLangAndId.get(lang);
     if (!pages) continue;
-    walk(nav, pages, lang, [], out);
+    const langOut: GoldenCaseCandidate[] = [];
+    walk(nav, pages, lang, [], langOut);
+    if (langOut.length > 0) byLang.push(langOut);
   }
 
-  if (opts.limit !== undefined && opts.limit >= 0 && out.length > opts.limit) {
-    return out.slice(0, opts.limit);
+  const interleaved: GoldenCaseCandidate[] = [];
+  const maxLen = byLang.reduce((m, l) => Math.max(m, l.length), 0);
+  for (let i = 0; i < maxLen; i++) {
+    for (const langOut of byLang) {
+      if (i < langOut.length) interleaved.push(langOut[i]!);
+    }
   }
-  return out;
+
+  if (opts.limit !== undefined && opts.limit >= 0 && interleaved.length > opts.limit) {
+    return interleaved.slice(0, opts.limit);
+  }
+  return interleaved;
+}
+
+/**
+ * Stable lang order: defaultLanguage (when known and present in `requested`)
+ * first, then the rest in their original order. Pure helper; no project state.
+ */
+function orderLangs(
+  requested: readonly DocsLang[],
+  defaultLanguage: DocsLang | null,
+): DocsLang[] {
+  if (defaultLanguage === null || !requested.includes(defaultLanguage)) {
+    return [...requested];
+  }
+  return [defaultLanguage, ...requested.filter((l) => l !== defaultLanguage)];
 }
 
 type SectionFrame = { title: string; pageSiblings: PageRef[] };

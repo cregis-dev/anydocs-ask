@@ -427,13 +427,25 @@ HTTP 400。`scope_id` 校验是硬条件——未命中 `pages` 表中任一 `su
         bge-m3 同时覆盖 zh/en，所以单次 embed 可以同时打到 zh 和 en chunks。
 
 4. 结构重排（在 RRF top-20 上加权）
-   final_score = rrf_score × (1 + lang_boost + same_subtree_boost + nav_index_boost)
+   final_score = rrf_score × (1 + lang_boost + same_subtree_boost
+                                + nav_index_boost + title_match_boost)
 
    ├─ lang_boost：chunks.lang == query_lang ? +0.30 : 0
    │  （PRD §4.8 同 lang 优先；权重最高，确保跨 lang 仅在同 lang 没结果时显现）
-   ├─ same_subtree_boost：current_page_id 的祖先链命中本 chunk 所属页：+0.20
-   └─ nav_index_boost：+0.10 × (1 / log(nav_index + 2))
-      （nav_index 即"编排权重"近似；v1 不依赖 anydocs 加字段）
+   ├─ same_subtree_boost：chunk 所属页与 current_page_id **共享 subtree_root**：+0.20
+   │  （v1 实现取 §12 一致的"同子树"语义而非严格"祖先链命中"——同子树兄弟
+   │   也吃 boost，与 PRD §4.2 "结构坐标上下文"的「同子树为主」初衷一致；
+   │   严格祖先版本会漏掉同级页面，可读性 / 召回都不利。current_page_id 为
+   │   空或解析失败 → 0）
+   ├─ nav_index_boost：+0.10 × (1 / log(nav_index + 2))
+   │  （nav_index 即"编排权重"近似；v1 不依赖 anydocs 加字段）
+   └─ title_match_boost：query 含 chunk 所在页的 title（≥5 字符、ASCII 走
+      词边界 / CJK 走子串）：+0.30
+      （2026-05-08 加入；作者写下的 page title 是显式编排意图，query 命中
+       title 视作强指针。**影子抑制**：若另一被命中页的 title 严格包含本
+       title（如"Termux 上安装" 严格包含 "安装"），则丢掉短 title 的命中
+       避免双倍 boost；详 rerank.ts:computeTitleMatches。属 PRD §4.1 编排
+       意图先验的实战补丁，不在 v1.5 nav.weight / page.priority 路线上）
 
 5. 子树聚合 + lang 路径判定（在重排后 top-10 上）
    先按 lang 切片：top10_same_lang = top10 ∩ {chunks.lang == query_lang}
@@ -1271,7 +1283,7 @@ Baseline: 2026-04-25 (R@5=0.74, Cit=0.68, Ans=0.62)
 **字段说明**（v1 实施细节）：
 
 - `answer.kind`：`'answer' | 'clarify' | 'error'`——所有出口都落 runs（错误 / 反问 / 答案），analyze 维度 1 / 3 依赖此区分。
-- `answer.confidence`：v1 用 rerank 后 `top_final_score` 作为代理；待 v1.5 引入 reranker model 后替换为模型分。
+- `answer.confidence`：归一化代理 `top1.final_score / sum(top-5.final_score)`，∈ [0, 1]；只有一个候选时为 1，无候选为 0。与 `top_final_score`（原始 RRF×boost 分，仅 trace 内部用）刻意区分——归一版本对项目规模不敏感，是 analyze D1 `confidenceFloor` 的判定依据。v1.5 引入 reranker model 后会替换为模型分。
 - `answer.tokens_in / tokens_out`：v1 LLM 接口未暴露，写 `null`；后续 LLM 接口扩展时填充。schema 不变。
 - `answer.error_code`：仅 `kind='error'` 时非 null（如 `invalid_scope` / `invalid_question`）。
 - `source`：`"reader" | "console"`（2026-05-11 加入）。Reader 直调 `/v1/ask` 时填 `"reader"`；dev console persist 切换开启时填 `"console"`。**旧 jsonl 行缺此字段 → 读取时视为 `"reader"`**（`runs/types.ts:runSource()` 兜底）。`analyze` / `golden generate --from runs` 默认排除 `"console"`，`--include-console` 显式纳入。详 §17.3.3 / §17.8。
@@ -1556,7 +1568,7 @@ ProcessRegistry {
 6. history 表：列所有 eval 报告 + 每行 pin 按钮 + sparkline（`▁▂▄▅▆▇` unicode block，趋势 ≥3 报告时显示）
 7. **Golden Workshop**（2026-05-12 加入；PRD §13.6 #4 锁解除）：
    - candidate jsonl 状态 (pending/approved/rejected/malformed) 计数行
-   - "+ from structure" / "+ from runs" 按钮触发 `goldenGenerate()`
+   - "+ from structure" / "+ from runs" 按钮触发 `goldenGenerate()`，**默认开启 LLM 改写**；无 Anthropic 凭据或调用失败时自动降级为模板原句（`fallbackOnLlmError`），与 CLI 的 "report don't fudge" 严格语义有意区分——console 是一键工具，作者更需要"按下就出候选"
    - pending 候选列表（前 50 条）：每行 template_id badge + query + lang/must_cite_pages 元数据 + approve/reject 按钮
    - flush 按钮：等价 `golden review`，approved 移入 cases.jsonl，reviewer="console"
 
