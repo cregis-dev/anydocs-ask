@@ -808,6 +808,7 @@ if ($('btn-start-ask-secondary')) $('btn-start-ask-secondary').addEventListener(
   const elStatus = $('gw-edit-status');
   const btnSave = $('gw-edit-save');
   const btnCancel = $('gw-edit-cancel');
+  const btnClose = $('gw-edit-close');
 
   let currentId = null;
 
@@ -852,6 +853,7 @@ if ($('btn-start-ask-secondary')) $('btn-start-ask-secondary').addEventListener(
   });
 
   if (btnCancel) btnCancel.addEventListener('click', close);
+  if (btnClose) btnClose.addEventListener('click', close);
   backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && backdrop.classList.contains('show')) close();

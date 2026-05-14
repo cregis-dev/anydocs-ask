@@ -532,74 +532,65 @@ function tabSwitchScript(): Html {
   `)}</script>`;
 }
 
-// Edit-candidate modal. Read-only fields (template_id, created_by) show in
-// the header for context; the rest are editable and POSTed as a patch by
-// bindGwEdit in project.ts BOOTSTRAP_SCRIPT.
+// Edit-candidate modal — uses the shared .modal component (layout.ts).
+// Read-only fields (template_id, created_by) show for context; the rest are
+// editable and POSTed as a patch by bindGwEdit in project.ts BOOTSTRAP_SCRIPT,
+// which keys off the gw-edit-* element IDs and toggles .show on the mask.
 function editModal(): Html {
   return html`
-    <div class="gw-modal-backdrop" id="gw-edit-backdrop" role="dialog" aria-modal="true" aria-hidden="true">
-      <div class="gw-modal">
-        <h3>Edit candidate <span class="ro" id="gw-edit-id" style="margin-left: 8px;"></span></h3>
-        <div class="body">
-          <div class="row"><label>template_id</label><span class="ro" id="gw-edit-template"></span></div>
-          <div class="row"><label>created_by</label><span class="ro" id="gw-edit-created-by"></span></div>
-          <div class="row">
-            <label>query *</label>
-            <textarea id="gw-edit-query" class="textarea" rows="2" style="min-height: 0;"></textarea>
-          </div>
-          <div class="row">
-            <label>lang</label>
-            <select id="gw-edit-lang" class="select">
-              <option value="zh">zh</option>
-              <option value="en">en</option>
-            </select>
-          </div>
-          <div class="row">
-            <label>context_pageId</label>
-            <input id="gw-edit-context" class="input" type="text" placeholder="(none)" />
-          </div>
-          <div class="row">
-            <label>filters.audience</label>
-            <input id="gw-edit-audience" class="input" type="text" placeholder="(none)" />
-          </div>
-          <div class="row">
-            <label>filters.version</label>
-            <input id="gw-edit-version" class="input" type="text" placeholder="(none)" />
-          </div>
-          <div class="row">
-            <label>tags</label>
-            <input id="gw-edit-tags" class="input" type="text" placeholder="comma-separated" />
-          </div>
-          <div class="row">
-            <label>must_cite_pages</label>
-            <textarea id="gw-edit-mustcite" class="textarea mono" rows="2" placeholder="comma-separated page slugs" style="min-height: 0;"></textarea>
-          </div>
-          <div class="row">
-            <label>must_contain</label>
-            <textarea id="gw-edit-mustcontain" class="textarea mono" rows="2" placeholder="comma-separated substrings" style="min-height: 0;"></textarea>
-          </div>
-          <div class="row">
-            <label>forbid_contain</label>
-            <textarea id="gw-edit-forbid" class="textarea mono" rows="2" placeholder="comma-separated substrings" style="min-height: 0;"></textarea>
-          </div>
-          <div class="row">
-            <label>note</label>
-            <textarea id="gw-edit-note" class="textarea" rows="2" style="min-height: 0;"></textarea>
+    <div class="modal-mask" id="gw-edit-backdrop" role="dialog" aria-modal="true" aria-labelledby="gw-edit-title" aria-hidden="true">
+      <div class="modal">
+        <header class="modal-hd">
+          <h2 id="gw-edit-title">Edit candidate</h2>
+          <span class="modal-sub" id="gw-edit-id"></span>
+          <button type="button" class="icon-btn x" id="gw-edit-close" aria-label="close"><svg><use href="#i-x"/></svg></button>
+        </header>
+        <div class="modal-bd">
+          <div class="form-grid">
+            <div class="lab">template_id</div>
+            <div class="val"><div class="ro" id="gw-edit-template"></div></div>
+            <div class="lab">created_by</div>
+            <div class="val"><div class="ro" id="gw-edit-created-by"></div></div>
+            <div class="lab">query<span class="req">*</span></div>
+            <div class="val"><textarea class="textarea" id="gw-edit-query"></textarea></div>
+            <div class="lab">lang</div>
+            <div class="val">
+              <select class="select" id="gw-edit-lang">
+                <option value="zh">zh</option>
+                <option value="en">en</option>
+              </select>
+            </div>
+            <div class="lab">context_pageId</div>
+            <div class="val"><input class="input" id="gw-edit-context" type="text" placeholder="(none)" /></div>
+            <div class="lab">filters.audience</div>
+            <div class="val"><input class="input" id="gw-edit-audience" type="text" placeholder="(none)" /></div>
+            <div class="lab">filters.version</div>
+            <div class="val"><input class="input" id="gw-edit-version" type="text" placeholder="(none)" /></div>
+            <div class="lab">tags</div>
+            <div class="val"><input class="input" id="gw-edit-tags" type="text" placeholder="comma-separated" /></div>
+            <div class="lab">must_cite_pages</div>
+            <div class="val"><textarea class="textarea" id="gw-edit-mustcite" placeholder="comma-separated page slugs"></textarea></div>
+            <div class="lab">must_contain</div>
+            <div class="val"><textarea class="textarea" id="gw-edit-mustcontain" placeholder="comma-separated substrings"></textarea></div>
+            <div class="lab">forbid_contain</div>
+            <div class="val"><textarea class="textarea" id="gw-edit-forbid" placeholder="comma-separated substrings"></textarea></div>
+            <div class="lab">note</div>
+            <div class="val"><textarea class="textarea" id="gw-edit-note" placeholder="why is this case important? (optional)"></textarea></div>
           </div>
         </div>
-        <div class="foot">
-          <span class="status" id="gw-edit-status"></span>
-          <button type="button" id="gw-edit-cancel" class="btn">cancel</button>
-          <button type="button" id="gw-edit-save" class="btn primary">save</button>
-        </div>
+        <footer class="modal-ft">
+          <span class="status" id="gw-edit-status" style="margin-right: auto;"></span>
+          <button type="button" class="btn" id="gw-edit-cancel">cancel</button>
+          <button type="button" class="btn primary" id="gw-edit-save">save</button>
+        </footer>
       </div>
     </div>
   `;
 }
 
 // Scoped styles for the golden-workshop additions merged from main: the
-// streaming generate log, the pending-review pager, and the edit modal.
-// These cohabit with the design-system tokens in layout.ts BASE_CSS.
+// streaming generate log and the pending-review pager. The edit modal uses
+// the shared .modal component in layout.ts BASE_CSS.
 function gwExtraStyles(): Html {
   return html`<style>${raw(`
     .gw-gen-log {
@@ -619,33 +610,5 @@ function gwExtraStyles(): Html {
       border-top: 1px solid var(--bd-soft);
     }
     .gw-pager .info { color: var(--fg-mute); font-family: var(--font-mono); }
-    .gw-modal-backdrop {
-      position: fixed; inset: 0; background: rgba(20,20,18,.36);
-      display: none; z-index: 100; align-items: center; justify-content: center;
-      padding: var(--s-5);
-    }
-    .gw-modal-backdrop.show { display: flex; }
-    .gw-modal {
-      background: var(--bg-elev); border: 1px solid var(--bd);
-      border-radius: var(--r-5); box-shadow: var(--sh-pop);
-      width: 100%; max-width: 640px; max-height: calc(100vh - 40px);
-      display: flex; flex-direction: column;
-    }
-    .gw-modal h3 {
-      margin: 0; padding: var(--s-4) var(--s-5);
-      border-bottom: 1px solid var(--bd-soft); font-size: var(--t-15); font-weight: 600;
-    }
-    .gw-modal .body { padding: var(--s-4) var(--s-5); overflow-y: auto; }
-    .gw-modal .row {
-      display: grid; grid-template-columns: 130px 1fr;
-      gap: var(--s-3); align-items: baseline; padding: 6px 0;
-    }
-    .gw-modal .row label { font-size: var(--t-12); color: var(--fg-soft); }
-    .gw-modal .row .ro { color: var(--fg-mute); font-family: var(--font-mono); font-size: var(--t-12); }
-    .gw-modal .foot {
-      padding: var(--s-3) var(--s-5); border-top: 1px solid var(--bd-soft);
-      display: flex; gap: var(--s-2); justify-content: flex-end; align-items: center;
-    }
-    .gw-modal .foot .status { flex: 1; }
   `)}</style>`;
 }
