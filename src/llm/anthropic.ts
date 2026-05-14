@@ -73,12 +73,11 @@ export class AnthropicLLM implements LLM {
         ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`AnthropicLLM request failed (model=${this.model}): ${msg}`);
+      throw new Error(`AnthropicLLM request failed (model=${this.model}): ${describeRequestError(err)}`);
     }
     if (!response || typeof response !== 'object') {
       throw new Error(
-        `AnthropicLLM: gateway returned non-object response (model=${this.model}): ${JSON.stringify(response)}`,
+        `AnthropicLLM: gateway returned non-object response (model=${this.model}): ${describeNonObject(response)}`,
       );
     }
     const text = extractText(response);
@@ -136,4 +135,60 @@ function extractText(resp: AnthropicMessageResponse): string {
     }
   }
   return parts.join('');
+}
+
+// ---------------------------------------------------------------------------
+// Error diagnostics
+//
+// Dogfood 2026-05-14 F3: `gateway returned non-object response ... undefined`
+// did not tell the author whether the gateway sent 401 / 502 / truncated JSON /
+// or empty body — debug required tcpdump. These helpers enrich the message at
+// the point of failure so analyze D1 / runs.jsonl carry the diagnostic verbatim.
+// ---------------------------------------------------------------------------
+
+/** Duck-typed view of the SDK's APIError. Avoids importing the SDK type
+ *  here — we only want to read fields when they happen to exist. */
+type APIErrorLike = {
+  status?: number;
+  type?: string | null;
+  error?: unknown;
+  requestID?: string | null;
+  message?: string;
+};
+
+function describeRequestError(err: unknown): string {
+  if (err === null || err === undefined) return String(err);
+  if (typeof err !== 'object') return String(err);
+  const e = err as APIErrorLike;
+  const parts: string[] = [];
+  if (typeof e.status === 'number') parts.push(`status=${e.status}`);
+  if (e.type) parts.push(`type=${e.type}`);
+  if (e.requestID) parts.push(`requestID=${e.requestID}`);
+  const msg = typeof e.message === 'string' ? e.message : (err instanceof Error ? err.message : '');
+  if (msg) parts.push(msg);
+  if (e.error !== undefined) {
+    const bodyStr = safeStringify(e.error);
+    if (bodyStr && bodyStr !== msg) parts.push(`body=${truncate(bodyStr, 240)}`);
+  }
+  return parts.length > 0 ? parts.join(' ') : (err instanceof Error ? err.message : String(err));
+}
+
+function describeNonObject(value: unknown): string {
+  if (value === undefined) return 'undefined';
+  if (value === null) return 'null';
+  const t = typeof value;
+  if (t === 'string') return `string=${truncate(JSON.stringify(value), 200)}`;
+  return `${t}=${truncate(safeStringify(value), 200)}`;
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max) + `… (+${s.length - max}B)`;
 }
