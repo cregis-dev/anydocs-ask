@@ -1186,6 +1186,18 @@ function renderAnswer(body) {
   }
 }
 
+// in_page_path is "<headingId>/p[N]" (section chunk) or "p[N]" (page-top
+// chunk). Pull the heading part so two citations from the same page render
+// with distinct section labels next to the title — otherwise two chunks of
+// one page look like a duplicate citation (dogfood 2026-05-14 F4). Bare
+// "p[N]" has no useful disambiguator, so return ''. lastIndexOf avoids a
+// regex (backslashes would need double-escaping inside BOOTSTRAP_SCRIPT).
+function citeSectionLabel(inPath) {
+  if (!inPath) return '';
+  const i = inPath.lastIndexOf('/p[');
+  return i > 0 ? inPath.slice(0, i) : '';
+}
+
 function renderCitations(body) {
   const list = $('ask-cite-list');
   const empty = $('ask-cite-empty');
@@ -1203,12 +1215,14 @@ function renderCitations(body) {
     div.className = 'cite-item';
     const crumb = Array.isArray(c.breadcrumb) ? c.breadcrumb.map((b) => b.title).join(' › ') : '';
     const inPath = c.in_page_path || '';
+    const section = citeSectionLabel(inPath);
     const langTag = c.source_lang && c.source_lang !== c.lang ? ' <span class="tag warn">cross-lang ' + escapeHtml(c.source_lang) + '→' + escapeHtml(c.lang) + '</span>' : '';
+    const titleSuffix = section ? ' <span style="font-weight:400; color:var(--muted);">· ' + escapeHtml(section) + '</span>' : '';
     div.innerHTML =
       '<span class="cite">' + escapeHtml(c.citation_id || '·') + '</span>' +
       '<div>' +
       '  <div class="meta mono">' + escapeHtml(c.page_id || '') + (inPath ? ' · ' + escapeHtml(inPath) : '') + langTag + '</div>' +
-      '  <div style="font-weight:600; margin-bottom:4px;">' + escapeHtml(c.title || '') + '</div>' +
+      '  <div style="font-weight:600; margin-bottom:4px;">' + escapeHtml(c.title || '') + titleSuffix + '</div>' +
       (crumb ? '<div class="muted" style="font-size:11.5px; margin-bottom:6px;">' + escapeHtml(crumb) + '</div>' : '') +
       '  <div class="snippet">' + escapeHtml(c.snippet || '') + '</div>' +
       '</div>';
