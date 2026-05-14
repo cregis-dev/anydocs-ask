@@ -129,7 +129,10 @@ export function createApp(deps: AppDeps): Hono {
 
     const body_out = dryRun ? { ...result, _dry_run: true as const } : result;
     if (result.type === 'error') {
-      return c.json(body_out, 400);
+      // llm_failed is an upstream/transient gateway problem — same family as
+      // llm_unavailable (503). Everything else is client-side validation (400).
+      const status = result.code === 'llm_failed' ? 503 : 400;
+      return c.json(body_out, status);
     }
     // Persist for feedback join (v1 doesn't dedupe; every call is its own row).
     // Skipped for dry_run — answer has no persistent identity in the cache.
