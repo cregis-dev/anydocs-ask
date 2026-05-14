@@ -2,8 +2,9 @@
 
 为 [anydocs](https://github.com/cregis-dev/anydocs) 项目提供的本地问答服务。读取 `pages/{lang}/*.json` 和 `navigation/{lang}.json`，向 Reader 站点返回带完整面包屑引用的结构化答案。
 
-> **v1 alpha（0.1.0-alpha.1）** — 索引、查询、HTTP 接口与评测闭环均已就绪。
-> 产品背景见 [`PRD.md`](./PRD.md)，集成细节见 [`ARCHITECTURE.md`](./ARCHITECTURE.md)。
+> **v1 alpha（0.1.0-alpha.2）** — 索引、查询、HTTP 接口与评测闭环均已就绪。
+> 速览 ask 操作 / 原理 / 测评 / 优化方向：[`docs/ask-overview.md`](./docs/ask-overview.md)。
+> 产品背景见 [`PRD.md`](./PRD.md)，集成细节见 [`ARCHITECTURE.md`](./ARCHITECTURE.md)，版本历史见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
 ---
 
