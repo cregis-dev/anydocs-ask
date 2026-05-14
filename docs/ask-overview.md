@@ -205,7 +205,7 @@ Console 体验台 persist 落的 runs 自带 `source=console`，`analyze` / `gol
 |---|---|---|
 | F1 `/v1/ask` LLM 抛错丢 run | ✅ PR #18 已合 | error path 现在 append `kind=error, code=llm_failed` |
 | F2 `golden generate --limit` lang 偏置 | ✅ PR #19 已合 | 按 `defaultLanguage` 优先 + 多 lang 轮询交错 |
-| F3 LLM gateway error message 留 `undefined` | 🔧 待修 | 加 `JSON.stringify(rawResponse).slice(0,200)` + status code |
+| F3 LLM gateway error message 留 `undefined` | ✅ PR #21 已合 | `AnthropicLLM` 错误现在带 status / type / requestID / body（截断 ~200B） |
 | F4 同页两 chunk citation 视觉重复 | 🔧 待修 | 把 `in_page_path` 拼到 title 同级 |
 | F5 Ask 卡停止态中英混排 | 🔧 待修 | IA cleanup 后统一回中文或英文 |
 | F6 analyze D1 在小项目上 9/9 命中召回失败 | 📋 观察 | confidence floor 待真实数据校准；不在 alpha.3 动 |
