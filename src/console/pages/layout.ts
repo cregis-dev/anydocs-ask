@@ -797,6 +797,7 @@ pre code { background: transparent; padding: 0; border: 0; }
   letter-spacing: .08em; text-transform: uppercase; color: var(--fg);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.drawer-sec-hd h3 .h3-sub { color: var(--fg-soft); font-weight: 500; }
 .drawer-sec-hd .tag { justify-self: end; white-space: nowrap; text-transform: none; letter-spacing: 0; }
 .drawer-sec-hd .path { grid-column: 1 / -1; font-family: var(--font-mono); font-size: 11px; color: var(--fg-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .drawer-sec dl { display: grid; grid-template-columns: minmax(140px, max-content) minmax(0, 1fr); gap: 6px var(--s-4); font-family: var(--font-mono); font-size: var(--t-12); margin: 0; }

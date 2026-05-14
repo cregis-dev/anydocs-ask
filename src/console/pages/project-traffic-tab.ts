@@ -34,6 +34,11 @@ export function renderTrafficTab(vm: TrafficTabViewModel): Html {
       `}
       ${showAnalyze ? analyzeCard(vm.projectName, vm.analyzeHistory, vm.latestAnalyzeBody) : ''}
     </div>
+    <div class="drawer-mask" id="tf-drawer-mask" hidden></div>
+    <aside class="drawer" id="tf-drawer" hidden role="dialog" aria-label="Run detail">
+      <div class="drawer-hd" id="tf-drawer-hd"></div>
+      <div class="drawer-bd" id="tf-drawer-bd"></div>
+    </aside>
     <script>${raw(`window.__TRAFFIC__ = ${JSON.stringify([...w.records].reverse())};`)}</script>
     <script type="module">${raw(TRAFFIC_SCRIPT)}</script>
   `;
@@ -199,7 +204,7 @@ function trafficRow(r: RunRecord, idx: number): Html {
   const src = runSource(r);
   const latencyText = a.latency_ms >= 1000 ? `${(a.latency_ms / 1000).toFixed(1)}s` : `${Math.round(a.latency_ms)}ms`;
   return html`
-    <tr class="expandable" data-idx="${idx}"
+    <tr class="clickable" data-idx="${idx}"
         data-kind="${a.kind}"
         data-conf="${a.confidence ?? -1}"
         data-source="${src}"
@@ -303,7 +308,7 @@ function applyFilter() {
   const k = $('tf-kind').value;
   const s = $('tf-source').value;
   const minC = parseFloat($('tf-conf').value);
-  for (const tr of tbody.querySelectorAll('tr.expandable')) {
+  for (const tr of tbody.querySelectorAll('tr.clickable')) {
     const trQ = tr.dataset.q || '';
     const trK = tr.dataset.kind || '';
     const trS = tr.dataset.source || '';
@@ -314,10 +319,6 @@ function applyFilter() {
     if (s && trS !== s) show = false;
     if (!isNaN(minC) && trC < minC) show = false;
     tr.style.display = show ? '' : 'none';
-    const next = tr.nextElementSibling;
-    if (next && next.classList.contains('expanded')) {
-      next.style.display = show ? '' : 'none';
-    }
   }
 }
 ['tf-q', 'tf-kind', 'tf-source', 'tf-conf'].forEach((id) => {
@@ -326,89 +327,173 @@ function applyFilter() {
   if (el) el.addEventListener('change', applyFilter);
 });
 
-function detailHtml(r, idx) {
+function fmtLatency(ms) {
+  if (ms == null) return '—';
+  return ms >= 1000 ? (ms / 1000).toFixed(2) + 's' : Math.round(ms) + 'ms';
+}
+
+function drawerHeadHtml(r) {
+  const a = r.answer || {};
+  const src = r.source || 'reader';
+  const kindCls = a.kind === 'answer' ? 'ok' : a.kind === 'clarify' ? 'warn' : 'err';
+  return (
+    '<div style="display:flex; align-items:center; gap:var(--s-3); min-width:0;">' +
+      '<span class="tag">' + escapeHtml(src) + '</span>' +
+      '<span class="tag ' + kindCls + '">' + escapeHtml(a.kind || '—') + '</span>' +
+      '<h2 style="font-family:var(--font-mono); font-size:var(--t-13); font-weight:600;">run · ' +
+        escapeHtml(String(r.ts || '').replace('T', ' ').slice(0, 19)) + '</h2>' +
+    '</div>' +
+    '<button class="icon-btn" id="tf-drawer-close" title="close" aria-label="close"><svg><use href="#i-x"/></svg></button>'
+  );
+}
+
+function drawerSec(title, sub, body) {
+  return '<div class="drawer-sec"><div class="drawer-sec-hd"><h3>' + title +
+    (sub ? ' <span class="h3-sub">' + sub + '</span>' : '') + '</h3></div>' + body + '</div>';
+}
+
+function drawerBodyHtml(r) {
   const a = r.answer || {};
   const fused = (r.retrieval && r.retrieval.fused) || [];
-  let fusedTbl = '';
+  let out = '';
+
+  // QUESTION
+  out += drawerSec('QUESTION', r.context_pageId ? 'ctx ' + escapeHtml(r.context_pageId) : '',
+    '<div style="font-size:var(--t-15); line-height:1.5; color:var(--fg);">' + escapeHtml(r.query || '') + '</div>');
+
+  // METRICS — only total latency + confidence are recorded per run; the
+  // embed/retrieval/generate split isn't in the runs jsonl schema (ARCH §16.4).
+  out += drawerSec('METRICS', 'total ' + fmtLatency(a.latency_ms),
+    '<div class="kpis" style="grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--s-2);">' +
+      '<div class="kpi" style="padding:10px 12px;"><div class="k-lab">confidence</div>' +
+        '<div class="k-val" style="font-size:var(--t-18);">' + (a.confidence != null ? a.confidence.toFixed(2) : '—') + '</div></div>' +
+      '<div class="kpi" style="padding:10px 12px;"><div class="k-lab">latency</div>' +
+        '<div class="k-val" style="font-size:var(--t-18);">' + fmtLatency(a.latency_ms) + '</div></div>' +
+    '</div>');
+
+  // ANSWER + citations
+  const cits = Array.isArray(a.citations) ? a.citations : [];
+  let ansBody = '<div class="md" style="font-size:var(--t-13);">' +
+    (a.md ? marked.parse(a.md)
+          : '<p class="muted">' + (a.error_code ? 'error · ' + escapeHtml(a.error_code) : 'no answer body') + '</p>') +
+    '</div>';
+  if (cits.length > 0) {
+    ansBody += '<div style="margin-top:var(--s-3);">';
+    cits.forEach((c, i) => {
+      ansBody += '<div class="cit"><span class="ci-no"><span class="cite">' + (i + 1) + '</span></span>' +
+        '<div class="ci-bd"><div class="ci-ti">' + escapeHtml(c.page || '') + '</div>' +
+        (c.quote ? '<div class="ci-sn">' + escapeHtml(c.quote) + '</div>' : '') +
+        '</div></div>';
+    });
+    ansBody += '</div>';
+  }
+  out += drawerSec('ANSWER', cits.length > 0 ? '· ' + cits.length + ' citation' + (cits.length === 1 ? '' : 's') : '', ansBody);
+
+  // RETRIEVAL — fused trace (final / rrf / vec / bm25 / nav components)
+  let retBody;
   if (fused.length > 0) {
-    fusedTbl = '<table class="tbl" style="font-size:11.5px;"><thead><tr><th>page</th><th class="num">final</th><th class="num">rrf</th><th class="num">vec</th><th class="num">bm25</th><th class="num">nav</th></tr></thead><tbody>';
-    for (const f of fused.slice(0, 8)) {
-      fusedTbl += '<tr>' +
-        '<td>' + escapeHtml(f.page || '') + '</td>' +
+    retBody = '<table class="tbl" style="font-size:var(--t-12);"><thead><tr>' +
+      '<th>page · chunk</th><th class="num">final</th><th class="num">rrf</th>' +
+      '<th class="num">vec</th><th class="num">bm25</th><th class="num">nav</th></tr></thead><tbody>';
+    fused.forEach((f) => {
+      retBody += '<tr><td>' + escapeHtml(f.page || '') +
+        ' <span class="mono" style="color:var(--fg-mute);">#' + f.chunk_id + '</span></td>' +
         '<td class="num">' + (f.final_score != null ? f.final_score.toFixed(3) : '—') + '</td>' +
         '<td class="num">' + (f.rrf_score != null ? f.rrf_score.toFixed(3) : '—') + '</td>' +
         '<td class="num">' + (f.vec_rank != null ? f.vec_rank : '—') + '</td>' +
         '<td class="num">' + (f.bm25_rank != null ? f.bm25_rank : '—') + '</td>' +
-        '<td class="num">' + (f.nav_index != null ? f.nav_index : '—') + '</td>' +
-        '</tr>';
-    }
-    fusedTbl += '</tbody></table>';
-    if (fused.length > 8) {
-      fusedTbl += '<p class="muted" style="font-size:11px; margin-top:4px;">… ' + (fused.length - 8) + ' more</p>';
-    }
+        '<td class="num">' + (f.nav_index != null ? f.nav_index : '—') + '</td></tr>';
+    });
+    retBody += '</tbody></table>';
   } else {
-    fusedTbl = '<p class="muted" style="font-size:12px;">no fused trace</p>';
+    retBody = '<p class="muted" style="font-size:var(--t-12);">no fused retrieval trace</p>';
   }
+  const retSub = '· ' + fused.length + ' fused' +
+    (r.retrieval && r.retrieval.subtree_ask_triggered ? ' · subtree-ask' : '');
+  out += drawerSec('RETRIEVAL', retSub, retBody);
 
-  const meta = [
+  // CONFIG — the metadata actually carried on the run record
+  const cfg = [
     ['model', a.model],
     ['answer_id', a.answer_id],
     ['request_id', r.request_id],
+    ['session_id', r.session_id],
     ['tokens_in', a.tokens_in],
     ['tokens_out', a.tokens_out],
     ['error_code', a.error_code],
   ].filter((kv) => kv[1] != null);
-  const metaHtml = meta.map((kv) => '<dt>' + kv[0] + '</dt><dd class="mono">' + escapeHtml(String(kv[1])) + '</dd>').join('');
+  const cfgBody = '<dl>' + (cfg.length > 0
+    ? cfg.map((kv) => '<dt>' + kv[0] + '</dt><dd>' + escapeHtml(String(kv[1])) + '</dd>').join('')
+    : '<dd class="miss">no metadata</dd>') + '</dl>';
+  out += drawerSec('CONFIG', '', cfgBody);
 
-  const ansHtml = a.md ? marked.parse(a.md) : '<p class="muted">no answer body</p>';
-  const cits = Array.isArray(a.citations) ? a.citations : [];
-  const citsHtml = cits.length > 0
-    ? '<div class="muted" style="font-size:11.5px; margin-top:8px;">citations: ' + cits.map((c) => escapeHtml(c.page || '')).join(', ') + '</div>'
-    : '';
+  // ACTIONS
+  out += drawerSec('ACTIONS', '',
+    '<div style="display:flex; gap:var(--s-2); flex-wrap:wrap;">' +
+      '<button class="btn sm primary" data-reask-query="' + escapeHtml(r.query || '') + '">' +
+        '<svg><use href="#i-act"/></svg> re-ask in Ask</button>' +
+    '</div>');
 
-  return (
-    '<tr class="expanded" data-detail-for="' + idx + '">' +
-    '<td colspan="6" style="padding:0;">' +
-    '<div style="display:grid; grid-template-columns: 1fr 1fr; gap:var(--s-4); padding:var(--s-4) var(--s-5);">' +
-      '<div>' +
-        '<h4 style="font-size:11px; color:var(--fg-mute); text-transform:uppercase; letter-spacing:.05em; margin:0 0 var(--s-2);">retrieval · fused top ' + Math.min(fused.length, 8) + ' of ' + fused.length + '</h4>' +
-        fusedTbl +
-        '<h4 style="font-size:11px; color:var(--fg-mute); text-transform:uppercase; letter-spacing:.05em; margin:var(--s-3) 0 var(--s-2);">meta</h4>' +
-        '<dl class="kv">' + (metaHtml || '<dd class="muted">no metadata</dd>') + '</dl>' +
-        '<button class="btn sm primary" data-reask-query="' + escapeHtml(r.query || '') + '" style="margin-top:var(--s-2);">↩ re-ask in Ask</button>' +
-      '</div>' +
-      '<div>' +
-        '<h4 style="font-size:11px; color:var(--fg-mute); text-transform:uppercase; letter-spacing:.05em; margin:0 0 var(--s-2);">answer</h4>' +
-        '<div class="md">' + ansHtml + '</div>' +
-        citsHtml +
-      '</div>' +
-    '</div>' +
-    '</td></tr>'
-  );
+  return out;
+}
+
+function closeDrawer() {
+  const mask = $('tf-drawer-mask');
+  const drawer = $('tf-drawer');
+  if (mask) mask.hidden = true;
+  if (drawer) drawer.hidden = true;
+  document.body.style.overflow = '';
+  const tbody = $('tf-body');
+  const sel = tbody && tbody.querySelector('tr.sel');
+  if (sel) sel.classList.remove('sel');
+}
+
+function openDrawer(r, tr) {
+  const mask = $('tf-drawer-mask');
+  const drawer = $('tf-drawer');
+  const hd = $('tf-drawer-hd');
+  const bd = $('tf-drawer-bd');
+  if (!mask || !drawer || !hd || !bd) return;
+  const tbody = $('tf-body');
+  const prev = tbody && tbody.querySelector('tr.sel');
+  if (prev) prev.classList.remove('sel');
+  if (tr) tr.classList.add('sel');
+  hd.innerHTML = drawerHeadHtml(r);
+  bd.innerHTML = drawerBodyHtml(r);
+  bd.scrollTop = 0;
+  mask.hidden = false;
+  drawer.hidden = false;
+  document.body.style.overflow = 'hidden';
+  const closeBtn = $('tf-drawer-close');
+  if (closeBtn) closeBtn.addEventListener('click', closeDrawer);
+  const reask = bd.querySelector('[data-reask-query]');
+  if (reask) {
+    reask.addEventListener('click', () => {
+      window.dispatchEvent(new CustomEvent('console:reask', { detail: { query: reask.dataset.reaskQuery || '' } }));
+      closeDrawer();
+    });
+  }
 }
 
 function bindRowClicks() {
   const tbody = $('tf-body');
   if (!tbody) return;
   tbody.addEventListener('click', (e) => {
-    if (e.target && e.target.closest && e.target.closest('[data-reask-query]')) {
-      const t = e.target.closest('[data-reask-query]');
-      const q = t.dataset.reaskQuery || '';
-      window.dispatchEvent(new CustomEvent('console:reask', { detail: { query: q } }));
-      e.stopPropagation();
-      return;
-    }
-    const tr = e.target.closest('tr.expandable');
+    if (!e.target || !e.target.closest) return;
+    const tr = e.target.closest('tr.clickable');
     if (!tr) return;
-    const next = tr.nextElementSibling;
-    if (next && next.classList.contains('expanded')) {
-      next.remove();
-      return;
-    }
     const idx = Number(tr.dataset.idx);
     const r = records[idx];
     if (!r) return;
-    tr.insertAdjacentHTML('afterend', detailHtml(r, idx));
+    openDrawer(r, tr);
+  });
+  const mask = $('tf-drawer-mask');
+  if (mask) mask.addEventListener('click', closeDrawer);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const drawer = $('tf-drawer');
+      if (drawer && !drawer.hidden) closeDrawer();
+    }
   });
 }
 bindRowClicks();
