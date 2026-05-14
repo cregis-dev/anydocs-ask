@@ -210,6 +210,10 @@ test('GET /p/:name: stopped project shows start button enabled, stop disabled', 
     assert.match(body, /id="btn-start"(?![^>]*disabled)/);
     assert.match(body, /id="btn-stop"[^>]*disabled/);
     assert.match(body, /tag[^>]*>stopped/);
+    // Stopped-state Ask gate heading must be English to match the English
+    // body + button copy in the same card (dogfood 2026-05-14 F5 — the IA
+    // cleanup left "项目未启动" next to English copy).
+    assert.match(body, />Project not running</);
   } finally {
     await cleanup();
   }

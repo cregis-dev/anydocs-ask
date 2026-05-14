@@ -368,7 +368,7 @@ function askStartGate(): Html {
   return html`
     <div class="card" style="text-align: center; padding: 36px 24px;">
       <div style="font-size: 24px; line-height: 1; margin-bottom: 10px;">▶</div>
-      <h2 style="margin: 0 0 6px; font-size: 16px; text-transform: none; letter-spacing: 0; color: var(--fg);">项目未启动</h2>
+      <h2 style="margin: 0 0 6px; font-size: 16px; text-transform: none; letter-spacing: 0; color: var(--fg);">Project not running</h2>
       <p class="muted" style="font-size: 13px; max-width: 420px; margin: 0 auto 18px;">
         Start project to ask questions, run eval, and record traffic.
         First boot loads the embedding model and indexes pages — usually 5–30s.
