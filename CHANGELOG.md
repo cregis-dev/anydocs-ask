@@ -2,6 +2,38 @@
 
 `@anydocs/ask` 的所有重要变更均记录于此。格式大体遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循 semver 预发布语义（`0.1.0-alpha.N`）。
 
+## 0.1.0-alpha.3 — 2026-05-14
+
+补丁版本：修复一次完整 dogfood（`anydocs-user-manual`，76 页 zh-default 项目）暴露的 5 个问题。详见 [`docs/dogfood-2026-05-14.md`](./docs/dogfood-2026-05-14.md)。
+
+### 修复
+
+- **`/v1/ask` LLM 抛错时整条 run 丢失（F1）** — LLM 调用中途抛错（网关返回非对象 / 超时 / 上游故障）时，异常直接冒出 `askWithTrace` → Hono 返回 500 → `appendRun()` 永不执行，`runs.jsonl` 丢掉该行。这破坏了 runs.jsonl 作为完整审计日志的契约（ARCH §16.4），且 `analyze runs` D1/D2 看不到 LLM 间歇性失败。现在 LLM 调用包在 try/catch 中，抛错合成 `code='llm_failed'` 错误结果 + 已构建的部分检索 trace（fused / confidence），照常落 runs，HTTP 返回 503（与 `llm_unavailable` 同族）。（PR [#18](https://github.com/cregis-dev/anydocs-ask/pull/18)，`src/query/answer.ts` / `src/server/app.ts`）
+- **`golden generate --limit N` 的语言偏置（F2）** — generator 按 `navigationsByLang` 的 Map 枚举顺序逐语言展开后再 `slice`，en 恰好先入 Map → 在 zh-default 项目上 `--limit 30` 产出 30/30 全英文候选。现在 `loadProject()` 读取 `anydocs.config.json#defaultLanguage` 并暴露到 `LoadedProject`；generator 改为 per-lang 收集 + round-robin 交错，`defaultLanguage`（已知时）在每轮先行。`--limit 30` 在 zh-default 双语项目上从 0/30 zh 变为 15/30 zh。（PR [#19](https://github.com/cregis-dev/anydocs-ask/pull/19)，`src/anydocs/loader.ts` / `src/golden/generator.ts`）
+- **AnthropicLLM 错误信息不可定位（F3）** — `gateway returned non-object response (...): undefined` 无法区分 401 / 502 / 截断流 / 空 body。新增 `describeNonObject()`（显式 `undefined` / `null` / `string="..."` / `<type>=<json>`，超 ~200B 截断 + `(+NB)` 提示）与 `describeRequestError()`（鸭子类型读取 SDK APIError 的 `status` / `type` / `requestID` / `error` body / `message`，普通 Error 原样透传）。（PR [#21](https://github.com/cregis-dev/anydocs-ask/pull/21)，`src/llm/anthropic.ts`）
+- **同页多 chunk 的 citation 视觉重复（F4）** — 检索召回同一页的两个 chunk 时，Ask citations 面板渲染出标题 + 面包屑完全一致的两行，唯一区别 `in_page_path` 藏在标题上方的小号 mono 行里。`renderCitations()` 现在从 `in_page_path`（`<headingId>/p[N]`）提取 section 标签，以次级字重附在标题后：`安装 · 验证-cli-可用` / `安装 · 创建一个文档项目`。（PR [#23](https://github.com/cregis-dev/anydocs-ask/pull/23)，`src/console/pages/project.ts`）
+- **Ask 卡停止态标题中英混排（F5）** — PR #13 的 IA 清理把 next-action banner 与 Ask 卡的 body/按钮改为英文，却漏了停止态标题 `项目未启动`。改为 `Project not running`，与同卡内英文文案及 banner 一致。（PR [#24](https://github.com/cregis-dev/anydocs-ask/pull/24)，`src/console/pages/project.ts`）
+
+### 文档
+
+- **`docs/dogfood-2026-05-14.md`** — 完整 dogfood 走查报告：workspace add → start → 首问 → golden → eval → 真实查询 → analyze → 子进程生命周期；6 个 finding + 1 个观察项，含计时表与「已验证无问题」清单。（PR [#20](https://github.com/cregis-dev/anydocs-ask/pull/20) / [#25](https://github.com/cregis-dev/anydocs-ask/pull/25)）
+- **`docs/ask-overview.md`** — 新增 ask 操作 / 原理 / 测评 / 优化方向速览 hub；同步修正 ARCHITECTURE.md 的结构重排公式（补 `title_match_boost`、`same_subtree_boost` 同子树语义）与 `answer.confidence` 归一化代理定义的文档漂移。（PR [#22](https://github.com/cregis-dev/anydocs-ask/pull/22)）
+
+### 测试
+
+- 净增 ~16 个用例：`tests/runs-server.test.ts`（LLM 抛错 → 503 + 落 error row + 部分 trace）、`tests/loader.test.ts`（新文件，`defaultLanguage` 读取的 5 种情况）、`tests/golden-generator.test.ts`（round-robin / defaultLanguage 先行 / fallback）、`tests/anthropic.test.ts`（新文件，6 个错误信息用例）、`tests/console-server.test.ts`（BOOTSTRAP_SCRIPT 解析守卫 + citeSectionLabel + 英文标题）。
+
+### 未变更
+
+- HTTP API 协议与 CLI 子命令签名向后兼容。`/v1/ask` 新增的 `llm_failed` 错误码是增量（既有 `invalid_question` / `invalid_scope` / `llm_unavailable` / `warming` 均不变）。
+
+### 已知遗留（observe-only，未在本版处理）
+
+- **F6** — `analyze runs` D1 在 76 页小项目上 9/9 命中召回失败，`confidenceFloor` 在小流量下可能过敏；待真实项目数据攒够后再校准。
+- **O1** — LLM 单次调用 timeout ~30s，fallback 路径触发偏慢；考虑加可配置的 `singleCallTimeoutMs`。
+
+---
+
 ## 0.1.0-alpha.2 — 2026-05-14
 
 补丁 + 增量：Web 控制台从「能跑」推到「日常 dogfood 入口」，工作区注册表替代 symlink，新增 CI 工作流。
