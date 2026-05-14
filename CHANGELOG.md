@@ -2,6 +2,46 @@
 
 `@anydocs/ask` 的所有重要变更均记录于此。格式大体遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循 semver 预发布语义（`0.1.0-alpha.N`）。
 
+## 0.1.0-alpha.2 — 2026-05-14
+
+补丁 + 增量：Web 控制台从「能跑」推到「日常 dogfood 入口」，工作区注册表替代 symlink，新增 CI 工作流。
+
+### 新增
+
+- **`workspace add` / `workspace rm` + `projects.json` 注册表** — 替代 `ln -s` 注册项目源码；裸名解析（`anydocs-ask serve my-docs`）先查注册表，再回落路径解析。Web 控制台首页常驻 **Add Project** 表单，提交后写入 `<workspace>/projects.json` 并自动刷新。（PR [#9](https://github.com/cregis-dev/anydocs-ask/pull/9)，`src/workspace.ts` / `src/commands/workspace.ts` / `src/console/server.ts` / `src/console/pages/home.ts`）
+- **`workspace init` 写入 `.env` 凭证模板** — `~/anydocs-ask-runtime/.env` 自动生成，提示 (A) `ANTHROPIC_API_KEY` 或 (B) `ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL` 两种写法；新用户不再需要去仓库根目录翻找 `.env.example`。（PR [#9](https://github.com/cregis-dev/anydocs-ask/pull/9)）
+- **`.env` 加载链 + 自定义 dotenv 解析** — 新优先级 `<projectRoot>/.env > <workspace>/.env > shell exports`，并替换 `process.loadEnvFile()` 以处理两种实际场景：(a) 全局 shell-rc 中的 `export ANTHROPIC_API_KEY=` 空字符串被视作「已设」而忽略 `.env`，(b) 其他工具（如 Claude Code）的 `ANTHROPIC_BASE_URL` 覆盖 workspace 内的网关配置。`console` 命令分支此前 return 太早未触发加载，一并修复。（PR [#13](https://github.com/cregis-dev/anydocs-ask/pull/13)，`src/cli.ts`）
+- **Console: Eval tab 结构化重排（IA cleanup）** — Run eval 按钮上移至 Workshop 之前；合并「Golden 题集」+「Golden Workshop」为单卡 + Approved / Pending review 子标签（默认 Pending）；候选行布局修复（template_id badge 不再溢出覆盖问题标题）；Ask 卡停止态用「▶ Start project」门替代失能 textarea + 按钮；Traffic tab 零运行时改为 dogfood 引导空态；next-action banner 全部改写为 plain English copy。（PR [#13](https://github.com/cregis-dev/anydocs-ask/pull/13)）
+- **Console: Golden generate 流式进度 + 默认 LLM rewrite** — 新 `POST /api/projects/:name/golden/generate/stream` 端点输出 NDJSON（`{type:"log",line}` × N + 终止 `{type:"result",...}`）。Console 端默认 `llmRewrite=true` + `fallbackOnLlmError=true`：无凭据 / LLM 失败自动降级为模板候选而非 exit 1，保证一键按钮可用；CLI 保持严格语义（PRD §12.9 验收 #7）。Workshop 卡新增实时 `<pre>` 日志框 + 跑表计时。Actionable error（候选已存在、窗口内无 runs、零候选）通过 reporter 同时回 UI 与 stderr。（PR [#14](https://github.com/cregis-dev/anydocs-ask/pull/14)，`src/console/server.ts` / `src/console/ops.ts` / `src/commands/golden.ts` / `src/golden/llm-rewrite.ts`）
+- **Console: Golden Workshop 候选生成上限 / 客户端分页 / 行内编辑模态框** — 「+ from structure」加默认 50（1–500）的 limit 输入；Pending 列表改为服务端全量渲染 + 客户端 20 条/页分页，当前页持久化到 `location.hash`（`#eval?gp=3`）；新增 Edit 模态框直接改 query / lang / context_pageId / filters / tags / expected.* / note，省去下钻 jsonl 编辑器。新增 `POST /api/projects/:name/golden/candidate/update` 端点 + `updateCandidate()` helper。（PR [#16](https://github.com/cregis-dev/anydocs-ask/pull/16)，`src/console/golden-workshop-state.ts` / `src/console/pages/project-eval-tab.ts`）
+- **GitHub Actions CI 工作流** — push 到 main 与对 main 的 PR 触发 typecheck / test / build，矩阵覆盖 Node 20 + 22；PR 重提自动取消旧 run（concurrency group）。`packageManager` 字段作为 pnpm 版本单一来源。（PR [#15](https://github.com/cregis-dev/anydocs-ask/pull/15)，`.github/workflows/ci.yml`）
+- **`docs/console-redesign-brief.md`** — 411 行控制台视觉/美学重做交付件，覆盖产品上下文、目标用户、25 个 mockup 状态清单、硬技术约束（无构建链、系统字体、内联 SVG）、可复用组件清单与文案准则。（PR [#13](https://github.com/cregis-dev/anydocs-ask/pull/13)）
+- **`docs/web-console-usage-guide.md`** — Web 控制台使用指南首版；同步将 README / ARCH 中所有面向作者的描述中文化。
+
+### 修复
+
+- **`fix(console)`: BOOTSTRAP_SCRIPT 模板字面量 `\n` 转义** — `project.ts` 内嵌 `<script type="module">` 来自 TS 模板字面量，`'\n'` 被展开为真实换行导致渲染出的 JS 含未闭合单引号串（`Invalid or unexpected token`），整个模块解析失败 → Eval / Ask / 生命周期按钮全部失效（含 `?autostart=1`）。两处占位转义后恢复。（PR [#16](https://github.com/cregis-dev/anydocs-ask/pull/16)，`src/console/pages/project.ts`）
+- **`fix(embedding)`: warmUp 增加 `allowRemoteModels` 保障与失败诊断日志** — 首次运行下载 BGE-M3 失败时给出可定位的错误来源，而非静默卡死。（PR [#12](https://github.com/cregis-dev/anydocs-ask/pull/12)）
+- **`fix(console)`: 移除过时的 `projects/` 目录检查** — 配合 `projects.json` 注册表迁移，去除冗余存在性校验。（PR [#11](https://github.com/cregis-dev/anydocs-ask/pull/11)）
+
+### 文档
+
+- README：新用户引导重写（startup 简明且正确）；`<projectRoot>` 两种写法表（裸名 vs 路径）；控制台端口范围说明（4101–4199 保留给子进程，控制台自身落该范围之外）；首次 LLM 候选生成 30–90s 耗时提示。
+- ARCHITECTURE §17.5：文档化 Console 端 LLM 自动降级语义。
+- 全面中文化面向作者的文档表述。
+
+### 测试
+
+- 5 个新增 console 流式 / golden 命令回归用例（`tests/console-server.test.ts` / `tests/golden-cmd.test.ts`），与既有 384 个用例并行通过。
+- `tests/workspace.test.ts` 新增 7 个 `projects.json` 注册表专项用例。
+- `tests/next-action.test.ts` 校对新 banner copy。
+
+### 未变更
+
+- HTTP API 协议（`/v1/ask` / `/v1/health` / `/v1/index/status` / `/v1/ask/feedback`）与 CLI 子命令签名向后兼容；CLI `golden generate` 行为保持严格语义（仅 console 端开启自动降级）。
+
+---
+
 ## 0.1.0-alpha.1 — 2026-05-11
 
 补丁版本：修复启动评测中发现的若干 bug，并改善文档。
