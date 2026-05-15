@@ -12,7 +12,7 @@
  * eval/analyze/golden triggers, reports/runs viewers.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { Hono } from 'hono';
@@ -217,13 +217,82 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     return c.json({ ok: true, name, path: expandedPath });
   });
 
+  // DELETE /api/projects/:name?purge_state=true&force_stop=true
+  //   purge_state (default true): also rm -rf the per-project state dir
+  //     (<workspace>/state/<projectId>/) — index DB, eval reports, runs.
+  //     Source markdown files at the project's path are NEVER touched.
+  //   force_stop (default false): if the child runtime is live, send SIGTERM
+  //     and continue. Without this flag, removing a running project returns
+  //     409 so the UI can prompt the user before terminating live traffic.
   app.delete('/api/projects/:name', (c) => {
     const name = c.req.param('name');
+    const purgeState = c.req.query('purge_state') !== 'false'; // default true
+    const forceStop = c.req.query('force_stop') === 'true';
+
+    // Capture the projectId BEFORE removing the registry entry — once it's
+    // gone we can't resolve the state root (registry holds the path; state
+    // root is derived from <projectRoot>/anydocs.config.json's projectId).
+    const projects = scanProjects(deps.workspacePath);
+    const project = projects.find((p) => p.name === name) ?? null;
+    const port = deps.registry.getPort(name);
+    const wasRunning = port !== null;
+
+    if (wasRunning && !forceStop) {
+      return c.json(
+        {
+          ok: false,
+          error: `'${name}' is running on :${port}; pass force_stop=true to terminate first`,
+          running: true,
+          port,
+        },
+        409,
+      );
+    }
+
+    if (wasRunning) {
+      deps.registry.stop(name);
+    }
+
     const removed = removeFromProjectRegistry(deps.workspacePath, name);
     if (!removed) {
       return c.json({ ok: false, error: `'${name}' not found in registry` }, 404);
     }
-    return c.json({ ok: true, name });
+
+    let stateRemoved = false;
+    let stateRoot: string | null = null;
+    if (purgeState && project?.valid && project.projectId) {
+      stateRoot = resolveStateRoot(deps.workspacePath, project.projectId);
+      if (existsSync(stateRoot)) {
+        try {
+          rmSync(stateRoot, { recursive: true, force: true });
+          stateRemoved = true;
+        } catch (err) {
+          // Registry entry is already gone; surface the partial failure but
+          // don't 500 — the user's intent ("remove from console") succeeded.
+          return c.json(
+            {
+              ok: true,
+              name,
+              registryRemoved: true,
+              stateRemoved: false,
+              stoppedFirst: wasRunning,
+              warn: `state dir kept (could not delete ${stateRoot}: ${(err as Error).message})`,
+            },
+            200,
+          );
+        }
+      }
+    }
+
+    return c.json({
+      ok: true,
+      name,
+      registryRemoved: true,
+      stateRemoved,
+      stateRoot,
+      stoppedFirst: wasRunning,
+      purgeRequested: purgeState,
+    });
   });
 
   // -----------------------------------------------------------------------

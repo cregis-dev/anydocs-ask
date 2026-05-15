@@ -156,6 +156,9 @@ const ICON_SPRITE = `<svg xmlns="http://www.w3.org/2000/svg" style="display:none
   <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5" y="5" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5" fill="none" stroke="currentColor" stroke-width="1.4"/></symbol>
   <symbol id="i-pin" viewBox="0 0 16 16"><path d="M9.5 1.5 14.5 6.5m-7 .5L4 11l-2 3 3-2 3.5-3.5M5.5 4.5l6 6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-pin-f" viewBox="0 0 16 16"><path d="m10 1.5 4.5 4.5L11 7.5l-1 3-4-4 3-1L10 1.5ZM6 10 2 14" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 16 16"><path d="M3 4.5h10M6.5 4.5v-1A1 1 0 0 1 7.5 2.5h1a1 1 0 0 1 1 1v1M4.5 4.5l.6 8.2a1 1 0 0 0 1 .8h3.8a1 1 0 0 0 1-.8l.6-8.2M6.8 7v4M9.2 7v4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-kebab" viewBox="0 0 16 16"><circle cx="8" cy="3.5" r="1.2" fill="currentColor"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/><circle cx="8" cy="12.5" r="1.2" fill="currentColor"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 16 16"><path d="M11 2.5 13.5 5 5.5 13H3v-2.5l8-8Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M10 3.5 12.5 6" fill="none" stroke="currentColor" stroke-width="1.3"/></symbol>
 </svg>`;
 
 // ---------------------------------------------------------------------------
@@ -250,6 +253,11 @@ const BASE_CSS = `
 
 /* reset ------------------------------------------------------------ */
 *, *::before, *::after { box-sizing: border-box; }
+/* Universal hide via [hidden] — author rules like .banner { display: flex }
+ * otherwise override the UA-default [hidden] { display: none }, leaving
+ * elements visible despite their hidden attribute. !important is justified
+ * because [hidden] is meant to be an absolute "hide me" signal. */
+[hidden] { display: none !important; }
 html, body { margin: 0; padding: 0; }
 body {
   background: var(--bg); color: var(--fg);
@@ -674,6 +682,58 @@ pre code { background: transparent; padding: 0; border: 0; }
 .proj-card.invalid .pc-name { color: var(--fg-soft); }
 .proj-card.run { border-left: 3px solid var(--run); }
 
+/* hover-revealed kebab on each project card */
+.proj-card-wrap { position: relative; min-width: 0; }
+.proj-card-wrap .pc-menu {
+  position: absolute; top: 8px; right: 8px;
+  width: 26px; height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: 1px solid transparent;
+  border-radius: var(--r-3); color: var(--fg-mute); cursor: pointer;
+  opacity: 0;
+  transition: opacity .12s, background .12s, color .12s, border-color .12s;
+  z-index: 2;
+}
+.proj-card-wrap .pc-menu svg { width: 14px; height: 14px; }
+.proj-card-wrap:hover .pc-menu,
+.proj-card-wrap:focus-within .pc-menu,
+.proj-card-wrap .pc-menu.open { opacity: 1; }
+.proj-card-wrap .pc-menu:hover,
+.proj-card-wrap .pc-menu.open {
+  background: var(--bg-elev); border-color: var(--bd);
+  color: var(--fg); box-shadow: var(--sh-1);
+}
+.proj-card-wrap .proj-card .pc-name { padding-right: 28px; }
+
+/* popover menu (used for card actions; reusable) */
+.menu {
+  position: absolute; min-width: 220px;
+  background: var(--bg-elev); border: 1px solid var(--bd);
+  border-radius: var(--r-4); box-shadow: var(--sh-pop);
+  padding: 4px; z-index: 30;
+}
+.menu .menu-item {
+  display: flex; align-items: center; gap: var(--s-2);
+  width: 100%; padding: 7px 10px;
+  background: transparent; border: 0; border-radius: var(--r-3);
+  font-size: var(--t-13); color: var(--fg);
+  text-align: left; cursor: pointer; font-family: var(--font-sans);
+  text-decoration: none;
+}
+.menu .menu-item:hover { background: var(--bg-soft); text-decoration: none; }
+.menu .menu-item svg { width: 14px; height: 14px; color: var(--fg-soft); flex-shrink: 0; }
+.menu .menu-item .kbd-key { margin-left: auto; }
+.menu .menu-item.danger { color: var(--err); }
+.menu .menu-item.danger svg { color: var(--err); }
+.menu .menu-item.danger:hover { background: var(--err-soft); }
+.menu .menu-item[disabled] { color: var(--fg-mute); pointer-events: none; }
+.menu .menu-item[disabled] svg { color: var(--fg-mute); }
+.menu hr.menu-sep { margin: 4px 2px; border-top: 1px solid var(--bd-soft); }
+.menu .menu-lab {
+  padding: 6px 10px 2px; font-size: 11px; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--fg-mute);
+}
+
 .add-card {
   display: flex; flex-direction: column; gap: var(--s-3);
   padding: var(--s-4); background: var(--bg-elev);
@@ -853,6 +913,64 @@ pre code { background: transparent; padding: 0; border: 0; }
   padding: var(--s-3) var(--s-5);
   border-top: 1px solid var(--bd); background: var(--bg-elev);
 }
+
+/* danger modal — subtle red top accent + summary card --------- */
+.modal.danger { border-color: color-mix(in srgb, var(--err) 35%, var(--bd)); }
+.modal.danger .modal-hd {
+  background: color-mix(in srgb, var(--err-soft) 55%, var(--bg-elev));
+  border-bottom-color: color-mix(in srgb, var(--err) 25%, var(--bd));
+}
+.modal.danger .modal-hd .b-ico {
+  width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--err) 20%, transparent);
+  color: var(--err); border-radius: 50%;
+}
+.modal.danger .modal-hd .b-ico svg { width: 12px; height: 12px; }
+
+.del-target {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  background: var(--bg-soft); border: 1px solid var(--bd); border-radius: var(--r-4);
+}
+.del-target .dt-name { font-family: var(--font-mono); font-size: var(--t-14); font-weight: 600; color: var(--fg); }
+.del-target .dt-path { font-family: var(--font-mono); font-size: var(--t-12); color: var(--fg-mute); margin-top: 2px; word-break: break-all; }
+.del-target .dt-stats {
+  display: flex; gap: var(--s-3); font-size: var(--t-12);
+  color: var(--fg-soft); margin-top: 6px; flex-wrap: wrap;
+}
+.del-target .dt-stats .sep { color: var(--fg-mute); }
+.del-target .dt-stats b { color: var(--fg); font-variant-numeric: tabular-nums; }
+
+.del-effect {
+  display: grid; grid-template-columns: 20px 1fr;
+  gap: 6px var(--s-3); font-size: var(--t-13);
+  margin: var(--s-4) 0 var(--s-2);
+}
+.del-effect .e-ico {
+  color: var(--fg-mute); display: inline-flex;
+  align-items: center; justify-content: center; padding-top: 2px;
+}
+.del-effect .e-ico svg { width: 14px; height: 14px; }
+.del-effect .e-ico.ok { color: var(--ok); }
+.del-effect .e-ico.err { color: var(--err); }
+.del-effect b { font-weight: 600; }
+.del-effect span { color: var(--fg-soft); }
+.del-effect span b { color: var(--fg); }
+
+.confirm-type { margin-top: var(--s-4); display: flex; flex-direction: column; gap: 6px; }
+.confirm-type label { font-size: var(--t-13); color: var(--fg-soft); }
+.confirm-type label .mono-strong {
+  font-family: var(--font-mono); font-weight: 600; color: var(--fg);
+  background: var(--bg-soft); padding: 1px 5px;
+  border-radius: var(--r-2); border: 1px solid var(--bd-soft);
+}
+.confirm-type input { font-family: var(--font-mono); }
+.confirm-type input.match {
+  border-color: color-mix(in srgb, var(--err) 60%, var(--bd));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) 18%, transparent);
+}
+
 .form-grid {
   display: grid; grid-template-columns: 140px 1fr;
   gap: var(--s-3) var(--s-4); align-items: start;

@@ -455,6 +455,135 @@ test('POST /api/projects/:name/stop: returns stopped=false when not running', as
 });
 
 // ---------------------------------------------------------------------------
+// DELETE /api/projects/:name — project removal (ARCH §17.3.x)
+// ---------------------------------------------------------------------------
+
+test('DELETE /api/projects/:name: removes registry entry, default purges state dir', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    // Pre-seed the per-project state dir so we can assert it gets purged.
+    const stateDir = join(ws, 'state', 'docs-zh');
+    await fs.mkdir(join(stateDir, 'reports'), { recursive: true });
+    await fs.writeFile(join(stateDir, 'index.db'), 'fake-sqlite');
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh', { method: 'DELETE' });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      registryRemoved: boolean;
+      stateRemoved: boolean;
+      stoppedFirst: boolean;
+    };
+    assert.equal(body.ok, true);
+    assert.equal(body.registryRemoved, true);
+    assert.equal(body.stateRemoved, true);
+    assert.equal(body.stoppedFirst, false);
+
+    // Registry entry gone
+    const list = await app.request('/api/projects');
+    const projects = (await list.json()) as ProjectStatusJSON[];
+    assert.equal(projects.find((p) => p.name === 'docs-zh'), undefined);
+    // State dir gone
+    const { existsSync } = await import('node:fs');
+    assert.equal(existsSync(stateDir), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('DELETE /api/projects/:name?purge_state=false: leaves state dir on disk', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const stateDir = join(ws, 'state', 'docs-zh');
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(join(stateDir, 'index.db'), 'fake-sqlite');
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh?purge_state=false', { method: 'DELETE' });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean; stateRemoved: boolean };
+    assert.equal(body.ok, true);
+    assert.equal(body.stateRemoved, false);
+    const { existsSync } = await import('node:fs');
+    assert.equal(existsSync(stateDir), true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('DELETE /api/projects/:name: 409 + running:true when child is live and no force_stop', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    await app.request('/api/projects/docs-zh/start', { method: 'POST' });
+
+    const res = await app.request('/api/projects/docs-zh', { method: 'DELETE' });
+    assert.equal(res.status, 409);
+    const body = (await res.json()) as { ok: boolean; running: boolean; error: string };
+    assert.equal(body.ok, false);
+    assert.equal(body.running, true);
+    assert.match(body.error, /force_stop=true/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('DELETE /api/projects/:name?force_stop=true: stops live child, then removes', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    await app.request('/api/projects/docs-zh/start', { method: 'POST' });
+
+    const res = await app.request('/api/projects/docs-zh?force_stop=true', { method: 'DELETE' });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean; stoppedFirst: boolean };
+    assert.equal(body.ok, true);
+    assert.equal(body.stoppedFirst, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('DELETE /api/projects/:name: 404 when name not in registry', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/ghost', { method: 'DELETE' });
+    assert.equal(res.status, 404);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    assert.equal(body.ok, false);
+    assert.match(body.error, /not found in registry/);
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Ask 体验台 reverse proxy (ARCH §17.3.2 / §17.3.3)
 // ---------------------------------------------------------------------------
 
