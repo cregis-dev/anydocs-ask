@@ -4,7 +4,12 @@
  * Right-side slide-over (opened via the header gear). Shows the layered
  * config sources in precedence order: workspace .env · workspace
  * .console.json · per-project anydocs.ask.json · per-project ask.local.json.
- * Secrets are partially redacted to first 4 + last 2 chars.
+ * Secrets are partially redacted to first 4 + last 4 chars.
+ *
+ * NOTE: the design handoff's "Runtime workspace" section (console runtime
+ * path / registry size / cache size) is intentionally omitted — that's the
+ * console's own internal plumbing, not user-facing config. Don't add it back
+ * just to match the mock.
  */
 
 import { html } from 'hono/html';
