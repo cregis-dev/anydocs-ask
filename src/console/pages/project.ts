@@ -1,14 +1,19 @@
 /**
  * Per-project page — ARCH §17.3.1 GET /p/:name.
  *
- * Two-column layout:
- *   left  · status + lifecycle (start/stop) + reports + ops triggers
- *   right · ask 体验台 (Answer / Citations / Meta tabs) + activity link
+ * Layout (redesign):
+ *   proj-grid:
+ *     side-stack    Status card (status pill + path + indexed + process row +
+ *                                start/stop buttons + open-reader / view-log
+ *                                actions) · Reports card
+ *     main-stack    top tabs (Ask/Index/Eval/Traffic) · next-action banner ·
+ *                   tab panel
  *
- * The ask response is rendered via the browser-side marked module loaded
- * from /console/static/marked.esm.js. Retrieval trace (fused top-5) is
- * NOT included by the v1 ask response — that arrives with v1.5 ?debug=1
- * (PRD §13.6 / ARCH §17.8). Citations + meta cover what's available.
+ * The page-head breadcrumb is gone — the design collapses it; project name
+ * is conveyed by the header's project switcher, and lifecycle/status moved
+ * into the Status card. Status pill + dot + text reflect idle / warming /
+ * ready / asking / error states and are updated by the
+ * bootstrap script via /api/projects/:name/health polling.
  */
 
 import { html, raw } from 'hono/html';
@@ -32,24 +37,15 @@ export type ProjectViewModel = {
   project: ProjectListing;
   running: RegisteredProcess | null;
   reports: ReportListing[];
-  /** ?autostart=1 → page-load JS POSTs /start once before user interaction. */
   autostart?: boolean;
   nav?: NavContext;
-  /** Eval workflow snapshot — golden stats + report history + pin state. */
   evalSnapshot?: EvalTabSnapshot;
-  /** Latest eval report markdown body (or null). */
   latestEvalReportBody?: string | null;
-  /** Index tab snapshot (pages, navigation, validation). */
   indexSnapshot?: IndexSnapshot;
-  /** Traffic tab 7-day rolling window. */
   trafficWindow?: TrafficWindow;
-  /** Config drawer view model (env / .console.json / anydocs.ask.json). */
   configView?: ConfigViewModel;
-  /** Golden candidate snapshot — Eval tab workshop section. */
   candidates?: CandidateSnapshot;
-  /** Past analyze reports (newest first) — Traffic tab analyze section. */
   analyzeHistory?: AnalyzeReportSummary[];
-  /** Body of latest analyze report (markdown). */
   latestAnalyzeBody?: string | null;
 };
 
@@ -67,16 +63,17 @@ export function renderProject(vm: ProjectViewModel): Html {
   });
 
   const body = html`
-    <div class="pagehead">
-      <span class="crumb mono"><a href="/">projects</a> /</span>
-      <h1 class="mono">${project.name}</h1>
-      ${statusPill(live, running)}
-    </div>
-
-    ${nextAction ? nextActionBanner(nextAction) : ''}
-
     ${project.valid
-      ? html`<div class="grid-2">${sidebar(project, live, running, vm.reports)} ${mainCol(project, live, vm.evalSnapshot, vm.latestEvalReportBody, vm.indexSnapshot, vm.trafficWindow, vm.candidates, vm.analyzeHistory ?? [], vm.latestAnalyzeBody ?? null)}</div>`
+      ? html`
+        <div class="proj-grid">
+          ${sidebar(project, live, running, vm.reports, vm.indexSnapshot)}
+          <div class="main-stack">
+            ${renderTabs()}
+            ${nextAction ? nextActionBanner(nextAction) : ''}
+            ${tabPanels(project, live, vm)}
+          </div>
+        </div>
+      `
       : invalidNotice(project)}
 
     <script>${raw(`
@@ -93,43 +90,61 @@ export function renderProject(vm: ProjectViewModel): Html {
   });
 }
 
+function statusPill(
+  live: boolean,
+  running: RegisteredProcess | null,
+  valid: boolean,
+): Html {
+  if (!valid) {
+    return html`<span class="pill err" id="status-pill"><span class="dot" id="status-dot"></span><span id="status-text">invalid</span></span>`;
+  }
+  if (live && running) {
+    return html`<span class="pill run" id="status-pill"><span class="dot" id="status-dot"></span><span id="status-text">running · :${running.port} · pid ${running.pid}</span></span>`;
+  }
+  return html`<span class="pill" id="status-pill"><span class="dot" id="status-dot"></span><span id="status-text">idle</span></span>`;
+}
+
 function nextActionBanner(na: NextAction): Html {
-  const bgVar = na.level === 'err' ? 'var(--err-bg)' : na.level === 'warn' ? 'var(--warn-bg)' : 'var(--run-bg)';
-  const fgVar = na.level === 'err' ? 'var(--err)' : na.level === 'warn' ? 'var(--warn)' : 'var(--run)';
-  const icon = na.level === 'err' ? '⚠' : na.level === 'warn' ? '💡' : '👉';
+  const cls = na.level === 'err' ? 'banner err' : na.level === 'warn' ? 'banner warn' : 'banner info';
+  const icon = na.level === 'err' ? 'i-err' : na.level === 'warn' ? 'i-alert' : 'i-info';
   return html`
-    <div class="next-action" style="background: ${bgVar}; border-left: 3px solid ${fgVar}; padding: 10px 14px; border-radius: 6px; margin: 0 0 14px; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;">
-      <span style="font-size: 16px;">${icon}</span>
-      <div style="flex: 1; min-width: 240px;">
-        <div style="font-weight: 600; color: ${fgVar};">${na.title}</div>
-        ${na.detail
-          ? html`<div class="muted" style="font-size: 12.5px; margin-top: 2px;">${na.detail}</div>`
-          : ''}
+    <div class="${cls}">
+      <span class="b-ico"><svg><use href="#${icon}"/></svg></span>
+      <div class="b-bd">
+        <div class="b-ti">${na.title}</div>
+        ${na.detail ? html`<div class="b-de">${na.detail}</div>` : ''}
       </div>
-      <a href="#${na.cta.targetTab}" class="btn btn-primary" style="background: ${fgVar}; border-color: ${fgVar};">${na.cta.label} →</a>
+      <div class="b-act">
+        <a href="#${na.cta.targetTab}" class="btn sm primary">${na.cta.label} →</a>
+      </div>
     </div>
   `;
 }
 
-function statusPill(live: boolean, running: RegisteredProcess | null): Html {
-  if (live && running) {
-    // JS overrides text/dot once /v1/health resolves warm vs warming.
-    return html`<span class="pill" id="status-pill"><span class="dot run" id="status-dot"></span><span id="status-text">running · :${running.port} · pid ${running.pid}</span></span>`;
-  }
-  return html`<span class="pill" id="status-pill"><span class="dot idle" id="status-dot"></span><span id="status-text">idle</span></span>`;
-}
-
 function invalidNotice(project: ProjectListing): Html {
   return html`
-    <div class="card">
-      <h2 style="color: var(--err);">project invalid</h2>
-      <p>missing: <code>${project.missing.join(', ')}</code></p>
-      <p class="muted">补齐 <code>pages/</code> 与 <code>navigation/</code>，刷新页面即可。</p>
-      <dl class="kv">
-        <dt>path</dt><dd class="mono">${project.path}</dd>
-        <dt>projectId</dt><dd class="mono">${project.projectId ?? '—'}</dd>
-      </dl>
+    <div class="banner err">
+      <span class="b-ico"><svg><use href="#i-err"/></svg></span>
+      <div class="b-bd">
+        <div class="b-ti">This folder doesn't look like a docs project</div>
+        <div class="b-de">missing: ${project.missing.join(', ')} · expected <code class="inline">pages/&lt;lang&gt;/*.json</code> and <code class="inline">navigation/&lt;lang&gt;.json</code>.</div>
+      </div>
     </div>
+    <div class="card">
+      <div class="card-hd"><h2>diagnostic</h2><span class="meta">${project.path}</span></div>
+      <div class="card-bd">
+        <dl class="kv">
+          <dt>path</dt><dd class="mono">${project.path}</dd>
+          <dt>projectId</dt><dd class="mono">${project.projectId ?? '—'}</dd>
+          <dt>indexed</dt><dd>${project.indexed ? html`<span class="yes">yes</span>` : html`<span class="no">no</span>`}</dd>
+          <dt>missing</dt><dd class="mono">${project.missing.join(', ')}</dd>
+        </dl>
+      </div>
+    </div>
+    <p class="muted" style="margin-top: var(--s-4); font-size: var(--t-13);">
+      Fix the folder shape (add <code class="inline">pages/</code> and <code class="inline">navigation/</code>) and refresh,
+      or remove from the workspace with <code class="inline">anydocs-ask workspace rm ${project.name}</code>.
+    </p>
   `;
 }
 
@@ -138,13 +153,13 @@ function sidebar(
   live: boolean,
   running: RegisteredProcess | null,
   reports: ReportListing[],
+  indexSnapshot: IndexSnapshot | undefined,
 ): Html {
   return html`
-    <div>
-      ${statusCard(project, live, running)}
-      ${lifecycleCard(live)}
+    <aside class="side-stack">
+      ${statusCard(project, live, running, indexSnapshot)}
       ${reportsCard(project.name, reports)}
-    </div>
+    </aside>
   `;
 }
 
@@ -152,26 +167,241 @@ function statusCard(
   project: ProjectListing,
   live: boolean,
   running: RegisteredProcess | null,
+  indexSnapshot: IndexSnapshot | undefined,
 ): Html {
-  // projectId line is only shown when it diverges from the project name;
-  // otherwise it's a noisy duplicate. Full path is collapsed to a single
-  // line with ellipsis (hover-title surfaces the full string) so the
-  // sidebar doesn't run multi-line under typical macOS HOME paths.
-  const showProjectId = project.projectId && project.projectId !== project.name;
+  // The redesign collapses the breadcrumb row entirely — Status pill,
+  // start/stop buttons, and the open-reader/view-log actions all moved
+  // into this card. Button IDs (#btn-start / #btn-stop) stay the same so
+  // the BOOTSTRAP_SCRIPT click handlers and the existing tests still hook
+  // through. The "process" row keeps the <span class="tag">stopped</span>
+  // markup that tests pin.
+  const pages = indexSnapshot?.totalPages ?? null;
+  const chunks = indexSnapshot?.dbStatus?.chunk_count ?? null;
+  const indexedExtra =
+    pages !== null && pages > 0
+      ? html`<span style="color: var(--fg-mute); font-family: var(--font-mono); font-size: 11px; margin-left: 4px;">·
+          ${pages} pages${chunks !== null ? html` · ${chunks} chunks` : ''}</span>`
+      : '';
   return html`
-    <div class="card">
-      <h2>status</h2>
-      <dl class="kv">
-        <dt>path</dt>
-        <dd class="mono path-cell" title="${project.path}">${shortPath(project.path)}</dd>
-        ${showProjectId
-          ? html`<dt>id</dt><dd class="mono">${project.projectId}</dd>`
-          : ''}
-        <dt>indexed</dt><dd>${project.indexed ? html`<span class="tag ok">yes</span>` : html`<span class="tag">no</span>`}</dd>
-        <dt>process</dt><dd>${live && running ? html`<span class="tag run">:${running.port}</span> <span class="muted mono">pid ${running.pid}</span>` : html`<span class="tag">stopped</span>`}</dd>
-      </dl>
+    <section class="card">
+      <div class="card-hd">
+        <h2>Status</h2>
+        ${statusPill(live, running, project.valid)}
+      </div>
+      <div class="card-bd">
+        <dl class="kv">
+          <dt>path</dt>
+          <dd><code class="inline" title="${project.path}">${shortPath(project.path)}</code></dd>
+          <dt>indexed</dt>
+          <dd>${project.indexed
+            ? html`<span class="yes">yes</span>${indexedExtra}`
+            : html`<span class="no">no</span>`}</dd>
+          <dt>process</dt>
+          <dd>
+            ${live && running
+              ? html`<span class="tag run">:${running.port}</span>
+                  <span class="mono" style="color: var(--fg-mute); font-size: 11px;">pid ${running.pid}</span>`
+              : html`<span class="tag">stopped</span>`}
+          </dd>
+        </dl>
+
+        <div style="display: flex; gap: var(--s-2); margin-top: var(--s-3);">
+          <button id="btn-start" class="btn primary" ${live ? 'disabled' : ''} style="flex: 1;">
+            <svg><use href="#i-play"/></svg> start
+          </button>
+          <button id="btn-stop" class="btn" ${live ? '' : 'disabled'} style="flex: 1;">
+            <svg><use href="#i-stop"/></svg> stop
+          </button>
+        </div>
+
+        <!-- The design's open-reader / view-log .status-acts row was here.
+             Both lack a real backend in this codebase (anydocs-ask serve only
+             mounts /v1/* — no reader UI on /; and the console doesn't expose
+             a tail-child-stdout endpoint), so showing non-working affordances
+             would mislead. Add the row back when the features land. The icon
+             (i-ext) + .status-acts CSS stay in layout.ts for that future. -->
+      </div>
+    </section>
+  `;
+}
+
+function reportsCard(name: string, reports: ReportListing[]): Html {
+  if (reports.length === 0) return html``;
+  // Group by kind (eval / analyze / golden) with a small subheader,
+  // matching the design's stacked list in the sidebar.
+  const grouped: Record<string, ReportListing[]> = {};
+  for (const r of reports) {
+    (grouped[r.kind] ?? (grouped[r.kind] = [])).push(r);
+  }
+  const order = ['eval', 'analyze', 'golden', 'baseline'] as const;
+  return html`
+    <section class="card">
+      <div class="card-hd"><h2>Reports</h2><span class="meta">${reports.length}</span></div>
+      <div class="card-bd flush" style="padding: 6px 0 var(--s-3);">
+        ${order.map((kind, i) => {
+          const list = (grouped[kind] ?? []).slice(0, 6);
+          if (list.length === 0) return html``;
+          const sep = i === 0 ? '' : 'margin-top: 4px; border-top: 1px solid var(--bd-soft); padding-top: 10px;';
+          return html`
+            <div style="padding: 6px var(--s-5); font-size: 11px; color: var(--fg-soft); letter-spacing: .04em; text-transform: uppercase; ${raw(sep)}">${kind}</div>
+            ${list.map(
+              (r) => html`<a href="/p/${name}/reports/${r.filename}" style="display: flex; justify-content: space-between; padding: 6px var(--s-5); color: var(--fg);">
+                <span class="mono" style="font-size: var(--t-12);">${r.date}</span>
+                <span style="color: var(--fg-soft); font-size: var(--t-12);">${kind}</span>
+              </a>`,
+            )}
+          `;
+        })}
+      </div>
+    </section>
+  `;
+}
+
+function renderTabs(): Html {
+  // Top tabs are anchor links that switch the visible panel and update
+  // location.hash. Initial render marks #ask selected; the bootstrap
+  // script reconciles on hashchange / page load.
+  return html`
+    <nav class="tabs" role="tablist" id="project-tabs">
+      <a class="tab" role="tab" data-project-tab="ask" href="#ask" aria-selected="true">
+        <svg style="width:14px;height:14px;opacity:.7;"><use href="#i-chat"/></svg> Ask
+      </a>
+      <a class="tab" role="tab" data-project-tab="index" href="#index" aria-selected="false">
+        <svg style="width:14px;height:14px;opacity:.7;"><use href="#i-folder"/></svg> Index
+      </a>
+      <a class="tab" role="tab" data-project-tab="eval" href="#eval" aria-selected="false">
+        <svg style="width:14px;height:14px;opacity:.7;"><use href="#i-check"/></svg> Eval
+      </a>
+      <a class="tab" role="tab" data-project-tab="traffic" href="#traffic" aria-selected="false">
+        <svg style="width:14px;height:14px;opacity:.7;"><use href="#i-chart"/></svg> Traffic
+      </a>
+    </nav>
+  `;
+}
+
+function tabPanels(
+  project: ProjectListing,
+  live: boolean,
+  vm: ProjectViewModel,
+): Html {
+  return html`
+    <div id="ptab-ask" class="tab-panel" data-project-tab="ask">
+      ${askCard(live)}
     </div>
-    <style>.path-cell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }</style>
+    <div id="ptab-index" class="tab-panel" data-project-tab="index" hidden>
+      ${vm.indexSnapshot
+        ? renderIndexTab({ projectName: project.name, snapshot: vm.indexSnapshot, childLive: live })
+        : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">Index status unavailable.</p></div></div>`}
+    </div>
+    <div id="ptab-eval" class="tab-panel" data-project-tab="eval" hidden>
+      ${vm.evalSnapshot
+        ? renderEvalTab({
+            projectName: project.name,
+            snapshot: vm.evalSnapshot,
+            latestReportBody: vm.latestEvalReportBody ?? null,
+            candidates: vm.candidates ?? { total: 0, pending: [], approved: 0, rejected: 0, malformed: 0 },
+          })
+        : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">Eval status unavailable.</p></div></div>`}
+    </div>
+    <div id="ptab-traffic" class="tab-panel" data-project-tab="traffic" hidden>
+      ${vm.trafficWindow
+        ? renderTrafficTab({
+            projectName: project.name,
+            window: vm.trafficWindow,
+            analyzeHistory: vm.analyzeHistory ?? [],
+            latestAnalyzeBody: vm.latestAnalyzeBody ?? null,
+          })
+        : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">Traffic status unavailable.</p></div></div>`}
+    </div>
+  `;
+}
+
+function askCard(live: boolean): Html {
+  if (!live) return askStartGate();
+  return html`
+    <section class="card primary">
+      <div class="card-hd">
+        <h2><svg style="width: 14px; height: 14px;"><use href="#i-chat"/></svg> Ask</h2>
+        <label id="persist-toggle-wrap" class="check">
+          <input type="checkbox" id="persist-toggle" />
+          <span id="persist-toggle-label" class="muted">dry-run · don't write to runs</span>
+        </label>
+      </div>
+      <div class="card-bd">
+        <div id="persist-warning" class="banner err" hidden style="margin: 0 0 var(--s-3);">
+          <span class="b-ico"><svg><use href="#i-err"/></svg></span>
+          <div class="b-bd">
+            <div class="b-ti">persist on — this question will write to runs jsonl</div>
+            <div class="b-de">tagged <code class="inline">source=console</code>. analyze / golden generate exclude by default;
+              use <code class="inline">--include-console</code> when you want to mix in dogfood traffic. Refreshing resets back to dry-run.</div>
+          </div>
+        </div>
+        <textarea
+          id="ask-q"
+          class="textarea"
+          rows="3"
+          placeholder="Ask a question about your docs… e.g. how do I install hermes?"
+          style="min-height: 96px;"
+        ></textarea>
+        <div style="display: flex; align-items: center; gap: var(--s-3); margin-top: var(--s-3);">
+          <button id="btn-ask" class="btn primary">
+            ask <span class="kbd">⌘↵</span>
+          </button>
+          <span id="ask-status" class="status">ready</span>
+        </div>
+
+        <div id="ask-result" hidden style="margin-top: var(--s-5); border-top: 1px solid var(--bd-soft); padding-top: var(--s-4);">
+          <nav class="tabs inner" role="tablist" style="margin: 0 0 var(--s-3);">
+            <button class="tab active" role="tab" data-tab="answer" aria-selected="true">answer</button>
+            <button class="tab" role="tab" data-tab="citations" aria-selected="false">citations <span id="cit-count" class="cnt"></span></button>
+            <button class="tab" role="tab" data-tab="meta" role="tab" aria-selected="false">meta</button>
+          </nav>
+          <div id="tab-answer" class="tab-panel" data-tab="answer">
+            <div id="ask-clarify" class="banner warn" hidden style="margin: 0 0 var(--s-3);"></div>
+            <div id="ask-answer-md" class="md"></div>
+            <div id="ask-error" class="banner err" hidden style="margin: 0;"></div>
+          </div>
+          <div id="tab-citations" class="tab-panel" data-tab="citations" hidden>
+            <div id="ask-cite-list" class="cite-list"></div>
+            <p id="ask-cite-empty" class="empty" hidden style="padding: 24px 0;">No citations.</p>
+          </div>
+          <div id="tab-meta" class="tab-panel" data-tab="meta" hidden>
+            <dl id="ask-meta" class="kv"></dl>
+            <h3 style="margin-top: var(--s-4); font-size: var(--t-12); color: var(--fg-soft); letter-spacing: .04em; text-transform: uppercase;">raw response</h3>
+            <pre id="ask-raw" class="block mono" style="max-height: 360px;"></pre>
+            <p class="muted" style="font-size: 11.5px; margin-top: var(--s-2);">
+              Full retrieval trace (fused top-5 / vec_rank / bm25_rank) lands with v1.5 <code class="inline">?debug=1</code> (ARCH §17.8).
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function askStartGate(): Html {
+  return html`
+    <section class="card" style="overflow: hidden;">
+      <div class="card-bd" style="display: flex; flex-direction: column; align-items: center; text-align: center; padding: 56px 24px; gap: var(--s-3);">
+        <div class="e-ico" style="width: 56px; height: 56px; background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--accent);">
+          <svg style="width: 24px; height: 24px;"><use href="#i-play"/></svg>
+        </div>
+        <h3 style="font-size: var(--t-18); margin: 0;">Start this project to begin</h3>
+        <p style="max-width: 48ch; color: var(--fg-soft); margin: 0;">
+          Starting spins up a local /v1/ask endpoint. The first boot loads the embedder and indexes pages — usually 5–30s.
+        </p>
+        <div style="margin-top: var(--s-3); display: flex; gap: var(--s-2);">
+          <button id="btn-start-ask-secondary" class="btn primary lg">
+            <svg><use href="#i-play"/></svg> start project
+          </button>
+        </div>
+        <p id="lifecycle-status-ask" class="status" style="margin-top: var(--s-2);"></p>
+        <details style="margin-top: var(--s-3); text-align: left; width: 100%; max-width: 520px;">
+          <summary style="font-size: var(--t-12); color: var(--fg-soft); cursor: pointer;">CLI equivalent</summary>
+          <pre class="block" style="margin-top: var(--s-2);">anydocs-ask <span class="kw">serve</span> &lt;project&gt;</pre>
+        </details>
+      </div>
+    </section>
   `;
 }
 
@@ -179,206 +409,6 @@ function shortPath(p: string): string {
   const home = process.env.HOME;
   if (home && p.startsWith(home)) return '~' + p.slice(home.length);
   return p;
-}
-
-function lifecycleCard(live: boolean): Html {
-  return html`
-    <div class="card">
-      <h2>lifecycle</h2>
-      <div class="btn-row">
-        <button id="btn-start" class="btn-primary" ${live ? 'disabled' : ''}>start</button>
-        <button id="btn-stop" ${live ? '' : 'disabled'}>stop</button>
-      </div>
-      <p class="status muted" id="lifecycle-status" style="margin-top: 8px; font-size: 12px; min-height: 16px;"></p>
-    </div>
-  `;
-}
-
-function opsCard(): Html {
-  // The previous side card with Golden + Analyze buttons was removed
-  // 2026-05-12 — those workflows are now first-class inside Eval tab
-  // (Golden Workshop) and Traffic tab (Analyze section). Keeping this
-  // function as a no-op placeholder so call sites stay stable; sidebar()
-  // simply omits it.
-  return html``;
-}
-
-function reportsCard(name: string, reports: ReportListing[]): Html {
-  // Empty state used to render a noisy "no reports yet" card that ate sidebar
-  // height for no value. Hide entirely until at least one report exists.
-  if (reports.length === 0) return html``;
-  const grouped = groupByKind(reports);
-  const blocks = (['eval', 'analyze', 'golden'] as const).map((kind) => {
-    const list = grouped[kind] ?? [];
-    if (list.length === 0) return html``;
-    return html`
-      <h3>${kind} <span class="muted" style="font-size: 11px;">${list.length}</span></h3>
-      <ul style="list-style: none; padding: 0; margin: 0 0 10px;">
-        ${list.slice(0, 8).map(
-          (r) => html`
-            <li style="padding: 4px 0; display: flex; gap: 8px; align-items: baseline;">
-              <span class="mono muted" style="font-size: 11.5px;">${r.date}</span>
-              <a class="mono" href="/p/${name}/reports/${r.filename}" style="font-size: 12px;">${r.filename.replace(/^\d{4}-\d{2}-\d{2}-/, '').replace(/\.md$/, '')}</a>
-            </li>
-          `,
-        )}
-      </ul>
-    `;
-  });
-  return html`
-    <div class="card">
-      <h2>reports <span class="muted" style="font-size: 11px;">${reports.length}</span></h2>
-      ${blocks}
-    </div>
-  `;
-}
-
-function groupByKind(reports: ReportListing[]): Record<string, ReportListing[]> {
-  const out: Record<string, ReportListing[]> = {};
-  for (const r of reports) {
-    const list = out[r.kind] ?? (out[r.kind] = []);
-    list.push(r);
-  }
-  return out;
-}
-
-function mainCol(
-  project: ProjectListing,
-  live: boolean,
-  evalSnapshot: EvalTabSnapshot | undefined,
-  latestEvalReportBody: string | null | undefined,
-  indexSnapshot: IndexSnapshot | undefined,
-  trafficWindow: TrafficWindow | undefined,
-  candidates: CandidateSnapshot | undefined,
-  analyzeHistory: AnalyzeReportSummary[],
-  latestAnalyzeBody: string | null,
-): Html {
-  return html`
-    <div>
-      <div class="tabs project-tabs" role="tablist">
-        <button role="tab" data-project-tab="ask" aria-selected="true">Ask</button>
-        <button role="tab" data-project-tab="index">Index</button>
-        <button role="tab" data-project-tab="eval">Eval</button>
-        <button role="tab" data-project-tab="traffic">Traffic</button>
-      </div>
-      <div id="ptab-ask" class="tab-panel" data-project-tab="ask">
-        ${askCard(live)}
-      </div>
-      <div id="ptab-index" class="tab-panel" data-project-tab="index" hidden>
-        ${indexSnapshot
-          ? renderIndexTab({
-              projectName: project.name,
-              snapshot: indexSnapshot,
-              childLive: live,
-            })
-          : html`<div class="card"><p class="empty">index 状态不可用。</p></div>`}
-      </div>
-      <div id="ptab-eval" class="tab-panel" data-project-tab="eval" hidden>
-        ${evalSnapshot
-          ? renderEvalTab({
-              projectName: project.name,
-              snapshot: evalSnapshot,
-              latestReportBody: latestEvalReportBody ?? null,
-              candidates: candidates ?? { total: 0, pending: [], approved: 0, rejected: 0, malformed: 0 },
-            })
-          : html`<div class="card"><p class="empty">eval 状态不可用。</p></div>`}
-      </div>
-      <div id="ptab-traffic" class="tab-panel" data-project-tab="traffic" hidden>
-        ${trafficWindow
-          ? renderTrafficTab({
-              projectName: project.name,
-              window: trafficWindow,
-              analyzeHistory,
-              latestAnalyzeBody,
-            })
-          : html`<div class="card"><p class="empty">traffic 状态不可用。</p></div>`}
-      </div>
-    </div>
-    <style>
-      .project-tabs { margin: -2px 0 14px 0; padding: 0; border-bottom: 1px solid var(--bd); }
-    </style>
-  `;
-}
-
-function askCard(live: boolean): Html {
-  // When the child runtime isn't up, swap the (disabled) textarea + ask button
-  // for a single "Start project" CTA so newcomers don't keep poking a dead form.
-  // Same pattern reused on Index / Eval / Traffic tabs would feel redundant —
-  // those tabs surface their own "child idle" hints inline.
-  if (!live) return askStartGate();
-  return html`
-    <div class="card">
-      <div class="card-head" style="padding: 0 0 10px; border-bottom: 1px solid var(--bd-soft); margin: -2px 0 12px; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
-        <h2 style="margin: 0;">Ask</h2>
-        <label id="persist-toggle-wrap" style="display:inline-flex; align-items:center; gap:6px; font-size: 12px; cursor: pointer; user-select: none;">
-          <input type="checkbox" id="persist-toggle" style="margin: 0; accent-color: var(--err);" />
-          <span id="persist-toggle-label" class="muted">dry-run · 不写 runs</span>
-        </label>
-      </div>
-      <div id="persist-warning" hidden style="background: var(--err-bg); border: 1px solid var(--err); border-radius: 6px; padding: 8px 12px; margin-bottom: 10px; font-size: 12.5px; color: var(--err);">
-        ⚠ <strong>persist 已开启</strong>：这次提问会写入 runs jsonl，标记 source=console。
-        analyze / golden generate 默认排除，需要时 <code class="mono">--include-console</code> 显式纳入。
-        刷新页面会自动回到 dry-run。
-      </div>
-      <textarea
-        id="ask-q"
-        rows="3"
-        placeholder="试一个问题，例如：JWT 怎么续期&#10;Cmd/Ctrl + Enter 提交"
-      ></textarea>
-      <div class="btn-row" style="margin-top: 8px;">
-        <button id="btn-ask" class="btn-primary">ask <span class="muted" style="font-size: 11px; font-weight: normal; margin-left: 4px;">⌘↵</span></button>
-        <span id="ask-status" class="status muted"></span>
-      </div>
-
-      <div id="ask-result" hidden style="margin-top: 14px;">
-        <div class="tabs" role="tablist">
-          <button role="tab" data-tab="answer" aria-selected="true">answer</button>
-          <button role="tab" data-tab="citations">citations <span id="cit-count" class="muted" style="font-size: 11px;"></span></button>
-          <button role="tab" data-tab="meta">meta</button>
-        </div>
-        <div id="tab-answer" class="tab-panel" data-tab="answer">
-          <div id="ask-answer-md" class="md"></div>
-          <div id="ask-clarify" hidden></div>
-          <div id="ask-error" hidden style="color: var(--err);"></div>
-        </div>
-        <div id="tab-citations" class="tab-panel" data-tab="citations" hidden>
-          <div id="ask-cite-list" class="cite-list"></div>
-          <p id="ask-cite-empty" class="empty" hidden>无 citations。</p>
-        </div>
-        <div id="tab-meta" class="tab-panel" data-tab="meta" hidden>
-          <dl id="ask-meta" class="kv"></dl>
-          <h3 style="margin-top: 14px;">raw response</h3>
-          <pre id="ask-raw" class="mono" style="font-size: 11.5px; max-height: 360px;"></pre>
-          <p class="muted" style="font-size: 11.5px; margin-top: 8px;">
-            完整 retrieval trace (fused top-5 / vec_rank / bm25_rank) 留给 v1.5 <code>?debug=1</code>（ARCH §17.8）。
-          </p>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-/**
- * Stopped-state replacement for the Ask card. Single big primary button —
- * removes the "disabled textarea sitting there doing nothing" UX where new
- * users repeatedly poke the form trying to figure out why nothing happens.
- * Wires to the same #btn-start handler the sidebar lifecycle card uses.
- */
-function askStartGate(): Html {
-  return html`
-    <div class="card" style="text-align: center; padding: 36px 24px;">
-      <div style="font-size: 24px; line-height: 1; margin-bottom: 10px;">▶</div>
-      <h2 style="margin: 0 0 6px; font-size: 16px; text-transform: none; letter-spacing: 0; color: var(--fg);">Project not running</h2>
-      <p class="muted" style="font-size: 13px; max-width: 420px; margin: 0 auto 18px;">
-        Start project to ask questions, run eval, and record traffic.
-        First boot loads the embedding model and indexes pages — usually 5–30s.
-      </p>
-      <button id="btn-start-ask" class="btn-primary" style="padding: 8px 22px; font-size: 14px;">
-        ▶ Start project
-      </button>
-      <p class="status muted" id="lifecycle-status-ask" style="margin-top: 12px; font-size: 12px; min-height: 16px;"></p>
-    </div>
-  `;
 }
 
 const BOOTSTRAP_SCRIPT = `
@@ -393,11 +423,6 @@ const $ = (id) => document.getElementById(id);
 // ------------------------------------------------------------------
 // warm state machine — surfaces child runtime.warm via /v1/health.
 // ------------------------------------------------------------------
-//
-// The child HTTP server binds before runtime.warm flips (embedder load +
-// fullReindex can take 5-30s). We poll /api/projects/:name/health every
-// 1.2s; status pill / Ask gating react. A pending question entered during
-// warmup is queued and auto-submitted on warm.
 const warmState = {
   warm: false,
   polling: false,
@@ -407,11 +432,13 @@ const warmState = {
 };
 let warmTickTimer = null;
 
-function setStatusPill(dotCls, text) {
-  const dot = $('status-dot');
+function setStatusPill(level, text) {
+  const pill = $('status-pill');
   const txt = $('status-text');
-  if (dot) dot.className = 'dot ' + dotCls;
-  if (txt) txt.textContent = text;
+  if (!pill || !txt) return;
+  // Map level → pill class
+  pill.className = 'pill' + (level === 'ok' ? ' ok' : level === 'warn' ? ' warn' : level === 'err' ? ' err' : level === 'run' ? ' run' : '');
+  txt.textContent = text;
 }
 
 function elapsedSec() {
@@ -421,7 +448,7 @@ function elapsedSec() {
 
 function tickWarmingPill() {
   if (warmState.warm) return;
-  setStatusPill('idle', 'warming · ' + elapsedSec() + 's');
+  setStatusPill('warn', 'warming · ' + elapsedSec() + 's');
 }
 
 async function pollHealth() {
@@ -429,7 +456,7 @@ async function pollHealth() {
   warmState.polling = true;
   warmState.abortPoll = false;
   warmState.pollStartedAt = Date.now();
-  setStatusPill('idle', 'warming · 0s');
+  setStatusPill('warn', 'warming · 0s');
   if (warmTickTimer) clearInterval(warmTickTimer);
   warmTickTimer = setInterval(tickWarmingPill, 500);
   while (!warmState.abortPoll) {
@@ -441,18 +468,15 @@ async function pollHealth() {
         body = await res.json();
         warm = body && body.warm === true;
       } else if (res.status === 502) {
-        // Child not running — registry says no entry. Stop polling.
         warmState.polling = false;
         warmState.abortPoll = true;
         if (warmTickTimer) { clearInterval(warmTickTimer); warmTickTimer = null; }
-        setStatusPill('idle', 'idle');
+        setStatusPill('', 'idle');
         return;
       } else {
         try { body = await res.json(); } catch (_) {}
       }
-    } catch (_) {
-      // network blip — keep polling
-    }
+    } catch (_) {}
     if (warm) {
       warmState.warm = true;
       warmState.polling = false;
@@ -468,115 +492,57 @@ async function pollHealth() {
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-function onWarmReady(body) {
-  // Reflect on pill — keep port info from SSR text if present.
+function onWarmReady() {
   const txt = $('status-text');
   const existing = (txt && txt.textContent) || '';
   const portMatch = existing.match(/:[0-9]+/);
   const tail = portMatch ? ' · ' + portMatch[0] : '';
-  setStatusPill('run', 'ready' + tail);
+  setStatusPill('ok', 'ready' + tail);
   if (warmState.pendingQuestion) {
     const q = warmState.pendingQuestion;
     warmState.pendingQuestion = null;
-    if (askStatus) {
-      askStatus.textContent = 'warm-up done · re-submitting';
-      askStatus.className = 'status ok';
-    }
+    if (askStatus) { askStatus.textContent = 'warm-up done · re-submitting'; askStatus.className = 'status ok'; }
     if (askQ) askQ.value = q;
     submitAsk();
   } else if (askStatus) {
     askStatus.textContent = 'ready';
     askStatus.className = 'status ok';
     setTimeout(() => {
-      if (askStatus && askStatus.textContent === 'ready') {
-        askStatus.textContent = '';
-      }
+      if (askStatus && askStatus.textContent === 'ready') askStatus.textContent = '';
     }, 1500);
   }
 }
 
-function lifecycleClick(action, btnId) {
+function lifecycleClick(action, btnId, statusId) {
   return async () => {
     const btn = $(btnId || ('btn-' + action));
-    // Two possible status surfaces depending on which start trigger fired —
-    // the sidebar lifecycle card vs the in-tab start gate. Whichever exists.
-    const status = $('lifecycle-status') || $('lifecycle-status-ask');
+    const status = $(statusId || 'lifecycle-status-ask');
     if (!btn) return;
     btn.disabled = true;
-    if (status) {
-      status.textContent = action + '...';
-      status.className = 'status muted';
-    }
+    if (status) { status.textContent = action + '...'; status.className = 'status'; }
     try {
       const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/' + action, { method: 'POST' });
       const body = await res.json();
       if (!res.ok || body.ok === false) {
-        if (status) {
-          status.textContent = body.error || res.statusText;
-          status.className = 'status err';
-        }
+        if (status) { status.textContent = body.error || res.statusText; status.className = 'status err'; }
         btn.disabled = false;
         return;
       }
-      if (status) {
-        status.textContent = action + ' ok';
-        status.className = 'status ok';
-      }
+      if (status) { status.textContent = action + ' ok'; status.className = 'status ok'; }
       setTimeout(() => location.reload(), 350);
     } catch (e) {
-      if (status) {
-        status.textContent = 'network error: ' + (e && e.message ? e.message : e);
-        status.className = 'status err';
-      }
+      if (status) { status.textContent = 'network error: ' + (e && e.message ? e.message : e); status.className = 'status err'; }
       btn.disabled = false;
     }
   };
 }
 
-if ($('btn-start')) $('btn-start').addEventListener('click', lifecycleClick('start'));
-if ($('btn-stop')) $('btn-stop').addEventListener('click', lifecycleClick('stop'));
+if ($('btn-start')) $('btn-start').addEventListener('click', lifecycleClick('start', 'btn-start'));
+if ($('btn-stop')) $('btn-stop').addEventListener('click', lifecycleClick('stop', 'btn-stop'));
 if ($('btn-start-ask')) $('btn-start-ask').addEventListener('click', lifecycleClick('start', 'btn-start-ask'));
+if ($('btn-start-ask-secondary')) $('btn-start-ask-secondary').addEventListener('click', lifecycleClick('start', 'btn-start-ask-secondary'));
 
-function bindOp(id, path) {
-  const btn = $(id);
-  const status = $('op-status');
-  if (!btn || !status) return;
-  btn.addEventListener('click', async () => {
-    btn.disabled = true;
-    status.textContent = id.replace('btn-', '') + '...';
-    status.className = 'status muted';
-    const t0 = Date.now();
-    try {
-      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + path, { method: 'POST' });
-      const body = await res.json();
-      const dt = Date.now() - t0;
-      if (!res.ok || body.ok === false) {
-        status.textContent = 'failed (' + dt + 'ms): ' + (body.error || res.statusText);
-        status.className = 'status err';
-      } else if (body.reportPath) {
-        status.textContent = 'done (' + dt + 'ms) — reload for new report';
-        status.className = 'status ok';
-        setTimeout(() => location.reload(), 600);
-      } else {
-        status.textContent = 'done (' + dt + 'ms): ' + (body.message || 'ok');
-        status.className = 'status ok';
-        setTimeout(() => location.reload(), 600);
-      }
-    } catch (e) {
-      status.textContent = 'network error: ' + (e && e.message ? e.message : e);
-      status.className = 'status err';
-    } finally {
-      btn.disabled = false;
-    }
-  });
-}
-// (Old sidebar opsCard buttons — btn-analyze / btn-golden-structure /
-// btn-golden-runs — removed 2026-05-12; those workflows now live inside
-// Eval tab Golden Workshop and Traffic tab analyze section. bindOp() left
-// in place above for ad-hoc reuse; no current callers in opsCard.)
-
-// Traffic tab analyze button — same /analyze endpoint but with optional
-// include_console body flag from the inline checkbox.
+// Traffic tab analyze
 (function bindTrafficAnalyze() {
   const btn = $('btn-traffic-analyze');
   const status = $('traffic-analyze-status');
@@ -584,7 +550,7 @@ function bindOp(id, path) {
   if (!btn) return;
   btn.addEventListener('click', async () => {
     btn.disabled = true;
-    if (status) { status.textContent = 'running... (10–60s)'; status.className = 'status muted'; }
+    if (status) { status.textContent = 'running... (10–60s)'; status.className = 'status'; }
     const t0 = Date.now();
     try {
       const payload = includeConsole && includeConsole.checked ? { include_console: true } : {};
@@ -718,10 +684,9 @@ function bindOp(id, path) {
   bind('btn-gen-runs', 'runs');
 })();
 
-// Golden Workshop approve / reject on candidate rows (PRD §13.6 第 4 行
-// v1 锁 broken 2026-05-12 with author consent).
+// Golden Workshop approve / reject + flush
 (function bindGwDecide() {
-  document.querySelectorAll('.gw-candidate').forEach((row) => {
+  document.querySelectorAll('.gw-candidate, .cand-row').forEach((row) => {
     const id = row.dataset.id;
     if (!id) return;
     row.querySelectorAll('button[data-decide]').forEach((b) => {
@@ -740,7 +705,6 @@ function bindOp(id, path) {
             b.disabled = false;
             return;
           }
-          // Visual fade-out: hide row immediately, reload after a beat.
           row.style.opacity = '0.4';
           row.style.transition = 'opacity .15s';
           setTimeout(() => location.reload(), 250);
@@ -848,6 +812,7 @@ function bindOp(id, path) {
   const elStatus = $('gw-edit-status');
   const btnSave = $('gw-edit-save');
   const btnCancel = $('gw-edit-cancel');
+  const btnClose = $('gw-edit-close');
 
   let currentId = null;
 
@@ -892,6 +857,7 @@ function bindOp(id, path) {
   });
 
   if (btnCancel) btnCancel.addEventListener('click', close);
+  if (btnClose) btnClose.addEventListener('click', close);
   backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && backdrop.classList.contains('show')) close();
@@ -941,7 +907,7 @@ function bindOp(id, path) {
 })();
 
 // ------------------------------------------------------------------
-// Project-page tabs (Ask / Eval / Activity)
+// Top tabs (Ask / Index / Eval / Traffic)
 // ------------------------------------------------------------------
 function setProjectTab(name) {
   document.querySelectorAll('[data-project-tab]').forEach((el) => {
@@ -956,14 +922,15 @@ function setProjectTab(name) {
   }
 }
 document.querySelectorAll('[role=tab][data-project-tab]').forEach((b) => {
-  b.addEventListener('click', () => setProjectTab(b.dataset.projectTab));
+  b.addEventListener('click', (e) => {
+    e.preventDefault();
+    setProjectTab(b.dataset.projectTab);
+  });
 });
-// Deep-link via hash on initial load.
 const initialTab = (location.hash || '').replace('#', '');
 if (['ask', 'index', 'eval', 'traffic'].includes(initialTab)) {
   setProjectTab(initialTab);
 }
-// In-page <a href="#tab"> links (e.g. next-action banner CTA) also switch tabs.
 window.addEventListener('hashchange', () => {
   const t = (location.hash || '').replace('#', '');
   if (['ask', 'index', 'eval', 'traffic'].includes(t)) {
@@ -972,7 +939,7 @@ window.addEventListener('hashchange', () => {
 });
 
 // ------------------------------------------------------------------
-// Index tab: reindex button (reverse-proxy to child /v1/index/rebuild)
+// Index tab: reindex button
 // ------------------------------------------------------------------
 function bindReindex() {
   const btn = $('btn-reindex');
@@ -981,12 +948,10 @@ function bindReindex() {
   btn.addEventListener('click', async () => {
     btn.disabled = true;
     status.textContent = 'reindexing...';
-    status.className = 'status muted';
+    status.className = 'status';
     const t0 = Date.now();
     try {
-      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/reindex', {
-        method: 'POST',
-      });
+      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/reindex', { method: 'POST' });
       const body = await res.json();
       const dt = Date.now() - t0;
       if (!res.ok || body.ok === false) {
@@ -1019,32 +984,112 @@ function bindEvalRun() {
   const btn = $('btn-run-eval');
   const sel = $('eval-baseline-select');
   const status = $('eval-run-status');
-  if (!btn || !sel || !status) return;
+  const progEl = $('eval-progress');
+  const progI = $('eval-prog-i');
+  const progTotal = $('eval-prog-total');
+  const progSlug = $('eval-prog-slug');
+  const progEta = $('eval-prog-eta');
+  const progBar = $('eval-prog-bar');
+  if (!btn || !status) return;
   btn.addEventListener('click', async () => {
     btn.disabled = true;
-    status.textContent = 'running... (10–30s typical)';
-    status.className = 'status muted';
+    status.textContent = 'warming up the runtime…';
+    status.className = 'status';
+    if (progEl) {
+      progEl.hidden = false;
+      if (progI) progI.textContent = '0';
+      if (progTotal) progTotal.textContent = '—';
+      if (progSlug) progSlug.textContent = '';
+      if (progEta) progEta.textContent = '';
+      if (progBar) progBar.style.width = '0%';
+    }
     const t0 = Date.now();
-    const baseline = sel.value || null;
+    const baseline = sel ? (sel.value || null) : null;
+    // Per-case running average for the ETA.
+    let total = 0;
+    let doneCount = 0;
+    let sumMs = 0;
+    let lastResult = null;
+    function applyEvent(ev) {
+      if (ev.type === 'boot') {
+        total = ev.totalCases;
+        if (progTotal) progTotal.textContent = String(total);
+        status.textContent = total + ' cases loaded · waiting for runtime warm…';
+      } else if (ev.type === 'warm') {
+        status.textContent = 'warm in ' + ev.bootMs + 'ms · running cases';
+      } else if (ev.type === 'case-start') {
+        if (progI) progI.textContent = String(ev.i + 1);
+        if (progSlug) progSlug.textContent = ev.lang + ' · ' + ev.caseId;
+      } else if (ev.type === 'case-done') {
+        doneCount = ev.i + 1;
+        sumMs += ev.latencyMs;
+        const pct = total > 0 ? Math.round((doneCount / total) * 100) : 0;
+        if (progBar) progBar.style.width = pct + '%';
+        const avg = sumMs / Math.max(1, doneCount);
+        const remaining = Math.max(0, total - doneCount);
+        if (progEta && remaining > 0) {
+          const etaMs = remaining * avg;
+          progEta.textContent = etaMs > 1500
+            ? '~' + Math.round(etaMs / 1000) + 's remaining'
+            : '<1s remaining';
+        } else if (progEta) {
+          progEta.textContent = 'finishing…';
+        }
+      } else if (ev.type === 'done') {
+        status.textContent = 'wrote ' + ev.reportPath.split('/').pop() + ' · reloading';
+        status.className = 'status ok';
+      } else if (ev.type === 'result') {
+        lastResult = ev;
+      }
+    }
     try {
-      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/eval', {
+      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/eval/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(baseline ? { baseline_path: baseline } : {}),
       });
-      const body = await res.json();
-      const dt = Date.now() - t0;
-      if (!res.ok || body.ok === false) {
-        status.textContent = 'failed (' + dt + 'ms): ' + (body.error || res.statusText);
+      if (!res.ok || !res.body) {
+        const text = await res.text().catch(() => '');
+        status.textContent = 'failed: HTTP ' + res.status + ' ' + (text || res.statusText);
         status.className = 'status err';
-      } else {
-        status.textContent = 'done (' + dt + 'ms) — reloading';
+        if (progEl) progEl.hidden = true;
+        btn.disabled = false;
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf('\\n')) !== -1) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          try { applyEvent(JSON.parse(line)); } catch (_) {}
+        }
+      }
+      if (buf.trim()) {
+        try { applyEvent(JSON.parse(buf)); } catch (_) {}
+      }
+      const dt = Date.now() - t0;
+      if (lastResult && lastResult.ok) {
+        if (progBar) progBar.style.width = '100%';
+        status.textContent = (status.textContent || ('done in ' + (dt / 1000).toFixed(1) + 's')) + ' — reloading';
         status.className = 'status ok';
-        setTimeout(() => location.reload(), 500);
+        setTimeout(() => location.reload(), 600);
+      } else {
+        const err = (lastResult && lastResult.error) || 'unknown error';
+        status.textContent = 'failed (' + (dt / 1000).toFixed(1) + 's): ' + err;
+        status.className = 'status err';
+        if (progEl) progEl.hidden = true;
       }
     } catch (e) {
       status.textContent = 'network error: ' + (e && e.message ? e.message : e);
       status.className = 'status err';
+      if (progEl) progEl.hidden = true;
     } finally {
       btn.disabled = false;
     }
@@ -1080,9 +1125,7 @@ function bindBaselineActions() {
     unpin.addEventListener('click', async () => {
       unpin.disabled = true;
       try {
-        const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/eval/pin-baseline', {
-          method: 'DELETE',
-        });
+        const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/eval/pin-baseline', { method: 'DELETE' });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           alert((body && body.error) || res.statusText);
@@ -1099,15 +1142,16 @@ function bindBaselineActions() {
 }
 bindBaselineActions();
 
-// Ask 体验台 inner tabs (answer / citations / meta). Scoped to
-// #ask-result so the selector doesn't bleed into the outer project
-// tabs (Ask / Eval / Activity), which use the same [role=tab] +
-// .tab-panel pattern but a distinct data-project-tab attribute.
+// ------------------------------------------------------------------
+// Ask sub-tabs (answer / citations / meta) — scoped to #ask-result so
+// they don't collide with project-level tabs.
+// ------------------------------------------------------------------
 const askResultEl = $('ask-result');
-function setActiveTab(name) {
+function setActiveAskTab(name) {
   if (!askResultEl) return;
   askResultEl.querySelectorAll('[role=tab]').forEach((b) => {
     b.setAttribute('aria-selected', b.dataset.tab === name ? 'true' : 'false');
+    if (b.dataset.tab === name) b.classList.add('active'); else b.classList.remove('active');
   });
   askResultEl.querySelectorAll('.tab-panel').forEach((p) => {
     p.hidden = p.dataset.tab !== name;
@@ -1115,24 +1159,23 @@ function setActiveTab(name) {
 }
 if (askResultEl) {
   askResultEl.querySelectorAll('[role=tab]').forEach((b) => {
-    b.addEventListener('click', () => setActiveTab(b.dataset.tab));
+    b.addEventListener('click', () => setActiveAskTab(b.dataset.tab));
   });
 }
 
-// persist toggle — defaults OFF every page load (no localStorage / cookie
-// per PRD §13 decision: avoid accidentally leaving runs on for days).
+// persist toggle — defaults OFF every page load.
 function setPersistUI(on) {
   const label = $('persist-toggle-label');
   const warn = $('persist-warning');
   const btn = $('btn-ask');
   if (on) {
-    if (label) { label.textContent = '⚠ persist · 写入 runs (source=console)'; label.className = ''; label.style.color = 'var(--err)'; label.style.fontWeight = '600'; }
+    if (label) { label.textContent = '⚠ persist · writes to runs (source=console)'; label.className = ''; label.style.color = 'var(--err)'; label.style.fontWeight = '600'; }
     if (warn) warn.hidden = false;
-    if (btn) { btn.style.background = 'var(--err)'; btn.style.borderColor = 'var(--err)'; }
+    if (btn) btn.classList.add('danger');
   } else {
-    if (label) { label.textContent = 'dry-run · 不写 runs'; label.className = 'muted'; label.style.color = ''; label.style.fontWeight = ''; }
+    if (label) { label.textContent = 'dry-run · don\\u2019t write to runs'; label.className = 'muted'; label.style.color = ''; label.style.fontWeight = ''; }
     if (warn) warn.hidden = true;
-    if (btn) { btn.style.background = ''; btn.style.borderColor = ''; }
+    if (btn) btn.classList.remove('danger');
   }
 }
 const persistToggle = $('persist-toggle');
@@ -1141,14 +1184,10 @@ if (persistToggle) {
   persistToggle.addEventListener('change', () => setPersistUI(persistToggle.checked));
   setPersistUI(false);
 }
-function isPersist() {
-  return !!(persistToggle && persistToggle.checked);
-}
+function isPersist() { return !!(persistToggle && persistToggle.checked); }
 
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]),
-  );
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 function renderAnswer(body) {
@@ -1156,11 +1195,10 @@ function renderAnswer(body) {
   const ansEl = $('ask-answer-md');
   const clarEl = $('ask-clarify');
   const errEl = $('ask-error');
+  if (!result || !ansEl || !clarEl || !errEl) return;
   ansEl.innerHTML = '';
-  clarEl.hidden = true;
-  clarEl.innerHTML = '';
-  errEl.hidden = true;
-  errEl.textContent = '';
+  clarEl.hidden = true; clarEl.innerHTML = '';
+  errEl.hidden = true; errEl.innerHTML = '';
   result.hidden = false;
 
   if (body && body.type === 'answer') {
@@ -1171,18 +1209,48 @@ function renderAnswer(body) {
     ansEl.innerHTML = marked.parse(md);
   } else if (body && body.type === 'clarify') {
     clarEl.hidden = false;
-    let h = '<p class="muted" style="margin-bottom:8px;">需要澄清，请选一个范围：</p>';
-    h += '<p>' + escapeHtml(body.message || '') + '</p>';
+    let h = '<span class="b-ico"><svg><use href="#i-alert"/></svg></span>';
+    h += '<div class="b-bd">';
+    h += '<div class="b-ti">' + (body.message ? escapeHtml(body.message) : 'The question is ambiguous — pick a scope to continue') + '</div>';
     if (Array.isArray(body.options) && body.options.length) {
-      h += '<ul style="padding-left:18px;">' + body.options.map((o) => '<li>' + escapeHtml(o.label || o.scope_id) + '</li>').join('') + '</ul>';
+      h += '<div class="b-de" style="margin-top: 6px;">Pick one to re-ask under that scope, or refine the question above.</div>';
+      h += '<div style="display: flex; flex-direction: column; gap: 6px; margin-top: var(--s-3);">';
+      body.options.forEach((o) => {
+        const label = escapeHtml(o.label || o.scope_id || '');
+        const crumb = Array.isArray(o.breadcrumb) && o.breadcrumb.length
+          ? o.breadcrumb.map((b) => escapeHtml((b && b.title) || '')).filter(Boolean).join(' / ')
+          : '';
+        h += '<button type="button" class="btn" data-scope-id="' + escapeHtml(o.scope_id || '') + '" data-scope-label="' + label + '" style="justify-content: flex-start; height: auto; padding: 10px 12px; text-align: left;">';
+        h += '<svg style="width: 12px; height: 12px; opacity: .6; flex-shrink: 0;"><use href="#i-arr-r"/></svg>';
+        h += '<span style="display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; flex: 1;">';
+        h += '<span>Continue under <b>' + label + '</b></span>';
+        if (crumb) h += '<span style="color: var(--fg-mute); font-size: 11px; font-family: var(--font-mono);">' + crumb + '</span>';
+        h += '</span>';
+        h += '</button>';
+      });
+      h += '</div>';
     }
+    h += '</div>';
     clarEl.innerHTML = h;
+    // Wire each suggestion: re-ask the same textarea question with
+    // context.scope_id set so the child's /v1/ask constrains retrieval.
+    clarEl.querySelectorAll('button[data-scope-id]').forEach((btn) => {
+      btn.addEventListener('click', () => submitAsk({
+        scopeId: btn.dataset.scopeId,
+        scopeLabel: btn.dataset.scopeLabel,
+      }));
+    });
   } else if (body && body.type === 'error') {
     errEl.hidden = false;
-    errEl.textContent = (body.code || 'error') + ': ' + (body.message || '');
+    let h = '<span class="b-ico"><svg><use href="#i-err"/></svg></span>';
+    h += '<div class="b-bd">';
+    h += '<div class="b-ti">' + escapeHtml(body.code || 'error') + '</div>';
+    h += '<div class="b-de">' + escapeHtml(body.message || '') + '</div>';
+    h += '</div>';
+    errEl.innerHTML = h;
   } else {
     errEl.hidden = false;
-    errEl.textContent = 'unexpected response shape';
+    errEl.innerHTML = '<span class="b-ico"><svg><use href="#i-err"/></svg></span><div class="b-bd"><div class="b-ti">unexpected response shape</div></div>';
   }
 }
 
@@ -1202,26 +1270,27 @@ function renderCitations(body) {
   const list = $('ask-cite-list');
   const empty = $('ask-cite-empty');
   const cnt = $('cit-count');
+  if (!list || !empty) return;
   list.innerHTML = '';
   if (!body || body.type !== 'answer' || !Array.isArray(body.citations) || body.citations.length === 0) {
     empty.hidden = false;
-    cnt.textContent = '';
+    if (cnt) cnt.textContent = '';
     return;
   }
   empty.hidden = true;
-  cnt.textContent = '· ' + body.citations.length;
+  if (cnt) cnt.textContent = String(body.citations.length);
   for (const c of body.citations) {
     const div = document.createElement('div');
     div.className = 'cite-item';
     const crumb = Array.isArray(c.breadcrumb) ? c.breadcrumb.map((b) => b.title).join(' › ') : '';
     const inPath = c.in_page_path || '';
     const section = citeSectionLabel(inPath);
-    const langTag = c.source_lang && c.source_lang !== c.lang ? ' <span class="tag warn">cross-lang ' + escapeHtml(c.source_lang) + '→' + escapeHtml(c.lang) + '</span>' : '';
-    const titleSuffix = section ? ' <span style="font-weight:400; color:var(--muted);">· ' + escapeHtml(section) + '</span>' : '';
+    const langTag = c.source_lang && c.source_lang !== c.lang ? '<span class="tag warn">cross-lang ' + escapeHtml(c.source_lang) + '→' + escapeHtml(c.lang) + '</span>' : '';
+    const titleSuffix = section ? ' <span style="font-weight:400; color:var(--fg-mute);">· ' + escapeHtml(section) + '</span>' : '';
     div.innerHTML =
       '<span class="cite">' + escapeHtml(c.citation_id || '·') + '</span>' +
       '<div>' +
-      '  <div class="meta mono">' + escapeHtml(c.page_id || '') + (inPath ? ' · ' + escapeHtml(inPath) : '') + langTag + '</div>' +
+      '  <div class="meta">' + escapeHtml(c.page_id || '') + (inPath ? ' · ' + escapeHtml(inPath) : '') + ' ' + langTag + '</div>' +
       '  <div style="font-weight:600; margin-bottom:4px;">' + escapeHtml(c.title || '') + titleSuffix + '</div>' +
       (crumb ? '<div class="muted" style="font-size:11.5px; margin-bottom:6px;">' + escapeHtml(crumb) + '</div>' : '') +
       '  <div class="snippet">' + escapeHtml(c.snippet || '') + '</div>' +
@@ -1233,6 +1302,7 @@ function renderCitations(body) {
 function renderMeta(body, latencyMs, httpStatus) {
   const meta = $('ask-meta');
   const raw = $('ask-raw');
+  if (!meta || !raw) return;
   meta.innerHTML = '';
   function row(k, v) {
     const dt = document.createElement('dt');
@@ -1265,29 +1335,37 @@ const askBtn = $('btn-ask');
 const askQ = $('ask-q');
 const askStatus = $('ask-status');
 
-async function submitAsk() {
+async function submitAsk(opts) {
+  opts = opts || {};
   if (!askQ || !askBtn) return;
   const question = askQ.value.trim();
   if (!question) {
-    askStatus.textContent = '请输入问题';
+    askStatus.textContent = 'enter a question';
     askStatus.className = 'status err';
     return;
   }
-  // If we know the child is warming, queue instead of hitting /ask blindly.
   if (!warmState.warm) {
     warmState.pendingQuestion = question;
     askStatus.textContent = 'queued · waiting for warm-up...';
-    askStatus.className = 'status muted';
+    askStatus.className = 'status';
     pollHealth();
     return;
   }
   askBtn.disabled = true;
-  askStatus.textContent = 'asking...';
-  askStatus.className = 'status muted';
+  askQ.disabled = true;
+  askStatus.textContent = opts.scopeId
+    ? 'thinking… (scoped to ' + (opts.scopeLabel || opts.scopeId) + ')'
+    : 'thinking… typically 1–3s';
+  askStatus.className = 'status';
   const t0 = Date.now();
   const persist = isPersist();
   try {
     const payload = persist ? { question, persist: true } : { question };
+    // Clarify-suggestion buttons re-submit the SAME question with a scope_id
+    // so the child's /v1/ask constrains retrieval to that subtree (ARCH §11).
+    if (opts.scopeId) {
+      payload.context = { scope_id: opts.scopeId };
+    }
     const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1297,30 +1375,36 @@ async function submitAsk() {
     let body;
     try { body = JSON.parse(text); } catch (_) { body = { type: 'error', code: 'invalid_response', message: text }; }
     const dt = Date.now() - t0;
-    // Race: child flipped back to warming (rare; e.g. forceReindex) — re-queue.
     if (res.status === 503 && body && body.code === 'warming') {
       warmState.warm = false;
       warmState.pendingQuestion = question;
       askStatus.textContent = 'child still warming · re-queued';
-      askStatus.className = 'status muted';
+      askStatus.className = 'status';
       pollHealth();
       return;
     }
-    const persistedTail = body && body._persisted ? ' · ✎ wrote runs (source=console)' : '';
-    askStatus.textContent = 'http ' + res.status + ' · ' + dt + 'ms' + persistedTail;
-    askStatus.className = res.ok ? 'status ok' : 'status err';
+    const confTail = body && body.type === 'answer' && body.confidence != null ? ' · confidence ' + body.confidence.toFixed(2) : '';
+    const persistedTail = body && body._persisted ? ' · wrote runs' : '';
+    const kindLabel = body && body.type === 'clarify' ? 'clarify · ' + (dt / 1000).toFixed(1) + 's' :
+                       body && body.type === 'error' ? 'http ' + res.status + ' · ' + dt + 'ms' :
+                       'answered · ' + (dt / 1000).toFixed(1) + 's' + confTail + persistedTail;
+    askStatus.textContent = kindLabel;
+    askStatus.className = body && body.type === 'answer' ? 'status ok' :
+                          body && body.type === 'clarify' ? 'status' :
+                          'status err';
     renderAnswer(body);
     renderCitations(body);
     renderMeta(body, dt, res.status);
-    setActiveTab('answer');
+    setActiveAskTab('answer');
   } catch (e) {
     askStatus.textContent = 'network error: ' + (e && e.message ? e.message : e);
     askStatus.className = 'status err';
   } finally {
     askBtn.disabled = false;
+    askQ.disabled = false;
   }
 }
-if (askBtn) askBtn.addEventListener('click', submitAsk);
+if (askBtn) askBtn.addEventListener('click', () => submitAsk());
 if (askQ) {
   askQ.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
@@ -1330,22 +1414,23 @@ if (askQ) {
   });
 }
 
-// Autostart: if /p/:name?autostart=1 and child is not yet live, kick off
-// /start once on page load. Idempotent — registry returns reused:true if
-// the child is already running between the request landing and JS firing.
-// After a successful start, jump straight into health polling instead of
-// reloading — preserves any question the author already typed.
+// Re-ask handler — Traffic tab fills #ask-q and switches to Ask tab.
+window.addEventListener('console:reask', (e) => {
+  if (askQ && e.detail && e.detail.query) askQ.value = e.detail.query;
+  setProjectTab('ask');
+});
+
+// Autostart
 if (cfg.valid && cfg.autostart && !cfg.live) {
-  const status = $('lifecycle-status');
-  if (status) { status.textContent = 'auto-starting...'; status.className = 'status muted'; }
+  const status = $('lifecycle-status-ask');
+  if (status) { status.textContent = 'auto-starting...'; status.className = 'status'; }
   fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/start', { method: 'POST' })
     .then((r) => r.json())
     .then((body) => {
       if (body && body.ok) {
-        if (status) { status.textContent = 'started · :' + body.port + ' · warming...'; status.className = 'status muted'; }
-        setStatusPill('idle', 'warming · 0s');
+        if (status) { status.textContent = 'started · :' + body.port + ' · warming...'; status.className = 'status'; }
+        setStatusPill('warn', 'warming · 0s');
         pollHealth();
-        // Clean ?autostart=1 from the URL so a manual refresh won't re-trigger.
         history.replaceState({}, '', location.pathname);
       } else if (status) {
         status.textContent = (body && body.error) || 'autostart failed';
@@ -1356,8 +1441,6 @@ if (cfg.valid && cfg.autostart && !cfg.live) {
       if (status) { status.textContent = 'autostart err: ' + e.message; status.className = 'status err'; }
     });
 } else if (cfg.valid && cfg.live) {
-  // Already live on SSR; verify warm state. Child may have been warm for a
-  // while (instant resolve) or could be mid-fullReindex (poll until warm).
   pollHealth();
 }
 `;

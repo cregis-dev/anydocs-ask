@@ -1,13 +1,10 @@
 /**
- * Traffic tab content for /p/:name — ARCH §17.3.6.
+ * Traffic tab — ARCH §17.3.6.
  *
- * Replaces the previous "Activity" tab + standalone /p/:name/runs page.
- * Rolling 7-day health strip + filter bar + runs table with expandable
- * rows (full fused retrieval, answer markdown, Re-ask jump to Ask tab).
- *
- * SSR renders the row table; JS layers filter (show/hide) and inline
- * row expansion. Window length default 7d (currently fixed; --days
- * selector is a Phase 2+ polish).
+ * Health KPI strip + filterable runs table + analyze section.
+ * Rolls up the rolling 7-day window from `loadTrafficWindow`. The runs
+ * table supports expandable rows (full fused retrieval + answer markdown +
+ * re-ask) — expansion JS lives in the inline TRAFFIC_SCRIPT below.
  */
 
 import { html, raw } from 'hono/html';
@@ -27,146 +24,198 @@ export type TrafficTabViewModel = {
 export function renderTrafficTab(vm: TrafficTabViewModel): Html {
   const { window: w } = vm;
   const noRuns = w.records.length === 0;
-  // Hide analyze section entirely when there's nothing yet to analyze AND no
-  // historical reports — otherwise it's a tease ("▶ run analyze" with nothing
-  // for it to chew on). Once any runs exist OR a prior analyze landed, the
-  // section reappears.
   const showAnalyze = !noRuns || vm.analyzeHistory.length > 0;
   return html`
-    <div class="traffic-tab">
-      ${noRuns ? '' : healthStrip(w)}
-      ${noRuns ? emptyState(w.sinceISO) : trafficTable(w)}
+    <div class="traffic-tab" style="display: flex; flex-direction: column; gap: var(--s-5);">
+      ${noRuns ? '' : trafficHealthBanner(w)}
+      ${noRuns ? emptyCard() : html`
+        ${healthStrip(w)}
+        ${runsCard(w)}
+      `}
       ${showAnalyze ? analyzeCard(vm.projectName, vm.analyzeHistory, vm.latestAnalyzeBody) : ''}
     </div>
-    <script>${raw(`window.__TRAFFIC__ = ${rawJSON(w.records)};`)}</script>
+    <div class="drawer-mask" id="tf-drawer-mask" hidden></div>
+    <aside class="drawer" id="tf-drawer" hidden role="dialog" aria-label="Run detail">
+      <div class="drawer-hd" id="tf-drawer-hd"></div>
+      <div class="drawer-bd" id="tf-drawer-bd"></div>
+    </aside>
+    <script>${raw(`window.__TRAFFIC__ = ${JSON.stringify([...w.records].reverse())};`)}</script>
     <script type="module">${raw(TRAFFIC_SCRIPT)}</script>
-    <style>
-      .traffic-tab .strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px; }
-      .traffic-tab .kpi { background: var(--bg-elev); border: 1px solid var(--bd); border-radius: 8px; padding: 12px 14px; }
-      .traffic-tab .kpi .k { font-size: 11px; color: var(--fg-mute); text-transform: uppercase; letter-spacing: .05em; }
-      .traffic-tab .kpi .v { font-size: 22px; font-weight: 600; font-family: ui-monospace, monospace; letter-spacing: -0.01em; margin-top: 4px; }
-      .traffic-tab .kpi .v.warn { color: var(--warn); }
-      .traffic-tab .kpi .v.err { color: var(--err); }
-      .traffic-tab .kpi .spark { font-family: ui-monospace, monospace; color: var(--accent); font-size: 14px; letter-spacing: -1px; margin-top: 4px; }
-      .traffic-filter { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; padding: 10px 18px; }
-      .traffic-filter input[type=search] { min-width: 200px; max-width: 320px; }
-      .traffic-tab .src-pill { display: inline-block; padding: 0 5px; border-radius: 4px; font-size: 10px; font-weight: 600; margin-left: 4px; vertical-align: 1px; }
-      .traffic-tab .src-pill.reader { background: var(--run-bg); color: var(--run); }
-      .traffic-tab .src-pill.console { background: var(--warn-bg); color: var(--warn); }
-      .traffic-tab .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 14px 16px; }
-      @media (max-width: 900px) { .traffic-tab .detail-grid { grid-template-columns: 1fr; } }
-      .traffic-tab .detail-grid h4 { font-size: 11px; color: var(--fg-mute); text-transform: uppercase; letter-spacing: .05em; margin: 0 0 6px; }
-      .traffic-tab .fused-tbl { width: 100%; border-collapse: collapse; font-size: 11.5px; }
-      .traffic-tab .fused-tbl td, .traffic-tab .fused-tbl th { padding: 3px 6px; border-bottom: 1px solid var(--bd-soft); text-align: left; }
-      .traffic-tab .fused-tbl th { font-size: 10px; color: var(--fg-mute); text-transform: uppercase; }
-      .traffic-tab .detail-meta dl { margin: 0; }
-      .traffic-tab .answer-md pre { max-height: 180px; }
-      .reask-btn { padding: 2px 10px; font-size: 11.5px; margin-top: 8px; }
-    </style>
+  `;
+}
+
+function trafficHealthBanner(w: TrafficWindow): Html {
+  // Surface a banner only when something concerning crossed a threshold.
+  const t = w.totals;
+  if (t.errorRate > 0.05) {
+    return html`
+      <div class="banner err">
+        <span class="b-ico"><svg><use href="#i-err"/></svg></span>
+        <div class="b-bd">
+          <div class="b-ti">Last ${w.days}d error rate ${(t.errorRate * 100).toFixed(1)}%</div>
+          <div class="b-de">Filter kind=error in the table below to see the failing requests.</div>
+        </div>
+      </div>
+    `;
+  }
+  if (t.p95LatencyMs !== null && t.p95LatencyMs > 3000) {
+    return html`
+      <div class="banner warn">
+        <span class="b-ico"><svg><use href="#i-alert"/></svg></span>
+        <div class="b-bd">
+          <div class="b-ti">P95 latency ${(t.p95LatencyMs / 1000).toFixed(1)}s</div>
+          <div class="b-de">Median is ${t.p50LatencyMs ? Math.round(t.p50LatencyMs) + 'ms' : '—'}. Run analyze for the breakdown.</div>
+        </div>
+      </div>
+    `;
+  }
+  return html``;
+}
+
+function emptyCard(): Html {
+  return html`
+    <section class="card">
+      <div class="card-bd">
+        <div class="empty">
+          <div class="e-ico"><svg><use href="#i-chart"/></svg></div>
+          <h3>No traffic yet</h3>
+          <p>Once a Reader client or this console hits <code class="inline">/v1/ask</code>, you'll see
+            request volume, confidence, latency, and error trends here over a rolling 7-day window.</p>
+          <div class="e-cta">
+            <a href="#ask" class="btn primary">
+              <svg><use href="#i-chat"/></svg> dogfood from the Ask tab
+            </a>
+          </div>
+        </div>
+      </div>
+    </section>
   `;
 }
 
 function healthStrip(w: TrafficWindow): Html {
-  const { totals, perDay } = w;
-  const fmt = (n: number | null, digits = 2): string => (n === null ? '—' : n.toFixed(digits));
-  const ms = (n: number | null): string => (n === null ? '—' : `${Math.round(n)}ms`);
+  const t = w.totals;
+  const fmt = (n: number | null, d = 2): string => (n === null ? '—' : n.toFixed(d));
+  const ms = (n: number | null): string =>
+    n === null ? '—' : n >= 1000 ? `${(n / 1000).toFixed(1)}s` : `${Math.round(n)}ms`;
   const pct = (n: number): string => `${(n * 100).toFixed(1)}%`;
-  const sparkCount = sparkline(perDay.map((d) => d.count));
-  const sparkConf = sparkline(perDay.map((d) => d.meanConfidence));
-  const sparkLat = sparkline(perDay.map((d) => d.p95LatencyMs));
+  const sparkCount = svgPolyline(w.perDay.map((d) => d.count), 'accent');
+  const sparkConf = svgPolyline(w.perDay.map((d) => d.meanConfidence), 'ok');
+  const latencyWarn = t.p95LatencyMs !== null && t.p95LatencyMs > 3000;
+  const errWarn = t.errorRate > 0.05;
   return html`
-    <div class="strip">
+    <div class="kpis" style="grid-template-columns: repeat(4, 1fr);">
       <div class="kpi">
-        <div class="k">queries · ${w.days}d</div>
-        <div class="v">${totals.count}</div>
-        <div class="muted" style="font-size: 11px;">
-          reader ${totals.countReader} · console ${totals.countConsole}
-        </div>
-        <div class="spark">${sparkCount}</div>
+        <div class="k-lab">queries · ${w.days}d</div>
+        <div class="k-val">${t.count}</div>
+        <div class="k-foot">reader ${t.countReader} · console ${t.countConsole}</div>
+        ${raw(`<div style="margin-top:6px;">${sparkCount}</div>`)}
       </div>
       <div class="kpi">
-        <div class="k">mean confidence</div>
-        <div class="v ${totals.meanConfidence !== null && totals.meanConfidence < 0.5 ? 'warn' : ''}">
-          ${fmt(totals.meanConfidence)}
+        <div class="k-lab">mean confidence</div>
+        <div class="k-val">${fmt(t.meanConfidence)}</div>
+        <div class="k-foot" style="color: ${t.meanConfidence !== null && t.meanConfidence < 0.5 ? 'var(--warn)' : 'var(--ok)'};">
+          across all kinds
         </div>
-        <div class="muted" style="font-size: 11px;">across all kinds</div>
-        <div class="spark">${sparkConf}</div>
+        ${raw(`<div style="margin-top:6px;">${sparkConf}</div>`)}
       </div>
-      <div class="kpi">
-        <div class="k">P95 latency</div>
-        <div class="v ${totals.p95LatencyMs !== null && totals.p95LatencyMs > 5000 ? 'warn' : ''}">${ms(totals.p95LatencyMs)}</div>
-        <div class="muted" style="font-size: 11px;">P50 ${ms(totals.p50LatencyMs)}</div>
-        <div class="spark">${sparkLat}</div>
+      <div class="kpi${latencyWarn ? ' warn' : ''}">
+        <div class="k-lab">p95 latency</div>
+        <div class="k-val">${ms(t.p95LatencyMs)}</div>
+        <div class="k-foot">p50 ${ms(t.p50LatencyMs)}${latencyWarn ? html` · <span style="color: var(--warn);">slow</span>` : ''}</div>
       </div>
-      <div class="kpi">
-        <div class="k">non-answer rate</div>
-        <div class="v ${totals.errorRate > 0.05 ? 'err' : totals.clarifyRate > 0.2 ? 'warn' : ''}">
-          ${pct(totals.errorRate + totals.clarifyRate)}
-        </div>
-        <div class="muted" style="font-size: 11px;">
-          error ${pct(totals.errorRate)} · clarify ${pct(totals.clarifyRate)}
-        </div>
+      <div class="kpi${errWarn ? ' err' : ''}">
+        <div class="k-lab">non-answer rate</div>
+        <div class="k-val">${pct(t.errorRate + t.clarifyRate)}</div>
+        <div class="k-foot">${pct(t.errorRate)} error · ${pct(t.clarifyRate)} clarify</div>
       </div>
     </div>
   `;
 }
 
-function emptyState(sinceISO: string): Html {
-  return html`
-    <div class="card" style="text-align: center; padding: 32px 24px;">
-      <div style="font-size: 22px; line-height: 1; margin-bottom: 10px; opacity: .5;">📊</div>
-      <h2 style="margin: 0 0 6px; font-size: 15px; text-transform: none; letter-spacing: 0; color: var(--fg);">No traffic yet</h2>
-      <p class="muted" style="font-size: 12.5px; max-width: 480px; margin: 0 auto;">
-        since <code class="mono">${sinceISO}</code> · ask 一些问题就会出现在这里。
-      </p>
-      <p class="muted" style="font-size: 11.5px; max-width: 520px; margin: 12px auto 0; line-height: 1.6;">
-        Dogfood：到 <strong>Ask</strong> tab 打开 <em>persist</em> 开关后提问,会落 <code>source=console</code>。<br />
-        真实流量：让 Reader / 客户端调用 <code class="mono">/v1/ask</code>(子进程 :port)即可。
-      </p>
-    </div>
-  `;
+function svgPolyline(values: Array<number | null>, cls: 'accent' | 'ok' | 'warn' | 'err'): string {
+  const valid = values.filter((v): v is number => v !== null);
+  if (valid.length < 2) return '';
+  const min = Math.min(...valid);
+  const max = Math.max(...valid);
+  const span = max - min || 1;
+  const pts = values
+    .map((v, i) => {
+      const x = (i / Math.max(1, values.length - 1)) * 80;
+      const y = v === null ? 11 : 20 - ((v - min) / span) * 18;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+  return `<svg class="spark ${cls}" viewBox="0 0 80 22" style="width:100%;"><polyline points="${pts}"/></svg>`;
 }
 
-function trafficTable(w: TrafficWindow): Html {
-  // Newest-first display order
+function runsCard(w: TrafficWindow): Html {
   const ordered = [...w.records].reverse();
   return html`
-    <div class="card flush">
-      <div class="card-head traffic-filter">
-        <h2 style="margin:0;">runs · ${ordered.length}</h2>
-        <input id="tf-q" type="search" placeholder="filter query…" />
-        <select id="tf-source" class="proj-switcher">
-          <option value="">all sources</option>
-          <option value="reader">reader only</option>
-          <option value="console">console only</option>
-        </select>
-        <select id="tf-kind" class="proj-switcher">
-          <option value="">all kinds</option>
-          <option value="answer">answer</option>
-          <option value="clarify">clarify</option>
-          <option value="error">error</option>
-        </select>
-        <select id="tf-conf" class="proj-switcher">
-          <option value="">conf any</option>
-          <option value="0.8">conf ≥ 0.8</option>
-          <option value="0.6">conf ≥ 0.6</option>
-          <option value="0.4">conf ≥ 0.4</option>
-        </select>
+    <section class="card flush">
+      <div class="card-hd">
+        <h2>Recent runs</h2>
+        <div class="actions" style="display: flex; gap: var(--s-2); align-items: center;">
+          <div style="position: relative;">
+            <svg style="position: absolute; left: 8px; top: 50%; transform: translateY(-50%); width: 13px; height: 13px; color: var(--fg-mute);"><use href="#i-search"/></svg>
+            <input id="tf-q" class="input" type="search" placeholder="filter query, source, kind…" style="padding-left: 28px; height: 30px; width: 280px; font-size: var(--t-13);" autocomplete="off" />
+          </div>
+          <select id="tf-source" class="select" style="height: 30px; padding: 0 24px 0 10px; font-size: var(--t-12); width: auto;">
+            <option value="">all sources</option>
+            <option value="reader">reader</option>
+            <option value="console">console</option>
+          </select>
+          <select id="tf-kind" class="select" style="height: 30px; padding: 0 24px 0 10px; font-size: var(--t-12); width: auto;">
+            <option value="">all kinds</option>
+            <option value="answer">answer</option>
+            <option value="clarify">clarify</option>
+            <option value="error">error</option>
+          </select>
+          <select id="tf-conf" class="select" style="height: 30px; padding: 0 24px 0 10px; font-size: var(--t-12); width: auto;">
+            <option value="">conf any</option>
+            <option value="0.8">conf ≥ 0.8</option>
+            <option value="0.6">conf ≥ 0.6</option>
+            <option value="0.4">conf ≥ 0.4</option>
+          </select>
+        </div>
       </div>
-      <table id="traffic-tbl">
-        <thead>
-          <tr>
-            <th style="width: 80px;">ts</th>
-            <th style="width: 100px;">kind</th>
-            <th style="width: 56px;">conf</th>
-            <th style="width: 70px;">latency</th>
-            <th>query</th>
-            <th>citations</th>
-          </tr>
-        </thead>
-        <tbody id="tf-body">${ordered.map((r, i) => trafficRow(r, i))}</tbody>
-      </table>
-    </div>
+      <div class="card-bd flush">
+        <table class="tbl" id="traffic-tbl">
+          <thead>
+            <tr>
+              <th style="width: 80px;">time</th>
+              <th style="width: 90px;">source</th>
+              <th>question</th>
+              <th class="num" style="width: 70px;">kind</th>
+              <th class="num" style="width: 56px;">conf</th>
+              <th class="num" style="width: 70px;">latency</th>
+            </tr>
+          </thead>
+          <tbody id="tf-body">${ordered.map((r, i) => trafficRow(r, i))}</tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+function trafficRow(r: RunRecord, idx: number): Html {
+  const a = r.answer;
+  const kindCls = a.kind === 'answer' ? 'ok' : a.kind === 'clarify' ? 'warn' : 'err';
+  const conf = a.confidence !== null ? a.confidence.toFixed(2) : '—';
+  const src = runSource(r);
+  const latencyText = a.latency_ms >= 1000 ? `${(a.latency_ms / 1000).toFixed(1)}s` : `${Math.round(a.latency_ms)}ms`;
+  return html`
+    <tr class="clickable" data-idx="${idx}"
+        data-kind="${a.kind}"
+        data-conf="${a.confidence ?? -1}"
+        data-source="${src}"
+        data-q="${(r.query ?? '').toLowerCase()}">
+      <td class="mono">${r.ts.slice(11, 19)}</td>
+      <td><span class="tag">${src}</span></td>
+      <td>${r.query}</td>
+      <td class="num"><span class="tag ${kindCls}">${a.kind}</span></td>
+      <td class="num">${conf === '—' ? html`<span class="muted">—</span>` : conf}</td>
+      <td class="num">${latencyText}</td>
+    </tr>
   `;
 }
 
@@ -176,87 +225,66 @@ function analyzeCard(
   latestBody: string | null,
 ): Html {
   const latest = history[0];
-  const latestBodyJSON = latestBody !== null ? raw(JSON.stringify(latestBody)) : 'null';
+  const latestBodyJson = latestBody !== null ? raw(JSON.stringify(latestBody)) : 'null';
   return html`
-    <div class="card analyze-card" style="margin-top: 18px;">
-      <div class="card-head" style="padding: 0 0 10px; border-bottom: 1px solid var(--bd-soft); margin: -2px 0 12px; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;">
-        <h2 style="margin: 0;">analyze runs</h2>
+    <section class="card">
+      <div class="card-hd">
+        <h2><svg style="width: 14px; height: 14px;"><use href="#i-chart"/></svg> Analyze runs</h2>
         ${latest
-          ? html`<span class="muted mono" style="font-size: 11.5px;">latest · ${latest.date}</span>`
-          : html`<span class="muted" style="font-size: 11.5px;">no report yet</span>`}
+          ? html`<span class="meta">latest · ${latest.date}</span>`
+          : html`<span class="meta">no report yet</span>`}
       </div>
-      <div class="btn-row" style="align-items: center; margin-bottom: 10px;">
-        <button id="btn-traffic-analyze" class="btn-primary">▶ run analyze · 7d</button>
-        <label style="display:inline-flex; align-items:center; gap: 5px; font-size: 12.5px; color: var(--fg-soft);">
-          <input type="checkbox" id="analyze-include-console" /> include console traffic
-        </label>
-        <span id="traffic-analyze-status" class="status muted"></span>
-      </div>
-      ${latest && latestBody !== null
-        ? html`
-            <details open style="margin-top: 6px;">
-              <summary style="cursor: pointer; font-size: 12.5px; color: var(--fg-soft);">latest report inline</summary>
-              <div id="analyze-md" class="md" style="margin-top: 10px;"></div>
-              <p style="margin-top: 8px;"><a href="/p/${projectName}/reports/${latest.filename}" class="muted" style="font-size: 11.5px;">open standalone →</a></p>
-            </details>
-            <script type="module">${raw(`
-              import { marked } from '/console/static/marked.esm.js';
-              marked.setOptions({ breaks: true, gfm: true });
-              var body = ${latestBodyJSON};
-              if (body) document.getElementById('analyze-md').innerHTML = marked.parse(body);
-            `)}</script>
+      <div class="card-bd">
+        <div style="display: flex; align-items: flex-end; gap: var(--s-4); flex-wrap: wrap;">
+          <div style="flex: 1; min-width: 260px;">
+            <div style="font-weight: 600; font-size: var(--t-15); margin-bottom: 4px;">Roll up the last 7 days into a markdown report</div>
+            <div style="font-size: var(--t-13); color: var(--fg-soft);">Clusters questions, finds low-confidence buckets, recall cliffs, and citation regressions.</div>
+          </div>
+          <label class="check">
+            <input type="checkbox" id="analyze-include-console" /> include console traffic
+          </label>
+          <button id="btn-traffic-analyze" class="btn primary lg">
+            <svg><use href="#i-play"/></svg> run analyze · 7d
+          </button>
+        </div>
+        <p id="traffic-analyze-status" class="status" style="margin-top: var(--s-3);"></p>
+        ${latest && latestBody !== null
+          ? html`
+            <div style="margin-top: var(--s-5); padding-top: var(--s-4); border-top: 1px solid var(--bd-soft);">
+              <details open>
+                <summary style="cursor: pointer; font-size: var(--t-12); color: var(--fg-soft); margin-bottom: var(--s-2);">latest report inline</summary>
+                <div id="analyze-md" class="md"></div>
+                <p style="margin-top: var(--s-2);"><a href="/p/${projectName}/reports/${latest.filename}" class="muted" style="font-size: var(--t-12);">open standalone →</a></p>
+              </details>
+              <script type="module">${raw(`
+                import { marked } from '/console/static/marked.esm.js';
+                marked.setOptions({ breaks: true, gfm: true });
+                var body = ${latestBodyJson};
+                if (body) document.getElementById('analyze-md').innerHTML = marked.parse(body);
+              `)}</script>
+            </div>
           `
-        : ''}
-      ${history.length > 1
-        ? html`
-            <details style="margin-top: 8px;">
-              <summary style="cursor: pointer; font-size: 12.5px; color: var(--fg-soft);">history (${history.length})</summary>
-              <ul style="list-style: none; padding: 0; margin: 8px 0 0;">
+          : ''}
+        ${history.length > 1
+          ? html`
+            <details style="margin-top: var(--s-3);">
+              <summary style="cursor: pointer; font-size: var(--t-12); color: var(--fg-soft);">history (${history.length})</summary>
+              <ul style="list-style: none; padding: 0; margin: var(--s-2) 0 0;">
                 ${history.slice(1).map(
-                  (h) => html`
-                    <li style="padding: 4px 0; font-size: 12px;">
-                      <span class="mono muted">${h.date}</span> ·
-                      <a class="mono" href="/p/${projectName}/reports/${h.filename}">${h.filename}</a>
-                    </li>
-                  `,
+                  (h) => html`<li style="padding: 4px 0; font-size: var(--t-12);">
+                    <span class="mono muted">${h.date}</span> ·
+                    <a class="mono" href="/p/${projectName}/reports/${h.filename}">${h.filename}</a>
+                  </li>`,
                 )}
               </ul>
             </details>
           `
-        : ''}
-      <p class="muted" style="font-size: 11px; margin-top: 10px;">
-        Three axes: D1 recall failures · D2 latency anomalies · D3 clarify cliffs.<br />
-        Excludes <code>source=console</code> by default — tick "include console" to mix in your own dogfood traffic.
-      </p>
-    </div>
-  `;
-}
-
-function trafficRow(r: RunRecord, idx: number): Html {
-  const a = r.answer;
-  const kindCls = a.kind === 'answer' ? 'ok' : a.kind === 'clarify' ? 'warn' : 'err';
-  const conf = a.confidence !== null ? a.confidence.toFixed(2) : '—';
-  const cits =
-    a.kind === 'answer' && a.citations.length > 0
-      ? a.citations.map((c) => c.page).join(', ')
-      : '—';
-  const src = runSource(r);
-  return html`
-    <tr class="expandable" data-idx="${idx}"
-        data-kind="${a.kind}"
-        data-conf="${a.confidence ?? -1}"
-        data-source="${src}"
-        data-q="${(r.query ?? '').toLowerCase()}">
-      <td class="mono muted" style="font-size: 11px;">${r.ts.slice(11, 19)}</td>
-      <td>
-        <span class="tag ${kindCls}">${a.kind}</span>
-        <span class="src-pill ${src}">${src}</span>
-      </td>
-      <td class="mono">${conf}</td>
-      <td class="mono">${a.latency_ms}ms</td>
-      <td>${r.query}</td>
-      <td class="mono muted" style="font-size: 12px;">${cits}</td>
-    </tr>
+          : ''}
+        <p class="muted" style="font-size: 11px; margin-top: var(--s-3);">
+          Excludes <code class="inline">source=console</code> by default — tick "include console" to mix in dogfood.
+        </p>
+      </div>
+    </section>
   `;
 }
 
@@ -280,7 +308,7 @@ function applyFilter() {
   const k = $('tf-kind').value;
   const s = $('tf-source').value;
   const minC = parseFloat($('tf-conf').value);
-  for (const tr of tbody.querySelectorAll('tr.expandable')) {
+  for (const tr of tbody.querySelectorAll('tr.clickable')) {
     const trQ = tr.dataset.q || '';
     const trK = tr.dataset.kind || '';
     const trS = tr.dataset.source || '';
@@ -291,140 +319,182 @@ function applyFilter() {
     if (s && trS !== s) show = false;
     if (!isNaN(minC) && trC < minC) show = false;
     tr.style.display = show ? '' : 'none';
-    const next = tr.nextElementSibling;
-    if (next && next.classList.contains('expanded')) {
-      next.style.display = show ? '' : 'none';
-    }
   }
 }
 ['tf-q', 'tf-kind', 'tf-source', 'tf-conf'].forEach((id) => {
   const el = $(id);
   if (el) el.addEventListener('input', applyFilter);
+  if (el) el.addEventListener('change', applyFilter);
 });
 
-function detailHtml(r, idx) {
+function fmtLatency(ms) {
+  if (ms == null) return '—';
+  return ms >= 1000 ? (ms / 1000).toFixed(2) + 's' : Math.round(ms) + 'ms';
+}
+
+function drawerHeadHtml(r) {
+  const a = r.answer || {};
+  const src = r.source || 'reader';
+  const kindCls = a.kind === 'answer' ? 'ok' : a.kind === 'clarify' ? 'warn' : 'err';
+  return (
+    '<div style="display:flex; align-items:center; gap:var(--s-3); min-width:0;">' +
+      '<span class="tag">' + escapeHtml(src) + '</span>' +
+      '<span class="tag ' + kindCls + '">' + escapeHtml(a.kind || '—') + '</span>' +
+      '<h2 style="font-family:var(--font-mono); font-size:var(--t-13); font-weight:600;">run · ' +
+        escapeHtml(String(r.ts || '').replace('T', ' ').slice(0, 19)) + '</h2>' +
+    '</div>' +
+    '<button class="icon-btn" id="tf-drawer-close" title="close" aria-label="close"><svg><use href="#i-x"/></svg></button>'
+  );
+}
+
+function drawerSec(title, sub, body) {
+  return '<div class="drawer-sec"><div class="drawer-sec-hd"><h3>' + title +
+    (sub ? ' <span class="h3-sub">' + sub + '</span>' : '') + '</h3></div>' + body + '</div>';
+}
+
+function drawerBodyHtml(r) {
   const a = r.answer || {};
   const fused = (r.retrieval && r.retrieval.fused) || [];
-  let fusedTbl = '';
-  if (fused.length > 0) {
-    fusedTbl = '<table class="fused-tbl"><thead><tr><th>page</th><th>final</th><th>rrf</th><th>vec</th><th>bm25</th><th>nav</th></tr></thead><tbody>';
-    for (const f of fused.slice(0, 8)) {
-      fusedTbl += '<tr>' +
-        '<td>' + escapeHtml(f.page || '') + '</td>' +
-        '<td>' + (f.final_score != null ? f.final_score.toFixed(3) : '—') + '</td>' +
-        '<td>' + (f.rrf_score != null ? f.rrf_score.toFixed(3) : '—') + '</td>' +
-        '<td>' + (f.vec_rank ?? '—') + '</td>' +
-        '<td>' + (f.bm25_rank ?? '—') + '</td>' +
-        '<td>' + (f.nav_index ?? '—') + '</td>' +
-        '</tr>';
-    }
-    fusedTbl += '</tbody></table>';
-    if (fused.length > 8) {
-      fusedTbl += '<p class="muted" style="font-size:11px; margin-top:4px;">... ' + (fused.length - 8) + ' more</p>';
-    }
-  } else {
-    fusedTbl = '<p class="muted" style="font-size:12px;">no fused trace</p>';
-  }
+  let out = '';
 
-  const meta = [
+  // QUESTION
+  out += drawerSec('QUESTION', r.context_pageId ? 'ctx ' + escapeHtml(r.context_pageId) : '',
+    '<div style="font-size:var(--t-15); line-height:1.5; color:var(--fg);">' + escapeHtml(r.query || '') + '</div>');
+
+  // METRICS — only total latency + confidence are recorded per run; the
+  // embed/retrieval/generate split isn't in the runs jsonl schema (ARCH §16.4).
+  out += drawerSec('METRICS', 'total ' + fmtLatency(a.latency_ms),
+    '<div class="kpis" style="grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--s-2);">' +
+      '<div class="kpi" style="padding:10px 12px;"><div class="k-lab">confidence</div>' +
+        '<div class="k-val" style="font-size:var(--t-18);">' + (a.confidence != null ? a.confidence.toFixed(2) : '—') + '</div></div>' +
+      '<div class="kpi" style="padding:10px 12px;"><div class="k-lab">latency</div>' +
+        '<div class="k-val" style="font-size:var(--t-18);">' + fmtLatency(a.latency_ms) + '</div></div>' +
+    '</div>');
+
+  // ANSWER + citations
+  const cits = Array.isArray(a.citations) ? a.citations : [];
+  let ansBody = '<div class="md" style="font-size:var(--t-13);">' +
+    (a.md ? marked.parse(a.md)
+          : '<p class="muted">' + (a.error_code ? 'error · ' + escapeHtml(a.error_code) : 'no answer body') + '</p>') +
+    '</div>';
+  if (cits.length > 0) {
+    ansBody += '<div style="margin-top:var(--s-3);">';
+    cits.forEach((c, i) => {
+      ansBody += '<div class="cit"><span class="ci-no"><span class="cite">' + (i + 1) + '</span></span>' +
+        '<div class="ci-bd"><div class="ci-ti">' + escapeHtml(c.page || '') + '</div>' +
+        (c.quote ? '<div class="ci-sn">' + escapeHtml(c.quote) + '</div>' : '') +
+        '</div></div>';
+    });
+    ansBody += '</div>';
+  }
+  out += drawerSec('ANSWER', cits.length > 0 ? '· ' + cits.length + ' citation' + (cits.length === 1 ? '' : 's') : '', ansBody);
+
+  // RETRIEVAL — fused trace (final / rrf / vec / bm25 / nav components)
+  let retBody;
+  if (fused.length > 0) {
+    retBody = '<table class="tbl" style="font-size:var(--t-12);"><thead><tr>' +
+      '<th>page · chunk</th><th class="num">final</th><th class="num">rrf</th>' +
+      '<th class="num">vec</th><th class="num">bm25</th><th class="num">nav</th></tr></thead><tbody>';
+    fused.forEach((f) => {
+      retBody += '<tr><td>' + escapeHtml(f.page || '') +
+        ' <span class="mono" style="color:var(--fg-mute);">#' + f.chunk_id + '</span></td>' +
+        '<td class="num">' + (f.final_score != null ? f.final_score.toFixed(3) : '—') + '</td>' +
+        '<td class="num">' + (f.rrf_score != null ? f.rrf_score.toFixed(3) : '—') + '</td>' +
+        '<td class="num">' + (f.vec_rank != null ? f.vec_rank : '—') + '</td>' +
+        '<td class="num">' + (f.bm25_rank != null ? f.bm25_rank : '—') + '</td>' +
+        '<td class="num">' + (f.nav_index != null ? f.nav_index : '—') + '</td></tr>';
+    });
+    retBody += '</tbody></table>';
+  } else {
+    retBody = '<p class="muted" style="font-size:var(--t-12);">no fused retrieval trace</p>';
+  }
+  const retSub = '· ' + fused.length + ' fused' +
+    (r.retrieval && r.retrieval.subtree_ask_triggered ? ' · subtree-ask' : '');
+  out += drawerSec('RETRIEVAL', retSub, retBody);
+
+  // CONFIG — the metadata actually carried on the run record
+  const cfg = [
     ['model', a.model],
     ['answer_id', a.answer_id],
     ['request_id', r.request_id],
+    ['session_id', r.session_id],
     ['tokens_in', a.tokens_in],
     ['tokens_out', a.tokens_out],
     ['error_code', a.error_code],
   ].filter((kv) => kv[1] != null);
-  const metaHtml = meta.map((kv) => '<div class="row" style="display:grid; grid-template-columns:92px 1fr; gap:6px; font-size:12px;"><span class="muted">' + kv[0] + '</span><span class="mono">' + escapeHtml(String(kv[1])) + '</span></div>').join('');
+  const cfgBody = '<dl>' + (cfg.length > 0
+    ? cfg.map((kv) => '<dt>' + kv[0] + '</dt><dd>' + escapeHtml(String(kv[1])) + '</dd>').join('')
+    : '<dd class="miss">no metadata</dd>') + '</dl>';
+  out += drawerSec('CONFIG', '', cfgBody);
 
-  const ansHtml = a.md ? marked.parse(a.md) : '<p class="muted">no answer body</p>';
-  const cits = Array.isArray(a.citations) ? a.citations : [];
-  const citsHtml = cits.length > 0
-    ? '<div class="muted" style="font-size:11.5px; margin-top:8px;">citations: ' + cits.map((c) => escapeHtml(c.page || '')).join(', ') + '</div>'
-    : '';
+  // ACTIONS
+  out += drawerSec('ACTIONS', '',
+    '<div style="display:flex; gap:var(--s-2); flex-wrap:wrap;">' +
+      '<button class="btn sm primary" data-reask-query="' + escapeHtml(r.query || '') + '">' +
+        '<svg><use href="#i-act"/></svg> re-ask in Ask</button>' +
+    '</div>');
 
-  return (
-    '<tr class="expanded" data-detail-for="' + idx + '">' +
-    '<td colspan="6" style="padding:0;">' +
-    '<div class="detail-grid">' +
-      '<div>' +
-        '<h4>retrieval · fused top ' + Math.min(fused.length, 8) + '/' + fused.length + '</h4>' +
-        fusedTbl +
-        '<h4 style="margin-top:14px;">meta</h4>' +
-        '<div class="detail-meta">' + (metaHtml || '<p class="muted" style="font-size:12px;">no metadata</p>') + '</div>' +
-        '<button class="reask-btn btn-primary" data-reask-query="' + escapeHtml(r.query || '') + '">↩ Re-ask in Ask tab</button>' +
-      '</div>' +
-      '<div>' +
-        '<h4>answer</h4>' +
-        '<div class="md answer-md">' + ansHtml + '</div>' +
-        citsHtml +
-      '</div>' +
-    '</div>' +
-    '</td></tr>'
-  );
+  return out;
+}
+
+function closeDrawer() {
+  const mask = $('tf-drawer-mask');
+  const drawer = $('tf-drawer');
+  if (mask) mask.hidden = true;
+  if (drawer) drawer.hidden = true;
+  document.body.style.overflow = '';
+  const tbody = $('tf-body');
+  const sel = tbody && tbody.querySelector('tr.sel');
+  if (sel) sel.classList.remove('sel');
+}
+
+function openDrawer(r, tr) {
+  const mask = $('tf-drawer-mask');
+  const drawer = $('tf-drawer');
+  const hd = $('tf-drawer-hd');
+  const bd = $('tf-drawer-bd');
+  if (!mask || !drawer || !hd || !bd) return;
+  const tbody = $('tf-body');
+  const prev = tbody && tbody.querySelector('tr.sel');
+  if (prev) prev.classList.remove('sel');
+  if (tr) tr.classList.add('sel');
+  hd.innerHTML = drawerHeadHtml(r);
+  bd.innerHTML = drawerBodyHtml(r);
+  bd.scrollTop = 0;
+  mask.hidden = false;
+  drawer.hidden = false;
+  document.body.style.overflow = 'hidden';
+  const closeBtn = $('tf-drawer-close');
+  if (closeBtn) closeBtn.addEventListener('click', closeDrawer);
+  const reask = bd.querySelector('[data-reask-query]');
+  if (reask) {
+    reask.addEventListener('click', () => {
+      window.dispatchEvent(new CustomEvent('console:reask', { detail: { query: reask.dataset.reaskQuery || '' } }));
+      closeDrawer();
+    });
+  }
 }
 
 function bindRowClicks() {
   const tbody = $('tf-body');
   if (!tbody) return;
   tbody.addEventListener('click', (e) => {
-    // Re-ask button — jump to Ask tab, prefill textarea
-    if (e.target && e.target.classList && e.target.classList.contains('reask-btn')) {
-      const q = e.target.dataset.reaskQuery || '';
-      const askQ = document.getElementById('ask-q');
-      if (askQ) {
-        askQ.value = q;
-        askQ.focus();
-      }
-      // switch project tab to Ask
-      const tabs = document.querySelectorAll('[data-project-tab]');
-      tabs.forEach((el) => {
-        if (el.getAttribute('role') === 'tab') {
-          el.setAttribute('aria-selected', el.dataset.projectTab === 'ask' ? 'true' : 'false');
-        } else {
-          el.hidden = el.dataset.projectTab !== 'ask';
-        }
-      });
-      if (history.replaceState) history.replaceState({}, '', location.pathname + '#ask');
-      e.stopPropagation();
-      return;
-    }
-    const tr = e.target.closest('tr.expandable');
+    if (!e.target || !e.target.closest) return;
+    const tr = e.target.closest('tr.clickable');
     if (!tr) return;
-    const next = tr.nextElementSibling;
-    if (next && next.classList.contains('expanded')) {
-      next.remove();
-      return;
-    }
     const idx = Number(tr.dataset.idx);
     const r = records[idx];
     if (!r) return;
-    tr.insertAdjacentHTML('afterend', detailHtml(r, idx));
+    openDrawer(r, tr);
+  });
+  const mask = $('tf-drawer-mask');
+  if (mask) mask.addEventListener('click', closeDrawer);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const drawer = $('tf-drawer');
+      if (drawer && !drawer.hidden) closeDrawer();
+    }
   });
 }
 bindRowClicks();
 `;
-
-// ----------------------------------------------------------------------
-// Sparkline (same algo as eval tab — unicode block, zero deps)
-// ----------------------------------------------------------------------
-
-const SPARK_CHARS = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-
-function sparkline(values: Array<number | null>): string {
-  const valid = values.filter((v): v is number => v !== null);
-  if (valid.length === 0) return SPARK_CHARS[0]!.repeat(Math.max(1, values.length));
-  const min = Math.min(...valid);
-  const max = Math.max(...valid);
-  return values
-    .map((v) => {
-      if (v === null) return ' ';
-      if (max === min) return SPARK_CHARS[3]!;
-      const i = Math.round(((v - min) / (max - min)) * (SPARK_CHARS.length - 1));
-      return SPARK_CHARS[i]!;
-    })
-    .join('');
-}
-
-function rawJSON(records: RunRecord[]): string {
-  return JSON.stringify(records);
-}

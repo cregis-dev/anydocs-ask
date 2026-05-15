@@ -73,8 +73,6 @@ test('GET /: empty workspace shows guidance, not crash', async () => {
     const body = await res.text();
     assert.match(body, /projects/);
     assert.match(body, /还没有注册任何项目|workspace add/);
-    // workspace path appears in the header block
-    assert.ok(body.includes(ws));
   } finally {
     await cleanup();
   }
@@ -206,14 +204,18 @@ test('GET /p/:name: stopped project shows start button enabled, stop disabled', 
     const res = await app.request('/p/docs-zh');
     assert.equal(res.status, 200);
     const body = await res.text();
-    assert.match(body, /<h1[^>]*>docs-zh<\/h1>/);
+    // Redesign 2026-05-15: the page-head breadcrumb is gone — project name
+    // is conveyed by the document <title> + the header project switcher.
+    // The Status card holds the start/stop buttons + the "stopped" tag.
+    assert.match(body, /<title>docs-zh /);
     assert.match(body, /id="btn-start"(?![^>]*disabled)/);
     assert.match(body, /id="btn-stop"[^>]*disabled/);
     assert.match(body, /tag[^>]*>stopped/);
     // Stopped-state Ask gate heading must be English to match the English
     // body + button copy in the same card (dogfood 2026-05-14 F5 — the IA
-    // cleanup left "项目未启动" next to English copy).
-    assert.match(body, />Project not running</);
+    // cleanup left "项目未启动" next to English copy). The console redesign
+    // reworded the gate heading; it stays English.
+    assert.match(body, />Start this project to begin</);
   } finally {
     await cleanup();
   }
@@ -448,6 +450,135 @@ test('POST /api/projects/:name/stop: returns stopped=false when not running', as
     const res = await app.request('/api/projects/docs-zh/stop', { method: 'POST' });
     const body = (await res.json()) as { ok: boolean; stopped: boolean };
     assert.deepEqual(body, { ok: true, stopped: false });
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /api/projects/:name — project removal (ARCH §17.3.x)
+// ---------------------------------------------------------------------------
+
+test('DELETE /api/projects/:name: removes registry entry, default purges state dir', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    // Pre-seed the per-project state dir so we can assert it gets purged.
+    const stateDir = join(ws, 'state', 'docs-zh');
+    await fs.mkdir(join(stateDir, 'reports'), { recursive: true });
+    await fs.writeFile(join(stateDir, 'index.db'), 'fake-sqlite');
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh', { method: 'DELETE' });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      registryRemoved: boolean;
+      stateRemoved: boolean;
+      stoppedFirst: boolean;
+    };
+    assert.equal(body.ok, true);
+    assert.equal(body.registryRemoved, true);
+    assert.equal(body.stateRemoved, true);
+    assert.equal(body.stoppedFirst, false);
+
+    // Registry entry gone
+    const list = await app.request('/api/projects');
+    const projects = (await list.json()) as ProjectStatusJSON[];
+    assert.equal(projects.find((p) => p.name === 'docs-zh'), undefined);
+    // State dir gone
+    const { existsSync } = await import('node:fs');
+    assert.equal(existsSync(stateDir), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('DELETE /api/projects/:name?purge_state=false: leaves state dir on disk', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const stateDir = join(ws, 'state', 'docs-zh');
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(join(stateDir, 'index.db'), 'fake-sqlite');
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh?purge_state=false', { method: 'DELETE' });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean; stateRemoved: boolean };
+    assert.equal(body.ok, true);
+    assert.equal(body.stateRemoved, false);
+    const { existsSync } = await import('node:fs');
+    assert.equal(existsSync(stateDir), true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('DELETE /api/projects/:name: 409 + running:true when child is live and no force_stop', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    await app.request('/api/projects/docs-zh/start', { method: 'POST' });
+
+    const res = await app.request('/api/projects/docs-zh', { method: 'DELETE' });
+    assert.equal(res.status, 409);
+    const body = (await res.json()) as { ok: boolean; running: boolean; error: string };
+    assert.equal(body.ok, false);
+    assert.equal(body.running, true);
+    assert.match(body.error, /force_stop=true/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('DELETE /api/projects/:name?force_stop=true: stops live child, then removes', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    await app.request('/api/projects/docs-zh/start', { method: 'POST' });
+
+    const res = await app.request('/api/projects/docs-zh?force_stop=true', { method: 'DELETE' });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean; stoppedFirst: boolean };
+    assert.equal(body.ok, true);
+    assert.equal(body.stoppedFirst, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('DELETE /api/projects/:name: 404 when name not in registry', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/ghost', { method: 'DELETE' });
+    assert.equal(res.status, 404);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    assert.equal(body.ok, false);
+    assert.match(body.error, /not found in registry/);
   } finally {
     await cleanup();
   }
@@ -789,6 +920,31 @@ function makeStubOps(overrides: Partial<ConsoleOps> = {}): {
         onEvent({ type: 'log', line: 'stub log' });
         onEvent({ type: 'result', ok: true, message: 'stub' });
       }),
+    evalStream: overrides.evalStream ??
+      (async (_opts, onEvent) => {
+        calls.eval += 1;
+        onEvent({ type: 'boot', totalCases: 2 });
+        onEvent({ type: 'warm', bootMs: 100, chunks: 50 });
+        onEvent({ type: 'case-start', i: 0, total: 2, caseId: 'c1', query: 'q1', lang: 'en' });
+        onEvent({
+          type: 'case-done',
+          i: 0, total: 2, caseId: 'c1', latencyMs: 200,
+          kind: 'answer', r_at_5: true, citation_pass: true, answer_rule_pass: true,
+        });
+        onEvent({ type: 'case-start', i: 1, total: 2, caseId: 'c2', query: 'q2', lang: 'zh' });
+        onEvent({
+          type: 'case-done',
+          i: 1, total: 2, caseId: 'c2', latencyMs: 300,
+          kind: 'answer', r_at_5: false, citation_pass: true, answer_rule_pass: false,
+        });
+        onEvent({
+          type: 'done',
+          reportPath: '/tmp/fake/reports/2026-05-15-eval.md',
+          totalMs: 500,
+          summary: { n: 2, r_at_5: 0.5, citation_pass: 1, answer_rule_pass: 0.5 },
+        });
+        onEvent({ type: 'result', ok: true, reportPath: '/tmp/fake/reports/2026-05-15-eval.md' });
+      }),
   };
   return { ops, calls };
 }
@@ -915,6 +1071,65 @@ test('POST /api/projects/:name/eval: pinned baseline used when body omits baseli
     });
     assert.equal(res.status, 200);
     assert.ok(receivedBaseline?.endsWith('reports/2026-05-08-eval.md'));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/eval/stream: emits boot → warm → case-* → done → result as NDJSON', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const { ops: fakeOps } = makeStubOps();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      ops: fakeOps,
+    });
+    const res = await app.request('/api/projects/docs-zh/eval/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') || '', /x-ndjson/);
+    const text = await res.text();
+    const lines = text.split('\n').filter((l) => l.length > 0);
+    const events = lines.map((l) => JSON.parse(l) as { type: string });
+    // exact sequence the stub emits — proves the server is forwarding events
+    // verbatim through stream() in NDJSON form.
+    assert.deepEqual(
+      events.map((e) => e.type),
+      ['boot', 'warm', 'case-start', 'case-done', 'case-start', 'case-done', 'done', 'result'],
+    );
+    const last = events[events.length - 1] as { type: 'result'; ok: boolean };
+    assert.equal(last.ok, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/eval/stream: invalid baseline filename → 400', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const { ops: fakeOps } = makeStubOps();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      ops: fakeOps,
+    });
+    const res = await app.request('/api/projects/docs-zh/eval/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseline_path: '../escape.md' }),
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    assert.equal(body.ok, false);
+    assert.match(body.error, /invalid baseline filename/);
   } finally {
     await cleanup();
   }
@@ -1567,7 +1782,7 @@ test('GET /p/:name/runs: empty state shows hint', async () => {
     });
     const res = await app.request('/p/docs-zh/runs');
     const body = await res.text();
-    assert.match(body, /尚无 runs/);
+    assert.match(body, /No runs recorded this week/);
   } finally {
     await cleanup();
   }

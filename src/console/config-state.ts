@@ -1,15 +1,16 @@
 /**
  * Console Config view — ARCH §17.3.9.
  *
- * Read-only snapshot of the three layered config sources that affect a
+ * Read-only snapshot of the layered config sources that affect a
  * project at runtime:
  *   1. workspace `.env` (loaded by anydocs-ask before launching `serve`)
  *   2. workspace `.console.json` (idle reap / port range / etc.)
  *   3. per-project `anydocs.ask.json` (embedding / llm / retrieval / ...)
+ *   4. per-project `ask.local.json` (gitignored local overrides)
  *
  * Secrets in `.env` (anything matching SECRET_KEYS_RE) are redacted to
- * `***`. Phase 1 ships read-only — inline edit is a Phase 2 question
- * since it touches the v1 "console 自身零状态" lock.
+ * `first4…last4`. Phase 1 ships read-only — inline edit is a Phase 2
+ * question since it touches the v1 "console 自身零状态" lock.
  */
 
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -27,6 +28,8 @@ export type ConfigViewModel = {
   workspaceEnv: ConfigFile<RedactedEnvEntry[]>;
   consoleJson: ConfigFile<unknown>;
   projectAskJson: ConfigFile<unknown> | null; // null when no project context (Home page)
+  /** Per-project gitignored override. null when no project context (Home). */
+  projectAskLocalJson: ConfigFile<unknown> | null;
 };
 
 export type ConfigFile<T> = {
@@ -46,11 +49,13 @@ export function loadConsoleConfigView(
   const workspaceEnvPath = join(workspacePath, '.env');
   const consoleJsonPath = join(workspacePath, '.console.json');
   const projectAskPath = projectRoot ? join(projectRoot, 'anydocs.ask.json') : null;
+  const projectAskLocalPath = projectRoot ? join(projectRoot, 'ask.local.json') : null;
 
   return {
     workspaceEnv: loadEnvFile(workspaceEnvPath),
     consoleJson: loadJsonFile(consoleJsonPath),
     projectAskJson: projectAskPath ? loadJsonFile(projectAskPath) : null,
+    projectAskLocalJson: projectAskLocalPath ? loadJsonFile(projectAskLocalPath) : null,
   };
 }
 
@@ -136,8 +141,8 @@ function loadJsonFile(path: string): ConfigFile<unknown> {
 
 function maskSecret(value: string): string {
   if (value.length === 0) return '';
-  if (value.length <= 4) return '***';
-  // Keep first 4 + last 2 chars so the author can verify they're using the
-  // right key without exposing it.
-  return value.slice(0, 4) + '***' + value.slice(-2);
+  if (value.length <= 8) return '***';
+  // Keep first 4 + last 4 chars so the author can verify they're using the
+  // right key without exposing it (design_handoff_console_redesign).
+  return value.slice(0, 4) + '…' + value.slice(-4);
 }

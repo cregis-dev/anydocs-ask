@@ -32,7 +32,21 @@ export type EvalOptions = {
   stateRoot: string;
   /** Compare against this baseline file path. Defaults to most recent prior eval report. */
   baselinePath?: string;
+  /**
+   * Optional per-phase progress callback. Receives lifecycle + per-case
+   * events as the loop advances. CLI users don't set this (output goes via
+   * process.stdout as before); the console wraps it with the streaming
+   * NDJSON endpoint so the Eval-tab UI can render a real progress bar.
+   */
+  onProgress?: (event: EvalProgressEvent) => void;
 };
+
+export type EvalProgressEvent =
+  | { type: 'boot'; totalCases: number }
+  | { type: 'warm'; bootMs: number; chunks: number }
+  | { type: 'case-start'; i: number; total: number; caseId: string; query: string; lang: string }
+  | { type: 'case-done'; i: number; total: number; caseId: string; latencyMs: number; kind: CaseResult['kind']; r_at_5: boolean; citation_pass: boolean; answer_rule_pass: boolean }
+  | { type: 'done'; reportPath: string; totalMs: number; summary: EvalSummary };
 
 export type CaseResult = {
   case_id: string;
@@ -76,6 +90,7 @@ export async function runEval(opts: EvalOptions): Promise<number> {
     process.stderr.write(`[ask] eval: skipped ${malformed} malformed line(s)\n`);
   }
   process.stdout.write(`anydocs-ask eval: ${cases.length} cases loaded\n`);
+  opts.onProgress?.({ type: 'boot', totalCases: cases.length });
 
   // 2. Boot Runtime (no HTTP). skipWatcher avoids chokidar reindex churn during eval.
   const runtime = new Runtime({ projectRoot, stateRoot, config, skipWatcher: true });
@@ -84,25 +99,41 @@ export async function runEval(opts: EvalOptions): Promise<number> {
   process.stdout.write(
     `anydocs-ask eval: warm in ${start.boot_ms}ms — chunks=${start.initialIndex.chunks.totalChunks}\n`,
   );
+  opts.onProgress?.({ type: 'warm', bootMs: start.boot_ms, chunks: start.initialIndex.chunks.totalChunks });
 
   // 3. Run cases.
   const deps = { db: runtime.db, embedder: runtime.embedder, llm: runtime.llm };
   const results: CaseResult[] = [];
   for (let i = 0; i < cases.length; i++) {
     const c = cases[i]!;
+    opts.onProgress?.({
+      type: 'case-start',
+      i, total: cases.length,
+      caseId: c.id, query: c.query, lang: c.lang,
+    });
     const req = goldenToAskRequest(c);
     const t1 = performance.now();
     let traced;
+    let caseResult: CaseResult;
     try {
       traced = await askWithTrace(deps, req);
+      caseResult = scoreCase(c, traced.result, traced.trace);
+      caseResult.latency_ms = Math.round(performance.now() - t1);
     } catch (err) {
       process.stderr.write(`[ask] eval: case ${c.id} threw: ${(err as Error).message}\n`);
-      results.push(failedCase(c, performance.now() - t1));
-      continue;
+      caseResult = failedCase(c, performance.now() - t1);
     }
-    const r = scoreCase(c, traced.result, traced.trace);
-    r.latency_ms = Math.round(performance.now() - t1);
-    results.push(r);
+    results.push(caseResult);
+    opts.onProgress?.({
+      type: 'case-done',
+      i, total: cases.length,
+      caseId: c.id,
+      latencyMs: caseResult.latency_ms,
+      kind: caseResult.kind,
+      r_at_5: caseResult.r_at_5,
+      citation_pass: caseResult.citation_pass,
+      answer_rule_pass: caseResult.answer_rule_pass,
+    });
     if ((i + 1) % 5 === 0 || i === cases.length - 1) {
       process.stdout.write(`  ${i + 1}/${cases.length} cases done\n`);
     }
@@ -127,6 +158,7 @@ export async function runEval(opts: EvalOptions): Promise<number> {
     `anydocs-ask eval: wrote ${reportPath}\n` +
       `  R@5=${summary.r_at_5.toFixed(2)}  Cit=${summary.citation_pass.toFixed(2)}  Ans=${summary.answer_rule_pass.toFixed(2)}  (${results.length} cases, ${totalMs}ms)\n`,
   );
+  opts.onProgress?.({ type: 'done', reportPath, totalMs, summary });
   return 0;
 }
 

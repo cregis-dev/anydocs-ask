@@ -1,164 +1,176 @@
 /**
- * Index tab content for /p/:name — ARCH §17.3.5.
+ * Index tab — ARCH §17.3.5.
  *
- * Three cards:
- *   1. DB index status (from child /v1/index/status) + reindex button
- *   2. Validation issues (loader warnings + missing files + orphans)
- *   3. Content explorer — per-lang navigation tree with pages flagged
+ * Three cards from the redesign:
+ *   1. Index KPI strip (on disk · in DB · chunks · embed cache · last indexed)
+ *      with reindex action, plus drift warning when on-disk ≠ DB.
+ *   2. Pending-changes table when drift exists (shown via warnings list).
+ *   3. Content explorer — per-lang inner tabs over a tree of pages.
  *
- * No DB queries; everything renders from disk (loadProject) + optional
- * child status response. Reindex action goes through the console reverse
- * proxy at POST /api/projects/:name/reindex.
+ * No DB queries here — view-model already contains the on-disk + optional
+ * child status snapshot.
  */
 
-import { html } from 'hono/html';
+import { html, raw } from 'hono/html';
 import type { Html } from './layout.ts';
 import type { IndexSnapshot, IndexLangSummary, IndexPageInfo } from '../index-state.ts';
 
 export type IndexTabViewModel = {
   projectName: string;
   snapshot: IndexSnapshot;
-  /** True when the child serve subprocess is running. Reindex requires it. */
   childLive: boolean;
 };
 
 export function renderIndexTab(vm: IndexTabViewModel): Html {
   const { snapshot, childLive } = vm;
+  const drift = computeDrift(snapshot);
   return html`
     <div class="index-tab">
-      ${statusCard(snapshot, childLive)}
+      ${drift.kind === 'drift' ? driftBanner(drift) : ''}
+      ${kpiCard(snapshot, childLive, drift)}
+      ${snapshot.totalPages === 0
+        ? emptyCard(snapshot.projectRoot)
+        : explorerCard(snapshot)}
       ${snapshot.warnings.length > 0 ? warningsCard(snapshot.warnings) : ''}
-      ${snapshot.totalPages === 0 ? firstTimeHint(snapshot.projectRoot) : explorerCard(snapshot)}
     </div>
-    <style>
-      .index-tab .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
-      .index-tab .stat { padding: 10px 12px; background: var(--bg-soft); border-radius: 6px; }
-      .index-tab .stat .v { font-size: 18px; font-weight: 600; font-family: ui-monospace, monospace; }
-      .index-tab .stat .k { font-size: 11px; color: var(--fg-mute); text-transform: uppercase; letter-spacing: .04em; }
-      .index-tab .warnings { background: var(--warn-bg); border-left: 3px solid var(--warn); padding: 10px 14px; }
-      .index-tab .warnings ul { margin: 4px 0 0; padding-left: 20px; }
-      .index-tab .warnings li { font-size: 12.5px; color: var(--warn); }
-      .nav-tree { font-size: 13px; line-height: 1.7; }
-      .nav-tree .section { font-weight: 600; color: var(--fg-soft); margin-top: 6px; }
-      .nav-tree .page { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; padding: 3px 0 3px 18px; border-bottom: 1px solid var(--bd-soft); }
-      .nav-tree .page:last-child { border-bottom: 0; }
-      .nav-tree .page .title { font-family: ui-monospace, monospace; font-size: 12.5px; }
-      .nav-tree .page .meta { font-size: 11px; color: var(--fg-mute); }
-      .nav-tree .page.missing .title { color: var(--err); }
-      .lang-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--bd); margin: 0 -18px 14px; padding: 0 18px; }
-      .lang-tabs button { border: 0; background: transparent; box-shadow: none; padding: 6px 12px; margin-bottom: -1px; color: var(--fg-mute); font-size: 13px; border-bottom: 2px solid transparent; border-radius: 0; }
-      .lang-tabs button[aria-selected=true] { color: var(--accent); border-bottom-color: var(--accent); }
-      .lang-panel[hidden] { display: none; }
-    </style>
+    ${langSwitchScript()}
   `;
 }
 
-function statusCard(snap: IndexSnapshot, childLive: boolean): Html {
+type Drift =
+  | { kind: 'in-sync' }
+  | { kind: 'no-db' }
+  | { kind: 'drift'; expected: number; actual: number; delta: number };
+
+function computeDrift(snap: IndexSnapshot): Drift {
   const db = snap.dbStatus;
-  // Indexer hard-filter is `status === 'published'`; orphans (nav-missing)
-  // still get indexed per PRD §4.5. So `expected in DB` = published count.
-  let unpublishedCount = 0;
-  let orphanCount = 0;
+  if (!db) return { kind: 'no-db' };
+  let unpublished = 0;
   for (const l of snap.langs) {
     for (const p of l.pages) {
-      if (!p.missingFile && p.status !== 'published') unpublishedCount++;
+      if (!p.missingFile && p.status !== 'published') unpublished++;
     }
     for (const p of l.orphans) {
-      orphanCount++;
-      if (p.status !== 'published') unpublishedCount++;
+      if (p.status !== 'published') unpublished++;
     }
   }
-  const expectedInDb = snap.totalPages - unpublishedCount;
-  const drift = db ? db.page_count - expectedInDb : 0;
+  const expected = snap.totalPages - unpublished;
+  const actual = db.page_count;
+  if (Math.abs(actual - expected) < 1) return { kind: 'in-sync' };
+  return { kind: 'drift', expected, actual, delta: actual - expected };
+}
+
+function driftBanner(d: Extract<Drift, { kind: 'drift' }>): Html {
+  const direction = d.delta < 0 ? 'fewer in DB' : 'more in DB';
   return html`
-    <div class="card">
-      <div class="card-head" style="padding: 0 0 10px; border-bottom: 1px solid var(--bd-soft); margin: -2px 0 12px; display:flex; justify-content:space-between; align-items:baseline;">
-        <h2 style="margin: 0;">index</h2>
-        <span class="muted mono" style="font-size: 11.5px;">${snap.projectRoot}</span>
+    <div class="banner warn">
+      <span class="b-ico"><svg><use href="#i-alert"/></svg></span>
+      <div class="b-bd">
+        <div class="b-ti">Index is out of sync with disk</div>
+        <div class="b-de">${d.expected} expected, ${d.actual} in DB (${direction}, Δ ${d.delta > 0 ? '+' : ''}${d.delta}).
+          Pages won't appear in answers until reindex.</div>
       </div>
-      <div class="status-grid">
-        <div class="stat">
-          <div class="k">on disk</div>
-          <div class="v">${snap.totalPages}</div>
-          <div class="muted" style="font-size: 11px;">
-            ${unpublishedCount > 0 || orphanCount > 0
-              ? html`
-                  ${unpublishedCount > 0
-                    ? html`<span style="color: var(--warn);">${unpublishedCount} draft</span>`
-                    : ''}
-                  ${orphanCount > 0
-                    ? html`${unpublishedCount > 0 ? ' · ' : ''}<span style="color: var(--fg-soft);">${orphanCount} orphan</span>`
-                    : ''}
-                  · ${expectedInDb} expected indexed
-                `
-              : 'pages'}
-          </div>
-        </div>
-        <div class="stat">
-          <div class="k">in DB</div>
-          <div class="v">${db ? db.page_count : '—'}</div>
-          <div class="muted" style="font-size: 11px;">
-            ${!db
-              ? 'child idle'
-              : drift === 0
-                ? html`<span style="color: var(--ok);">✓ in sync</span>`
-                : html`<span style="color: var(--warn);">Δ ${drift > 0 ? '+' : ''}${drift}</span>`}
-          </div>
-        </div>
-        <div class="stat">
-          <div class="k">chunks</div>
-          <div class="v">${db ? db.chunk_count : '—'}</div>
-          <div class="muted" style="font-size: 11px;">${db ? `${snap.totalPages > 0 ? Math.round(db.chunk_count / snap.totalPages) : 0}/page avg` : ''}</div>
-        </div>
-        <div class="stat">
-          <div class="k">embed cache</div>
-          <div class="v">${db ? db.embedding_cache_size : '—'}</div>
-          <div class="muted" style="font-size: 11px;">vectors</div>
-        </div>
-        <div class="stat">
-          <div class="k">last indexed</div>
-          <div class="v" style="font-size: 14px;">${db?.last_indexed_at ? formatTs(db.last_indexed_at) : '—'}</div>
-          <div class="muted" style="font-size: 11px;">${db?.embedding_model ?? ''}</div>
-        </div>
-      </div>
-      <div class="btn-row" style="margin-top: 12px; align-items: center;">
-        <button id="btn-reindex" class="btn-primary" ${childLive ? '' : 'disabled'}>
-          ⟳ reindex
+      <div class="b-act">
+        <button id="btn-reindex-banner" class="btn primary sm" onclick="document.getElementById('btn-reindex')?.click()">
+          <svg><use href="#i-act"/></svg> reindex now
         </button>
-        <span id="reindex-status" class="status muted"></span>
-        ${childLive ? '' : html`<span class="muted" style="font-size: 12px;">child idle — start project first</span>`}
       </div>
     </div>
+  `;
+}
+
+function kpiCard(snap: IndexSnapshot, childLive: boolean, drift: Drift): Html {
+  const db = snap.dbStatus;
+  const isDrift = drift.kind === 'drift';
+  const chunksAvg = db && snap.totalPages > 0 ? (db.chunk_count / snap.totalPages).toFixed(1) : '—';
+  return html`
+    <section class="card primary">
+      <div class="card-hd">
+        <h2><svg style="width: 14px; height: 14px;"><use href="#i-folder"/></svg> Index</h2>
+        <div class="actions">
+          <button id="btn-reindex" class="btn ${isDrift ? 'primary' : ''}" ${childLive ? '' : 'disabled'}>
+            <svg><use href="#i-act"/></svg> reindex
+          </button>
+          <span id="reindex-status" class="status"></span>
+        </div>
+      </div>
+      <div class="card-bd">
+        ${childLive ? '' : html`<p class="muted" style="font-size: 12px; margin-bottom: var(--s-3);">child idle — start the project to reindex.</p>`}
+        <div class="kpis">
+          <div class="kpi">
+            <div class="k-lab">on disk</div>
+            <div class="k-val">${snap.totalPages}<span class="unit">pages</span></div>
+            <div class="k-foot">${snap.langs.length} lang${snap.langs.length !== 1 ? 's' : ''}</div>
+          </div>
+          <div class="kpi${isDrift ? ' warn' : ''}">
+            <div class="k-lab">in DB</div>
+            <div class="k-val">${db ? db.page_count : '—'}<span class="unit">pages</span></div>
+            <div class="k-foot">${!db
+              ? 'child idle'
+              : drift.kind === 'in-sync'
+                ? 'matches disk'
+                : drift.kind === 'drift'
+                  ? html`<span style="color: var(--warn);">Δ ${drift.delta > 0 ? '+' : ''}${drift.delta}</span>`
+                  : ''}</div>
+          </div>
+          <div class="kpi">
+            <div class="k-lab">chunks</div>
+            <div class="k-val">${db ? db.chunk_count : '—'}</div>
+            <div class="k-foot">avg ${chunksAvg} / page</div>
+          </div>
+          <div class="kpi">
+            <div class="k-lab">embed cache</div>
+            <div class="k-val">${db ? db.embedding_cache_size : '—'}<span class="unit">vectors</span></div>
+            <div class="k-foot">${db?.embedding_model ?? ''}</div>
+          </div>
+          <div class="kpi">
+            <div class="k-lab">last indexed</div>
+            <div class="k-val" style="font-size: var(--t-15);">${db?.last_indexed_at ? formatTs(db.last_indexed_at) : '—'}</div>
+            <div class="k-foot">${db?.llm_model ?? ''}</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function emptyCard(projectRoot: string): Html {
+  return html`
+    <section class="card">
+      <div class="card-bd">
+        <div class="empty">
+          <div class="e-ico"><svg><use href="#i-folder"/></svg></div>
+          <h3>No pages found on disk</h3>
+          <p>Drop JSON page records into <code class="inline">${projectRoot}/pages/&lt;lang&gt;/</code>
+            and click reindex. The console will pick them up automatically.</p>
+        </div>
+        <details style="margin-top: var(--s-2);">
+          <summary style="font-size: var(--t-13); color: var(--fg-soft); cursor: pointer;">expected folder shape</summary>
+          <pre class="block" style="margin-top: var(--s-2);">&lt;project&gt;/
+├── <span class="kw">pages/</span>
+│   ├── en/
+│   │   ├── introducing-feature.json
+│   │   └── install-macos.json
+│   └── zh/
+└── <span class="kw">navigation/</span>
+    ├── en.json
+    └── zh.json</pre>
+        </details>
+      </div>
+    </section>
   `;
 }
 
 function warningsCard(warnings: string[]): Html {
   return html`
-    <div class="card warnings">
-      <strong style="font-size: 13px;">⚠ validation (${warnings.length})</strong>
-      <ul>
-        ${warnings.map((w) => html`<li>${w}</li>`)}
-      </ul>
-    </div>
-  `;
-}
-
-function firstTimeHint(projectRoot: string): Html {
-  return html`
-    <div class="card">
-      <h2 style="margin: 0 0 8px;">first-time setup</h2>
-      <p>该项目还没有 page 文件。放入 anydocs 格式的页面：</p>
-      <pre class="mono" style="background: var(--bg-soft); padding: 10px; font-size: 12px;">${projectRoot}/
-  navigation/
-    zh.json          # 导航树（每个 lang 一份）
-  pages/
-    zh/
-      &lt;page-id&gt;.json # 页面内容</pre>
-      <p class="muted" style="font-size: 12px;">
-        参考 <code>@anydocs/core</code> 的页 schema；或用 symlink 接入既有仓库。<br />
-        放好后点 <strong>⟳ reindex</strong>。
-      </p>
-    </div>
+    <section class="card">
+      <div class="card-hd"><h2>Validation</h2><span class="meta">${warnings.length}</span></div>
+      <div class="card-bd">
+        <ul style="margin: 0; padding-left: 20px;">
+          ${warnings.map((w) => html`<li style="font-size: var(--t-13); color: var(--warn); margin: 4px 0;">${w}</li>`)}
+        </ul>
+      </div>
+    </section>
   `;
 }
 
@@ -166,50 +178,53 @@ function explorerCard(snap: IndexSnapshot): Html {
   const langs = snap.langs;
   if (langs.length === 0) return html``;
   return html`
-    <div class="card">
-      <h2 style="margin: 0 0 10px;">content explorer</h2>
-      <div class="lang-tabs" role="tablist">
+    <section class="card">
+      <div class="card-hd">
+        <h2>Content explorer</h2>
+        <div class="actions">
+          <div style="position: relative;">
+            <svg style="position: absolute; left: 8px; top: 50%; transform: translateY(-50%); width: 13px; height: 13px; color: var(--fg-mute);"><use href="#i-search"/></svg>
+            <input id="idx-filter" class="input" placeholder="filter pages…" style="padding-left: 28px; height: 30px; width: 240px; font-size: var(--t-13);" autocomplete="off" />
+          </div>
+          <nav class="tabs inner lang-tabs" style="margin: 0; border: 0; padding: 0;">
+            ${langs.map(
+              (l, i) => html`
+                <button class="tab ${i === 0 ? 'active' : ''}" role="tab" data-lang="${l.lang}" aria-selected="${i === 0 ? 'true' : 'false'}" style="padding: 6px 10px; font-size: var(--t-12);">
+                  ${l.lang} <span class="cnt">${l.pages.length + l.orphans.length}</span>
+                </button>
+              `,
+            )}
+          </nav>
+        </div>
+      </div>
+      <div class="card-bd" style="padding: var(--s-3);">
         ${langs.map(
           (l, i) => html`
-            <button role="tab" data-lang="${l.lang}" aria-selected="${i === 0 ? 'true' : 'false'}">
-              ${l.lang} <span class="muted" style="font-size: 11px;">${l.pages.length + l.orphans.length}</span>
-            </button>
+            <div class="lang-panel" data-lang="${l.lang}" ${i === 0 ? '' : 'hidden'}>
+              ${navTree(l)}
+            </div>
           `,
         )}
       </div>
-      ${langs.map(
-        (l, i) => html`
-          <div class="lang-panel" data-lang="${l.lang}" ${i === 0 ? '' : 'hidden'}>
-            ${navTree(l)}
-          </div>
-        `,
-      )}
-      <script>${html`(function(){
-        var tabs = document.querySelectorAll('.lang-tabs [role=tab]');
-        tabs.forEach(function(b){
-          b.addEventListener('click', function(){
-            var lang = b.dataset.lang;
-            tabs.forEach(function(t){ t.setAttribute('aria-selected', t.dataset.lang === lang ? 'true' : 'false'); });
-            document.querySelectorAll('.lang-panel').forEach(function(p){ p.hidden = p.dataset.lang !== lang; });
-          });
-        });
-      })();`}</script>
-    </div>
+    </section>
   `;
 }
 
 function navTree(l: IndexLangSummary): Html {
   return html`
-    <div class="nav-tree">
+    <div class="tree">
       ${l.pages.length === 0
-        ? html`<p class="muted" style="font-size: 12px;">no pages referenced in navigation/${l.lang}.json</p>`
+        ? html`<p class="muted" style="font-size: var(--t-12); padding: var(--s-2);">no pages referenced in navigation/${l.lang}.json</p>`
         : groupByBreadcrumb(l.pages)}
       ${l.orphans.length > 0
         ? html`
-            <div class="section" style="color: var(--err); margin-top: 14px;">
-              orphans (in pages/ but not navigation/) · ${l.orphans.length}
+            <div class="tree-sec">
+              <div class="tree-sec-hd" style="color: var(--err);">
+                <svg style="width: 12px; height: 12px;"><use href="#i-chev-d"/></svg>
+                orphans (pages/ ∖ navigation/) <span style="color: var(--fg-mute); font-weight: 400;">· ${l.orphans.length}</span>
+              </div>
+              ${l.orphans.map((p) => pageRow(p, true))}
             </div>
-            ${l.orphans.map((p) => pageRow(p, true))}
           `
         : ''}
     </div>
@@ -217,7 +232,6 @@ function navTree(l: IndexLangSummary): Html {
 }
 
 function groupByBreadcrumb(pages: IndexPageInfo[]): Html {
-  // Group consecutive pages sharing a breadcrumb trail.
   const blocks: Array<{ trail: string[]; pages: IndexPageInfo[] }> = [];
   for (const p of pages) {
     const last = blocks[blocks.length - 1];
@@ -230,23 +244,62 @@ function groupByBreadcrumb(pages: IndexPageInfo[]): Html {
   return html`
     ${blocks.map(
       (b) => html`
-        ${b.trail.length > 0
-          ? html`<div class="section">${b.trail.join(' › ')}</div>`
-          : html`<div class="section">(root)</div>`}
-        ${b.pages.map((p) => pageRow(p, false))}
+        <div class="tree-sec">
+          <div class="tree-sec-hd">
+            <svg style="width: 12px; height: 12px;"><use href="#i-chev-d"/></svg>
+            ${b.trail.length > 0 ? b.trail.join(' › ') : '(root)'}
+            <span style="color: var(--fg-mute); font-weight: 400;">· ${b.pages.length}</span>
+          </div>
+          ${b.pages.map((p) => pageRow(p, false))}
+        </div>
       `,
     )}
   `;
 }
 
 function pageRow(p: IndexPageInfo, isOrphan: boolean): Html {
+  const cls = p.missingFile ? 'err' : p.status === 'published' ? 'ok' : '';
+  const tagText = p.missingFile ? 'missing file' : isOrphan ? 'orphan' : p.status;
   return html`
-    <div class="page ${p.missingFile ? 'missing' : ''}">
-      <span class="title">${p.title}</span>
-      <span class="meta">${p.id}${p.slug ? ` · /${p.slug}` : ''}</span>
-      <span class="meta">${p.missingFile ? '⚠ missing file' : isOrphan ? 'orphan' : p.status}</span>
+    <div class="tree-row" data-search="${(p.title + ' ' + p.id).toLowerCase()}">
+      <span class="t-ti">
+        <svg style="width: 12px; height: 12px; color: var(--fg-mute);"><use href="#i-doc"/></svg>
+        <span>${p.title}</span>
+      </span>
+      <span class="t-slug">${p.slug ?? p.id}</span>
+      <span class="tag ${cls}">${tagText}</span>
     </div>
   `;
+}
+
+function langSwitchScript(): Html {
+  return html`<script>${raw(`
+    (function(){
+      var tabs = document.querySelectorAll('.lang-tabs [role=tab]');
+      tabs.forEach(function(b){
+        b.addEventListener('click', function(){
+          var lang = b.dataset.lang;
+          tabs.forEach(function(t){
+            t.setAttribute('aria-selected', t.dataset.lang === lang ? 'true' : 'false');
+            if (t.dataset.lang === lang) t.classList.add('active'); else t.classList.remove('active');
+          });
+          document.querySelectorAll('.lang-panel').forEach(function(p){
+            p.hidden = p.dataset.lang !== lang;
+          });
+        });
+      });
+      var filter = document.getElementById('idx-filter');
+      if (filter) {
+        filter.addEventListener('input', function(){
+          var q = filter.value.trim().toLowerCase();
+          document.querySelectorAll('.tree-row').forEach(function(r){
+            if (!q) { r.style.display = ''; return; }
+            r.style.display = (r.dataset.search || '').includes(q) ? '' : 'none';
+          });
+        });
+      }
+    })();
+  `)}</script>`;
 }
 
 function arrEq(a: string[], b: string[]): boolean {
