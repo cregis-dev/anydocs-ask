@@ -189,3 +189,82 @@ test('loadConfig: api key never read out of file even if present', async () => {
     await cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// feedback section (v1.5 / RFC 0001 §2.1 S6)
+// ---------------------------------------------------------------------------
+
+test('loadConfig: feedback defaults — enabled=false, session-only γ, rerankerWeight 0.15', async () => {
+  // Default-off is load-bearing — PRD §11.4 #6 says enabled=false must be
+  // byte-equivalent to v1. The other two defaults are forward-declared for
+  // 0.3 reranker priors / γ collection.
+  const { root, cleanup } = await withTmpProject(async () => {});
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.feedback.enabled, false);
+    assert.equal(r.config.feedback.implicitSignals, 'session-only');
+    assert.equal(r.config.feedback.rerankerWeight, 0.15);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: feedback fields merge over defaults', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        feedback: { enabled: true, implicitSignals: 'off', rerankerWeight: 0.25 },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.feedback.enabled, true);
+    assert.equal(r.config.feedback.implicitSignals, 'off');
+    assert.equal(r.config.feedback.rerankerWeight, 0.25);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: feedback rejects invalid implicitSignals values with a warning', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ feedback: { implicitSignals: 'on-and-on' } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.feedback.implicitSignals, 'session-only', 'falls back to default');
+    assert.ok(
+      r.warnings.some((w) => /implicitSignals/.test(w)),
+      `expected an implicitSignals warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: feedback rejects out-of-range rerankerWeight with a warning', async () => {
+  // ARCH §15.3 clips chunk priors to [-0.3, +0.3], but the multiplier on top
+  // (rerankerWeight) must itself be in [0, 1] — a 2.0 multiplier would let a
+  // single curated review dominate every retrieval.
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ feedback: { rerankerWeight: 2 } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.feedback.rerankerWeight, 0.15, 'falls back to default');
+    assert.ok(
+      r.warnings.some((w) => /rerankerWeight/.test(w)),
+      `expected a rerankerWeight warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});

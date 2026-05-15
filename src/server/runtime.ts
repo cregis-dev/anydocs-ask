@@ -25,6 +25,7 @@ import { RunsWriter } from '../runs/writer.ts';
 import type { Embedder } from '../embedding/types.ts';
 import type { LLM } from '../llm/types.ts';
 import { resolveTransformersCacheDir, type ResolvedConfig } from '../config.ts';
+import { ensureFeedbackDirs } from '../workspace.ts';
 
 export type RuntimeOptions = {
   /** Source: anydocs project (pages/ + navigation/). */
@@ -136,6 +137,13 @@ export class Runtime {
 
   async start(): Promise<RuntimeStartResult> {
     const t0 = Date.now();
+    // v1.5 feedback loop (RFC 0001 §2.1 S1): create the per-project review
+    // directory tree only when the operator has opted in. PRD §11.4 #6 says
+    // `feedback.enabled = false` (the default) must leave the workspace
+    // byte-identical to v1 — so no dirs touched on disabled boots.
+    if (this.config.feedback.enabled) {
+      ensureFeedbackDirs(this.stateRoot);
+    }
     if (this.embedder.warmUp) await this.embedder.warmUp();
     const initialIndex = await this.indexer.fullReindex();
     this.lastIndexedAt = Date.now();

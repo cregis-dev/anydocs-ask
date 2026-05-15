@@ -85,6 +85,31 @@ export type AnalyzeConfig = {
   confidenceFloor: number;
 };
 
+/**
+ * v1.5 feedback loop — mirrors ARCH §15.7 + RFC 0001 §2.1 (S6).
+ *
+ * Default `enabled = false` is load-bearing (PRD §11.4 #6): with this false,
+ * query pipeline behaviour is byte-equivalent to v1. Switching to true is
+ * what authorises:
+ *   - β button reads (Reader → /v1/ask/feedback writes `signal_source='explicit'`)
+ *   - γ implicit signals (per `implicitSignals`)
+ *   - feedback/ directory population (CLI export/import in 0.2.0-alpha.1)
+ *
+ * `rerankerWeight` is captured now for forward-compat with 0.3 reranker
+ * priors (ARCH §15.3); 0.2 does not read it.
+ */
+export type FeedbackConfig = {
+  enabled: boolean;
+  /**
+   * 'off'           — collect zero γ rows
+   * 'session-only'  — server-side 5min same-session re-ask only (RFC §4.2)
+   * 'full'          — also accept Reader-reported click/leave/dwell (0.3+)
+   */
+  implicitSignals: 'off' | 'session-only' | 'full';
+  /** Forward-declared for 0.3 reranker priors; ignored in 0.2. */
+  rerankerWeight: number;
+};
+
 export type ResolvedConfig = {
   embedding: EmbeddingConfig;
   llm: LLMConfig;
@@ -94,6 +119,7 @@ export type ResolvedConfig = {
   indexing: IndexingConfig;
   runs: RunsConfig;
   analyze: AnalyzeConfig;
+  feedback: FeedbackConfig;
 };
 
 export type LoadConfigResult = {
@@ -148,6 +174,11 @@ const DEFAULTS: ResolvedConfig = {
     lookbackDays: 7,
     latencyP95Threshold: 3000,
     confidenceFloor: 0.4,
+  },
+  feedback: {
+    enabled: false,
+    implicitSignals: 'session-only',
+    rerankerWeight: 0.15,
   },
 };
 
@@ -230,7 +261,41 @@ function mergeWithDefaults(
   applySection(user.indexing, out.indexing, 'indexing', warnings);
   applyRuns(user.runs, out.runs, warnings);
   applyAnalyze(user.analyze, out.analyze, warnings);
+  applyFeedback(user.feedback, out.feedback, warnings);
   return out;
+}
+
+function applyFeedback(value: unknown, target: FeedbackConfig, warnings: string[]): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'feedback' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.enabled !== undefined) {
+    if (typeof obj.enabled === 'boolean') {
+      target.enabled = obj.enabled;
+    } else {
+      warnings.push(`anydocs.ask.json: feedback.enabled must be a boolean; using default`);
+    }
+  }
+  if (obj.implicitSignals !== undefined) {
+    if (obj.implicitSignals === 'off' || obj.implicitSignals === 'session-only' || obj.implicitSignals === 'full') {
+      target.implicitSignals = obj.implicitSignals;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: feedback.implicitSignals must be 'off' | 'session-only' | 'full'; using default`,
+      );
+    }
+  }
+  if (obj.rerankerWeight !== undefined) {
+    const v = obj.rerankerWeight;
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1) {
+      target.rerankerWeight = v;
+    } else {
+      warnings.push(`anydocs.ask.json: feedback.rerankerWeight must be a number in [0, 1]; using default`);
+    }
+  }
 }
 
 function applyAnalyze(value: unknown, target: AnalyzeConfig, warnings: string[]): void {
