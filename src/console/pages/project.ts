@@ -1131,16 +1131,35 @@ function renderAnswer(body) {
     clarEl.hidden = false;
     let h = '<span class="b-ico"><svg><use href="#i-alert"/></svg></span>';
     h += '<div class="b-bd">';
-    h += '<div class="b-ti">' + (body.message ? escapeHtml(body.message) : 'Please refine the question') + '</div>';
+    h += '<div class="b-ti">' + (body.message ? escapeHtml(body.message) : 'The question is ambiguous — pick a scope to continue') + '</div>';
     if (Array.isArray(body.options) && body.options.length) {
-      h += '<div class="b-de" style="margin-top:8px;">';
+      h += '<div class="b-de" style="margin-top: 6px;">Pick one to re-ask under that scope, or refine the question above.</div>';
+      h += '<div style="display: flex; flex-direction: column; gap: 6px; margin-top: var(--s-3);">';
       body.options.forEach((o) => {
-        h += '<div style="margin:4px 0;">• ' + escapeHtml(o.label || o.scope_id || '') + '</div>';
+        const label = escapeHtml(o.label || o.scope_id || '');
+        const crumb = Array.isArray(o.breadcrumb) && o.breadcrumb.length
+          ? o.breadcrumb.map((b) => escapeHtml((b && b.title) || '')).filter(Boolean).join(' / ')
+          : '';
+        h += '<button type="button" class="btn" data-scope-id="' + escapeHtml(o.scope_id || '') + '" data-scope-label="' + label + '" style="justify-content: flex-start; height: auto; padding: 10px 12px; text-align: left;">';
+        h += '<svg style="width: 12px; height: 12px; opacity: .6; flex-shrink: 0;"><use href="#i-arr-r"/></svg>';
+        h += '<span style="display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; flex: 1;">';
+        h += '<span>Continue under <b>' + label + '</b></span>';
+        if (crumb) h += '<span style="color: var(--fg-mute); font-size: 11px; font-family: var(--font-mono);">' + crumb + '</span>';
+        h += '</span>';
+        h += '</button>';
       });
       h += '</div>';
     }
     h += '</div>';
     clarEl.innerHTML = h;
+    // Wire each suggestion: re-ask the same textarea question with
+    // context.scope_id set so the child's /v1/ask constrains retrieval.
+    clarEl.querySelectorAll('button[data-scope-id]').forEach((btn) => {
+      btn.addEventListener('click', () => submitAsk({
+        scopeId: btn.dataset.scopeId,
+        scopeLabel: btn.dataset.scopeLabel,
+      }));
+    });
   } else if (body && body.type === 'error') {
     errEl.hidden = false;
     let h = '<span class="b-ico"><svg><use href="#i-err"/></svg></span>';
@@ -1236,7 +1255,8 @@ const askBtn = $('btn-ask');
 const askQ = $('ask-q');
 const askStatus = $('ask-status');
 
-async function submitAsk() {
+async function submitAsk(opts) {
+  opts = opts || {};
   if (!askQ || !askBtn) return;
   const question = askQ.value.trim();
   if (!question) {
@@ -1253,12 +1273,19 @@ async function submitAsk() {
   }
   askBtn.disabled = true;
   askQ.disabled = true;
-  askStatus.textContent = 'thinking… typically 1–3s';
+  askStatus.textContent = opts.scopeId
+    ? 'thinking… (scoped to ' + (opts.scopeLabel || opts.scopeId) + ')'
+    : 'thinking… typically 1–3s';
   askStatus.className = 'status';
   const t0 = Date.now();
   const persist = isPersist();
   try {
     const payload = persist ? { question, persist: true } : { question };
+    // Clarify-suggestion buttons re-submit the SAME question with a scope_id
+    // so the child's /v1/ask constrains retrieval to that subtree (ARCH §11).
+    if (opts.scopeId) {
+      payload.context = { scope_id: opts.scopeId };
+    }
     const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1297,7 +1324,7 @@ async function submitAsk() {
     askQ.disabled = false;
   }
 }
-if (askBtn) askBtn.addEventListener('click', submitAsk);
+if (askBtn) askBtn.addEventListener('click', () => submitAsk());
 if (askQ) {
   askQ.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
