@@ -1,6 +1,55 @@
 # 更新日志
 
-`@anydocs/ask` 的所有重要变更均记录于此。格式大体遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循 semver 预发布语义（`0.1.0-alpha.N`）。
+`@anydocs/ask` 的所有重要变更均记录于此。格式大体遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循 semver 语义（`0.1.0` 起脱离 alpha 预发布；0.1.x 阶段允许 minor 内的 API 增量演进）。
+
+## 0.1.0 — 2026-05-16
+
+毕业 alpha。本版聚焦三件大事：**Ask SSE 流式（token-by-token）** + **控制台重设计** + **项目删除 / Eval 流式进度 / Clarify 可点击建议**。面向作者侧的 Web 控制台、SSE 流式 ask、运行时与 dogfood 通道经过完整迭代；对 `/v1/ask` HTTP API 保持向后兼容（`/v1/ask/stream` 是新增端点）。
+
+### 新增
+
+- **`POST /v1/ask/stream` — Ask SSE 流式**（PR [#27](https://github.com/cregis-dev/anydocs-ask/pull/27)）—— LLM 生成阶段（占 Ask 总延迟 ~80%+）改为逐 token 流式回吐。新增可选 `LLM.streamGenerate()` 兼容 Anthropic SDK 的 `messages.stream`；SSE 加 heartbeat / padding 防 Cloudflare / 反向代理 buffer 小 chunk；新增 BGE-M3 remote host override（HF 环境下载）。共享 `/v1/ask` 的请求解析、runs 落盘与 answer cache 行为；原 `/v1/ask` 行为完全不变。配套新增 `Dockerfile`。`src/server/app.ts` / `src/llm/anthropic.ts` / `src/llm/mock.ts` / `src/llm/types.ts` / `src/query/answer.ts` / `src/embedding/bge-m3.ts` + 304 行新测试 `tests/stream-server.test.ts`。
+
+- **控制台重设计 — design handoff alignment**（PR [#28](https://github.com/cregis-dev/anydocs-ask/pull/28)）—— 对齐 `design_handoff_console_redesign` 完整 token 体系：`layout.ts` 重写为设计 token CSS（light + dark via `prefers-color-scheme` AND `[data-theme]`），内联 28 符号 icon sprite，新增 `.modal` / `.menu` / `.banner` / `.empty` / `.kpi` / `.proj-card` / `.drawer` / `.del-*` 等组件。具体页面对齐：
+  - **Home**：项目卡网格 + KPI strip + add-project 虚线卡；移除页头 workspace 绝对路径
+  - **Project page**：面包屑行整行删除，状态 pill / start / stop / `indexed N pages · M chunks` 全部折叠进 Status 卡
+  - **Config drawer**：4 源精确化（`.env` / `.console.json` / `anydocs.ask.json` / `ask.local.json`），`base` / `override` tag 替代 `precedence N`，密文格式改为 `abcd…wxyz`（first4 + … + last4）
+  - **Eval tab**：edit-candidate modal 改用共享 `.modal` + `.form-grid`；pending-review 客户端分页 + 流式生成日志（main #14 / #16 的 UI 端整合）
+  - **Traffic tab**：run-detail 改为右侧 `.drawer` 滑出 panel（QUESTION / METRICS / ANSWER / RETRIEVAL / CONFIG / ACTIONS），行内 `.sel` 选中态
+
+- **项目删除流**（PR [#28](https://github.com/cregis-dev/anydocs-ask/pull/28)）—— 每张项目卡 hover 露出 kebab → popover（`Open project` / `Copy path` / `Remove from console…`）。Remove 打开 `.modal.danger`：目标摘要 + 影响清单 + 输入项目名确认 + `purge_state` 复选框（可选保留 `state/<projectId>/`）。运行中项目切到 `Stop & remove` 路径（先 SIGTERM 子运行时）。后端 `DELETE /api/projects/:name` 扩展 `purge_state` + `force_stop` 查询参数；无 `force_stop` 而对运行中项目 DELETE 返回 409 + `{running:true, port}` 作为防御。源文件路径下的 markdown 永不动。5 个新服务端测试。
+
+- **Eval 流式进度**（PR [#28](https://github.com/cregis-dev/anydocs-ask/pull/28)）—— `runEval` 加 `onProgress?(event)` 回调，逐 case 发 `boot · warm · case-start · case-done · done` 事件。新增 `POST /api/projects/:name/eval/stream`（NDJSON），UI `bindEvalRun` 重写驱动真实进度条 + 「case N of M · slug · ~Ns remaining」（per-case 平均时长 × 剩余数 的滑动 ETA），替代旧的「running…」死等。CLI 行为不变（事件是叠加式）。2 个新服务端测试。
+
+- **Clarify 建议可点击**（PR [#28](https://github.com/cregis-dev/anydocs-ask/pull/28)）—— `/v1/ask` 早已返回 `options[]`（每个 subtree 一项 `{ scope_id, label, breadcrumb, sample_pages }`），原 UI 只渲染成 bullet。现在每个 option 变成 `.btn` 按钮，点击带 `context.scope_id` 重新发同一问题，子运行时检索约束到该子树（ARCH §11）。`submitAsk()` 加可选 `{ scopeId, scopeLabel }`，状态文案变 `thinking… (scoped to {label})`。零后端修改。
+
+### 修复
+
+- **配置抽屉小标题被截断**（PR [#28](https://github.com/cregis-dev/anydocs-ask/pull/28)）—— `WORKSPACE · .env` / `PROJECT · anydocs.ask.json` 超出 `.drawer-sec-hd h3` ellipsis 宽度，渲染成 `PROJECT · …` 无法识别。改为裸文件名 + 设计稿 `base` / `override` tag。补上设计文档列在 precedence 链里但 view model 漏掉的第 4 源 `ask.local.json`。
+- **`<html lang="zh">`**（PR [#28](https://github.com/cregis-dev/anydocs-ask/pull/28)）—— 控制台 UI 是英文的，HTML lang 错标 zh 会影响可访问性树与搜索索引。改为 `en`。同步把 6 处残留中文空态字符串改为英文（`无 citations` / `index 状态不可用` / `尚无 runs` 等）。
+- **`[hidden]` 属性失效**（PR [#28](https://github.com/cregis-dev/anydocs-ask/pull/28)）—— `.banner { display: flex }` 与 UA 默认 `[hidden] { display: none }` 同特异性，作者侧后写胜出，导致 `<div class="banner" hidden>` 不隐藏（remove-project 弹窗里 idle 项目误显运行中警告条暴露的）。新增 `[hidden] { display: none !important; }` 全局兜底。
+
+### 删除
+
+- **`open reader / view log` 占位按钮**（PR [#28](https://github.com/cregis-dev/anydocs-ask/pull/28)）—— 设计稿假设的 reader UI 在 `anydocs-ask serve` 根路径 `/` 不存在（只挂 `/v1/*`），log tail endpoint 也没做。先移除按钮防误导，相关 CSS（`.status-acts`）/ 图标（`i-ext` / `i-term`）保留待 backend 落地时一行 HTML 重新挂回。
+- **页头工作区 / 项目绝对路径**（PR [#28](https://github.com/cregis-dev/anydocs-ask/pull/28)）—— Home 与 Project 页头右槽渲染的 workspace path / project path 属于内部信息，不上 UI。项目路径在 Status 卡内仍可见，符合设计稿。
+- **62 行 dead CSS** —— `.page-meta` / `.next-action` / `.btn-primary` 别名 / `.card-bd.tight` / `.kpi.warn/err/muted` / `.retrieval-hd` + `.chunks*` 全工程零引用。
+
+### 测试
+
+- 共 ~715 用例（PR #27 新增 304 行 stream 测试 / PR #28 新增 7 个 DELETE / eval-stream / runs-empty 测试），typecheck + test + build + CI（Node 22 + 24）全过。
+
+### 未变更
+
+- HTTP API 协议向后兼容：原 `/v1/ask` 非流式行为不变，`/v1/ask/stream` 是新增 SSE 端点。CLI 子命令签名（包括 `eval` 的 stdout 报告行）保持不变。
+
+### 已知遗留
+
+- **Eval / Ask cancel 按钮**：UI 未提供取消。后端需要 `AbortSignal` 串到 LLM 调用，跨两个流接口；留至 0.1.1。
+- **Reader UI / log tail endpoint**：控制台 Status 卡内对应按钮的 CSS / 图标已就位，等 backend 接入。
+- **F6 / O1（alpha.3 dogfood 遗留）**：小流量召回敏感度与 LLM single-call timeout 议题继续观察。
+
+---
 
 ## 0.1.0-alpha.3 — 2026-05-14
 

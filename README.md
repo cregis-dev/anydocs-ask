@@ -2,7 +2,7 @@
 
 为 [anydocs](https://github.com/cregis-dev/anydocs) 项目提供的本地问答服务。读取 `pages/{lang}/*.json` 和 `navigation/{lang}.json`，向 Reader 站点返回带完整面包屑引用的结构化答案。
 
-> **v1 alpha（0.1.0-alpha.2）** — 索引、查询、HTTP 接口与评测闭环均已就绪。
+> **v1（0.1.0）** — 索引、查询、HTTP 接口（含 SSE 流式 `POST /v1/ask/stream`）、Web 控制台、评测闭环均已就绪。
 > 速览 ask 操作 / 原理 / 测评 / 优化方向：[`docs/ask-overview.md`](./docs/ask-overview.md)。
 > 产品背景见 [`PRD.md`](./PRD.md)，集成细节见 [`ARCHITECTURE.md`](./ARCHITECTURE.md)，版本历史见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
@@ -10,7 +10,7 @@
 
 ## 快速上手
 
-> 包尚未发布到 npm，alpha 阶段请通过源码运行。
+> 包尚未发布到 npm，0.1.x 期间请通过源码运行。
 
 ```bash
 # 1. 克隆并安装依赖
@@ -188,7 +188,7 @@ pnpm dev serve /Users/me/work/product-docs
 
 ### 完整子命令参考
 
-> **alpha 阶段：** 包尚未发布，`anydocs-ask` 全局命令暂不可用。请将下方所有 `anydocs-ask <cmd>` 替换为 `pnpm dev <cmd>`（在本仓库根目录执行），或 `pnpm build` 后通过 `node dist/cli.js <cmd>` 调用。
+> **0.1.x 阶段：** 包尚未发布，`anydocs-ask` 全局命令暂不可用。请将下方所有 `anydocs-ask <cmd>` 替换为 `pnpm dev <cmd>`（在本仓库根目录执行），或 `pnpm build` 后通过 `node dist/cli.js <cmd>` 调用。
 
 ```bash
 # 服务
