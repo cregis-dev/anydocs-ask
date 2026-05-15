@@ -16,7 +16,7 @@
  * answer postprocessor consumes the whole text at once.
  */
 
-import type { LLM, LLMGenerateInput, LLMGenerateOutput } from './types.ts';
+import type { LLM, LLMGenerateInput, LLMGenerateOutput, LLMStreamOptions } from './types.ts';
 
 export type AnthropicLLMOptions = {
   model: string;
@@ -84,6 +84,48 @@ export class AnthropicLLM implements LLM {
     return { text, modelUsed: response.model ?? this.model };
   }
 
+  async streamGenerate(
+    input: LLMGenerateInput,
+    options: LLMStreamOptions,
+  ): Promise<LLMGenerateOutput> {
+    const client = (await this.getClient()) as {
+      messages: {
+        stream: (
+          req: AnthropicMessageRequest,
+          options?: { signal?: AbortSignal },
+        ) => AsyncIterable<AnthropicMessageStreamEvent>;
+      };
+    };
+    let text = '';
+    let modelUsed = this.model;
+    try {
+      const stream = client.messages.stream(
+        {
+          model: this.model,
+          max_tokens: input.maxTokens ?? this.defaultMaxTokens,
+          system: input.systemPrompt,
+          messages: [{ role: 'user', content: input.userPrompt }],
+          ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+        },
+        { signal: options.signal },
+      );
+      for await (const event of stream) {
+        if (options.signal?.aborted) break;
+        if (event.type === 'message_start' && event.message.model) {
+          modelUsed = event.message.model;
+        }
+        if (event.type === 'content_block_delta' && isTextDelta(event.delta)) {
+          text += event.delta.text;
+          await options.onDelta(event.delta.text);
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`AnthropicLLM stream request failed (model=${this.model}): ${msg}`);
+    }
+    return { text, modelUsed };
+  }
+
   private async getClient(): Promise<unknown> {
     if (this.clientPromise) return this.clientPromise;
     this.clientPromise = (async () => {
@@ -125,6 +167,19 @@ type AnthropicMessageResponse = {
   model?: string;
   content?: Array<{ type: string; text?: string }>;
 };
+
+type AnthropicMessageStreamEvent =
+  | {
+      type: 'message_start';
+      message: { model?: string };
+    }
+  | {
+      type: 'content_block_delta';
+      delta:
+        | { type: 'text_delta'; text: string }
+        | { type: string; [key: string]: unknown };
+    }
+  | { type: 'message_delta' | 'message_stop' | 'content_block_start' | 'content_block_stop' };
 
 function extractText(resp: AnthropicMessageResponse): string {
   const blocks = resp.content ?? [];
@@ -191,4 +246,13 @@ function safeStringify(value: unknown): string {
 
 function truncate(s: string, max: number): string {
   return s.length <= max ? s : s.slice(0, max) + `… (+${s.length - max}B)`;
+}
+
+function isTextDelta(delta: unknown): delta is { type: 'text_delta'; text: string } {
+  return (
+    typeof delta === 'object' &&
+    delta !== null &&
+    (delta as { type?: unknown }).type === 'text_delta' &&
+    typeof (delta as { text?: unknown }).text === 'string'
+  );
 }

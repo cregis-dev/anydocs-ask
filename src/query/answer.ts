@@ -44,6 +44,14 @@ export type AskDeps = {
   llm: LLM;
 };
 
+export type AskStatusStage = 'retrieving' | 'generating';
+
+export type AskStreamHooks = {
+  signal?: AbortSignal;
+  onStatus?: (stage: AskStatusStage) => void | Promise<void>;
+  onDelta?: (text: string) => void | Promise<void>;
+};
+
 /**
  * Diagnostic trace captured alongside the result. Persisted to runs.jsonl
  * (ARCH §16.4) but never sent on /v1/ask responses. v1.5 §15 §16.6 analyze
@@ -88,6 +96,22 @@ export async function ask(deps: AskDeps, req: AskRequest): Promise<AskResult> {
 export async function askWithTrace(
   deps: AskDeps,
   req: AskRequest,
+): Promise<{ result: AskResult; trace: AskTrace }> {
+  return askWithTraceInternal(deps, req);
+}
+
+export async function askWithTraceStream(
+  deps: AskDeps,
+  req: AskRequest,
+  hooks: AskStreamHooks,
+): Promise<{ result: AskResult; trace: AskTrace }> {
+  return askWithTraceInternal(deps, req, hooks);
+}
+
+async function askWithTraceInternal(
+  deps: AskDeps,
+  req: AskRequest,
+  hooks: AskStreamHooks = {},
 ): Promise<{ result: AskResult; trace: AskTrace }> {
   const t0 = performance.now();
   const emptyTrace = (): AskTrace => ({
@@ -135,7 +159,10 @@ export async function askWithTrace(
   const queryLang = resolveQueryLang(deps.db, question, req);
 
   // 3. Hybrid retrieve.
+  throwIfAborted(hooks.signal);
+  await hooks.onStatus?.('retrieving');
   const queryVector = (await deps.embedder.embed([question]))[0]!.vector;
+  throwIfAborted(hooks.signal);
   const ftsQuery = sanitizeFtsQuery(question);
   const { chunks: retrieved, trace: retrievalTrace } = retrieveWithTrace(deps.db, {
     queryVector,
@@ -183,11 +210,20 @@ export async function askWithTrace(
   });
 
   let llmOutput;
+  throwIfAborted(hooks.signal);
+  await hooks.onStatus?.('generating');
+  const llmInput = {
+    systemPrompt: prompt.system,
+    userPrompt: prompt.user,
+  };
   try {
-    llmOutput = await deps.llm.generate({
-      systemPrompt: prompt.system,
-      userPrompt: prompt.user,
-    });
+    llmOutput =
+      hooks.onDelta && deps.llm.streamGenerate
+        ? await deps.llm.streamGenerate(llmInput, {
+            signal: hooks.signal,
+            onDelta: hooks.onDelta,
+          })
+        : await deps.llm.generate(llmInput);
   } catch (err) {
     // LLM call failure (gateway returned garbage / timed out / threw mid-
     // stream). Distinct from `llm_unavailable` which is the *construction*
@@ -207,6 +243,7 @@ export async function askWithTrace(
       },
     };
   }
+  throwIfAborted(hooks.signal);
 
   const post = postprocess({
     answerLang: queryLang,
@@ -389,6 +426,12 @@ function errorResult(code: string, message: string): AskResult {
 function makeAnswerId(): string {
   // Stable enough for cache joins; not security-sensitive. 8 hex bytes.
   return `ans_${Date.now().toString(36)}${randomBytes(4).toString('hex')}`;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new Error('request aborted');
+  }
 }
 
 // re-export for tests / callers.
