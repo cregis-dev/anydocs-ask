@@ -214,18 +214,12 @@ function statusCard(
           </button>
         </div>
 
-        ${live && running
-          ? html`
-            <div class="status-acts">
-              <a class="btn reader" href="http://127.0.0.1:${running.port}" target="_blank" rel="noopener" title="open reader on :${running.port}">
-                <svg><use href="#i-ext"/></svg> open reader<span style="color: var(--fg-mute); margin-left: 4px;">:${running.port}</span>
-              </a>
-              <button class="btn" disabled title="tail child stdout/stderr — not yet implemented">
-                <svg><use href="#i-term"/></svg> view log
-              </button>
-            </div>
-          `
-          : ''}
+        <!-- The design's open-reader / view-log .status-acts row was here.
+             Both lack a real backend in this codebase (anydocs-ask serve only
+             mounts /v1/* — no reader UI on /; and the console doesn't expose
+             a tail-child-stdout endpoint), so showing non-working affordances
+             would mislead. Add the row back when the features land. The icon
+             (i-ext) + .status-acts CSS stay in layout.ts for that future. -->
       </div>
     </section>
   `;
