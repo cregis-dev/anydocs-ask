@@ -30,7 +30,7 @@ export function renderRuns(args: {
       <span class="muted mono">${ordered.length}/${args.limit}</span>
     </div>
     ${ordered.length === 0
-      ? html`<div class="card"><div class="card-bd"><p class="empty" style="padding:24px 0;">尚无 runs（或本周文件不存在）。</p></div></div>`
+      ? html`<div class="card"><div class="card-bd"><p class="empty" style="padding:24px 0;">No runs recorded this week.</p></div></div>`
       : runsCard(ordered)}
     <script>${raw(`window.__RUNS__ = ${payload};`)}</script>
     <script type="module">${raw(RUNS_SCRIPT)}</script>

@@ -71,7 +71,7 @@ function latestCard(
       <div class="card">
         <div class="card-hd"><h2>Latest eval</h2></div>
         <div class="card-bd" style="text-align: center; padding: var(--s-6) var(--s-4);">
-          <div style="color: var(--fg-mute); font-size: var(--t-13);">No eval run yet · 还没跑过</div>
+          <div style="color: var(--fg-mute); font-size: var(--t-13);">No eval run yet</div>
           <div style="margin-top: var(--s-2); font-size: var(--t-12); color: var(--fg-soft);">
             Run your first eval against the approved case set.
           </div>

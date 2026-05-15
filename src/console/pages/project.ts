@@ -291,7 +291,7 @@ function tabPanels(
     <div id="ptab-index" class="tab-panel" data-project-tab="index" hidden>
       ${vm.indexSnapshot
         ? renderIndexTab({ projectName: project.name, snapshot: vm.indexSnapshot, childLive: live })
-        : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">index 状态不可用。</p></div></div>`}
+        : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">Index status unavailable.</p></div></div>`}
     </div>
     <div id="ptab-eval" class="tab-panel" data-project-tab="eval" hidden>
       ${vm.evalSnapshot
@@ -301,7 +301,7 @@ function tabPanels(
             latestReportBody: vm.latestEvalReportBody ?? null,
             candidates: vm.candidates ?? { total: 0, pending: [], approved: 0, rejected: 0, malformed: 0 },
           })
-        : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">eval 状态不可用。</p></div></div>`}
+        : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">Eval status unavailable.</p></div></div>`}
     </div>
     <div id="ptab-traffic" class="tab-panel" data-project-tab="traffic" hidden>
       ${vm.trafficWindow
@@ -311,7 +311,7 @@ function tabPanels(
             analyzeHistory: vm.analyzeHistory ?? [],
             latestAnalyzeBody: vm.latestAnalyzeBody ?? null,
           })
-        : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">traffic 状态不可用。</p></div></div>`}
+        : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">Traffic status unavailable.</p></div></div>`}
     </div>
   `;
 }
@@ -363,7 +363,7 @@ function askCard(live: boolean): Html {
           </div>
           <div id="tab-citations" class="tab-panel" data-tab="citations" hidden>
             <div id="ask-cite-list" class="cite-list"></div>
-            <p id="ask-cite-empty" class="empty" hidden style="padding: 24px 0;">无 citations。</p>
+            <p id="ask-cite-empty" class="empty" hidden style="padding: 24px 0;">No citations.</p>
           </div>
           <div id="tab-meta" class="tab-panel" data-tab="meta" hidden>
             <dl id="ask-meta" class="kv"></dl>

@@ -1698,7 +1698,7 @@ test('GET /p/:name/runs: empty state shows hint', async () => {
     });
     const res = await app.request('/p/docs-zh/runs');
     const body = await res.text();
-    assert.match(body, /尚无 runs/);
+    assert.match(body, /No runs recorded this week/);
   } finally {
     await cleanup();
   }
