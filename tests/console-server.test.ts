@@ -204,9 +204,10 @@ test('GET /p/:name: stopped project shows start button enabled, stop disabled', 
     const res = await app.request('/p/docs-zh');
     assert.equal(res.status, 200);
     const body = await res.text();
-    // Redesign 2026-05-11: project name lives in the breadcrumb .here cell,
-    // not a separate h1.
-    assert.match(body, /class="here[^"]*"[^>]*>docs-zh</);
+    // Redesign 2026-05-15: the page-head breadcrumb is gone — project name
+    // is conveyed by the document <title> + the header project switcher.
+    // The Status card holds the start/stop buttons + the "stopped" tag.
+    assert.match(body, /<title>docs-zh /);
     assert.match(body, /id="btn-start"(?![^>]*disabled)/);
     assert.match(body, /id="btn-stop"[^>]*disabled/);
     assert.match(body, /tag[^>]*>stopped/);

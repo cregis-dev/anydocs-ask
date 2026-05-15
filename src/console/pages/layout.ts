@@ -159,6 +159,7 @@ const ICON_SPRITE = `<svg xmlns="http://www.w3.org/2000/svg" style="display:none
   <symbol id="i-trash" viewBox="0 0 16 16"><path d="M3 4.5h10M6.5 4.5v-1A1 1 0 0 1 7.5 2.5h1a1 1 0 0 1 1 1v1M4.5 4.5l.6 8.2a1 1 0 0 0 1 .8h3.8a1 1 0 0 0 1-.8l.6-8.2M6.8 7v4M9.2 7v4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-kebab" viewBox="0 0 16 16"><circle cx="8" cy="3.5" r="1.2" fill="currentColor"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/><circle cx="8" cy="12.5" r="1.2" fill="currentColor"/></symbol>
   <symbol id="i-edit" viewBox="0 0 16 16"><path d="M11 2.5 13.5 5 5.5 13H3v-2.5l8-8Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M10 3.5 12.5 6" fill="none" stroke="currentColor" stroke-width="1.3"/></symbol>
+  <symbol id="i-ext" viewBox="0 0 16 16"><path d="M9 2h5v5M14 2 7.5 8.5M12 9.5v3.5A1 1 0 0 1 11 14H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
 </svg>`;
 
 // ---------------------------------------------------------------------------
@@ -733,6 +734,21 @@ pre code { background: transparent; padding: 0; border: 0; }
   padding: 6px 10px 2px; font-size: 11px; letter-spacing: .06em;
   text-transform: uppercase; color: var(--fg-mute);
 }
+
+/* status-acts (button row inside Status card) ---------------------- */
+.status-acts {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-top: var(--s-3); padding-top: var(--s-3);
+  border-top: 1px solid var(--bd-soft);
+}
+.status-acts .btn {
+  height: 26px; padding: 0 8px;
+  font-size: var(--t-12); font-weight: 500;
+  font-family: var(--font-mono); letter-spacing: .01em;
+}
+.status-acts .btn svg { width: 12px; height: 12px; opacity: .8; }
+.status-acts .btn.reader { color: var(--accent); }
+.status-acts .btn.reader:hover { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 30%, var(--bd)); }
 
 .add-card {
   display: flex; flex-direction: column; gap: var(--s-3);

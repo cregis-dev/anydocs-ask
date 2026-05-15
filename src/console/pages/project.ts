@@ -2,14 +2,17 @@
  * Per-project page — ARCH §17.3.1 GET /p/:name.
  *
  * Layout (redesign):
- *   page-head        crumbs · status pill · proj-toolbar (start/stop)
  *   proj-grid:
- *     side-stack    Status card (project path lives here) · Reports card
- *     main-stack    next-action banner · top tabs (Ask/Index/Eval/Traffic) · tab panel
+ *     side-stack    Status card (status pill + path + indexed + process row +
+ *                                start/stop buttons + open-reader / view-log
+ *                                actions) · Reports card
+ *     main-stack    top tabs (Ask/Index/Eval/Traffic) · next-action banner ·
+ *                   tab panel
  *
- * The lifecycle controls (start / stop) are promoted to the breadcrumb-row
- * toolbar so they are visible from every tab. Status pill + dot + text reflect
- * idle / warming / ready / asking / error states and are updated by the
+ * The page-head breadcrumb is gone — the design collapses it; project name
+ * is conveyed by the header's project switcher, and lifecycle/status moved
+ * into the Status card. Status pill + dot + text reflect idle / warming /
+ * ready / asking / error states and are updated by the
  * bootstrap script via /api/projects/:name/health polling.
  */
 
@@ -60,19 +63,10 @@ export function renderProject(vm: ProjectViewModel): Html {
   });
 
   const body = html`
-    <div class="page-head">
-      <div class="crumbs">
-        <a href="/">projects</a><span class="sep">/</span>
-        <span class="here mono">${project.name}</span>
-        ${statusPill(live, running, project.valid)}
-        ${project.valid ? lifecycleToolbar(live) : ''}
-      </div>
-    </div>
-
     ${project.valid
       ? html`
         <div class="proj-grid">
-          ${sidebar(project, live, running, vm.reports)}
+          ${sidebar(project, live, running, vm.reports, vm.indexSnapshot)}
           <div class="main-stack">
             ${renderTabs()}
             ${nextAction ? nextActionBanner(nextAction) : ''}
@@ -108,21 +102,6 @@ function statusPill(
     return html`<span class="pill run" id="status-pill"><span class="dot" id="status-dot"></span><span id="status-text">running · :${running.port} · pid ${running.pid}</span></span>`;
   }
   return html`<span class="pill" id="status-pill"><span class="dot" id="status-dot"></span><span id="status-text">idle</span></span>`;
-}
-
-function lifecycleToolbar(live: boolean): Html {
-  // Tests assert: stopped → btn-start enabled, btn-stop disabled; running → reversed.
-  // Buttons are visible on every tab so the author can start/stop from anywhere.
-  return html`
-    <span class="proj-toolbar" role="group" aria-label="lifecycle">
-      <button id="btn-start" class="btn sm primary" ${live ? 'disabled' : ''}>
-        <svg><use href="#i-play"/></svg> start
-      </button>
-      <button id="btn-stop" class="btn sm" ${live ? '' : 'disabled'}>
-        <svg><use href="#i-stop"/></svg> stop
-      </button>
-    </span>
-  `;
 }
 
 function nextActionBanner(na: NextAction): Html {
@@ -174,10 +153,11 @@ function sidebar(
   live: boolean,
   running: RegisteredProcess | null,
   reports: ReportListing[],
+  indexSnapshot: IndexSnapshot | undefined,
 ): Html {
   return html`
     <aside class="side-stack">
-      ${statusCard(project, live, running)}
+      ${statusCard(project, live, running, indexSnapshot)}
       ${reportsCard(project.name, reports)}
     </aside>
   `;
@@ -187,21 +167,34 @@ function statusCard(
   project: ProjectListing,
   live: boolean,
   running: RegisteredProcess | null,
+  indexSnapshot: IndexSnapshot | undefined,
 ): Html {
-  // Sidebar status echoes the page-head pill in more detail — full path
-  // (collapsed via title attr), indexed count, child port + pid. The
-  // <span class="tag run">:port</span> form is asserted by existing tests
-  // so the markup stays stable.
+  // The redesign collapses the breadcrumb row entirely — Status pill,
+  // start/stop buttons, and the open-reader/view-log actions all moved
+  // into this card. Button IDs (#btn-start / #btn-stop) stay the same so
+  // the BOOTSTRAP_SCRIPT click handlers and the existing tests still hook
+  // through. The "process" row keeps the <span class="tag">stopped</span>
+  // markup that tests pin.
+  const pages = indexSnapshot?.totalPages ?? null;
+  const chunks = indexSnapshot?.dbStatus?.chunk_count ?? null;
+  const indexedExtra =
+    pages !== null && pages > 0
+      ? html`<span style="color: var(--fg-mute); font-family: var(--font-mono); font-size: 11px; margin-left: 4px;">·
+          ${pages} pages${chunks !== null ? html` · ${chunks} chunks` : ''}</span>`
+      : '';
   return html`
     <section class="card">
-      <div class="card-hd"><h2>Status</h2></div>
+      <div class="card-hd">
+        <h2>Status</h2>
+        ${statusPill(live, running, project.valid)}
+      </div>
       <div class="card-bd">
         <dl class="kv">
           <dt>path</dt>
           <dd><code class="inline" title="${project.path}">${shortPath(project.path)}</code></dd>
           <dt>indexed</dt>
           <dd>${project.indexed
-            ? html`<span class="yes">yes</span>`
+            ? html`<span class="yes">yes</span>${indexedExtra}`
             : html`<span class="no">no</span>`}</dd>
           <dt>process</dt>
           <dd>
@@ -210,11 +203,29 @@ function statusCard(
                   <span class="mono" style="color: var(--fg-mute); font-size: 11px;">pid ${running.pid}</span>`
               : html`<span class="tag">stopped</span>`}
           </dd>
-          <dt>port</dt>
-          <dd>${live && running
-            ? html`<code class="inline">:${running.port}</code>`
-            : html`<span class="muted">—</span>`}</dd>
         </dl>
+
+        <div style="display: flex; gap: var(--s-2); margin-top: var(--s-3);">
+          <button id="btn-start" class="btn primary" ${live ? 'disabled' : ''} style="flex: 1;">
+            <svg><use href="#i-play"/></svg> start
+          </button>
+          <button id="btn-stop" class="btn" ${live ? '' : 'disabled'} style="flex: 1;">
+            <svg><use href="#i-stop"/></svg> stop
+          </button>
+        </div>
+
+        ${live && running
+          ? html`
+            <div class="status-acts">
+              <a class="btn reader" href="http://127.0.0.1:${running.port}" target="_blank" rel="noopener" title="open reader on :${running.port}">
+                <svg><use href="#i-ext"/></svg> open reader<span style="color: var(--fg-mute); margin-left: 4px;">:${running.port}</span>
+              </a>
+              <button class="btn" disabled title="tail child stdout/stderr — not yet implemented">
+                <svg><use href="#i-term"/></svg> view log
+              </button>
+            </div>
+          `
+          : ''}
       </div>
     </section>
   `;
