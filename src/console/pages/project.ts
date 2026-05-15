@@ -2,9 +2,9 @@
  * Per-project page — ARCH §17.3.1 GET /p/:name.
  *
  * Layout (redesign):
- *   page-head        crumbs · status pill · proj-toolbar (start/stop) · workspace meta
+ *   page-head        crumbs · status pill · proj-toolbar (start/stop)
  *   proj-grid:
- *     side-stack    Status card · Reports card
+ *     side-stack    Status card (project path lives here) · Reports card
  *     main-stack    next-action banner · top tabs (Ask/Index/Eval/Traffic) · tab panel
  *
  * The lifecycle controls (start / stop) are promoted to the breadcrumb-row
@@ -67,7 +67,6 @@ export function renderProject(vm: ProjectViewModel): Html {
         ${statusPill(live, running, project.valid)}
         ${project.valid ? lifecycleToolbar(live) : ''}
       </div>
-      <div class="page-meta">${project.path}</div>
     </div>
 
     ${project.valid
