@@ -920,6 +920,31 @@ function makeStubOps(overrides: Partial<ConsoleOps> = {}): {
         onEvent({ type: 'log', line: 'stub log' });
         onEvent({ type: 'result', ok: true, message: 'stub' });
       }),
+    evalStream: overrides.evalStream ??
+      (async (_opts, onEvent) => {
+        calls.eval += 1;
+        onEvent({ type: 'boot', totalCases: 2 });
+        onEvent({ type: 'warm', bootMs: 100, chunks: 50 });
+        onEvent({ type: 'case-start', i: 0, total: 2, caseId: 'c1', query: 'q1', lang: 'en' });
+        onEvent({
+          type: 'case-done',
+          i: 0, total: 2, caseId: 'c1', latencyMs: 200,
+          kind: 'answer', r_at_5: true, citation_pass: true, answer_rule_pass: true,
+        });
+        onEvent({ type: 'case-start', i: 1, total: 2, caseId: 'c2', query: 'q2', lang: 'zh' });
+        onEvent({
+          type: 'case-done',
+          i: 1, total: 2, caseId: 'c2', latencyMs: 300,
+          kind: 'answer', r_at_5: false, citation_pass: true, answer_rule_pass: false,
+        });
+        onEvent({
+          type: 'done',
+          reportPath: '/tmp/fake/reports/2026-05-15-eval.md',
+          totalMs: 500,
+          summary: { n: 2, r_at_5: 0.5, citation_pass: 1, answer_rule_pass: 0.5 },
+        });
+        onEvent({ type: 'result', ok: true, reportPath: '/tmp/fake/reports/2026-05-15-eval.md' });
+      }),
   };
   return { ops, calls };
 }
@@ -1046,6 +1071,65 @@ test('POST /api/projects/:name/eval: pinned baseline used when body omits baseli
     });
     assert.equal(res.status, 200);
     assert.ok(receivedBaseline?.endsWith('reports/2026-05-08-eval.md'));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/eval/stream: emits boot → warm → case-* → done → result as NDJSON', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const { ops: fakeOps } = makeStubOps();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      ops: fakeOps,
+    });
+    const res = await app.request('/api/projects/docs-zh/eval/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') || '', /x-ndjson/);
+    const text = await res.text();
+    const lines = text.split('\n').filter((l) => l.length > 0);
+    const events = lines.map((l) => JSON.parse(l) as { type: string });
+    // exact sequence the stub emits — proves the server is forwarding events
+    // verbatim through stream() in NDJSON form.
+    assert.deepEqual(
+      events.map((e) => e.type),
+      ['boot', 'warm', 'case-start', 'case-done', 'case-start', 'case-done', 'done', 'result'],
+    );
+    const last = events[events.length - 1] as { type: 'result'; ok: boolean };
+    assert.equal(last.ok, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/eval/stream: invalid baseline filename → 400', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const { ops: fakeOps } = makeStubOps();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      ops: fakeOps,
+    });
+    const res = await app.request('/api/projects/docs-zh/eval/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseline_path: '../escape.md' }),
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    assert.equal(body.ok, false);
+    assert.match(body.error, /invalid baseline filename/);
   } finally {
     await cleanup();
   }

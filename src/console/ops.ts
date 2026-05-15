@@ -13,7 +13,7 @@
 
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { runEval, type EvalOptions } from '../commands/eval.ts';
+import { runEval, type EvalOptions, type EvalProgressEvent } from '../commands/eval.ts';
 import { runAnalyzeRuns, type AnalyzeRunsOptions } from '../commands/analyze.ts';
 import { runGoldenGenerate, type GoldenGenerateOptions } from '../commands/golden.ts';
 
@@ -31,6 +31,18 @@ export type GoldenGenerateEvent =
   | { type: 'result'; ok: true; message?: string }
   | { type: 'result'; ok: false; error: string };
 
+/**
+ * NDJSON events emitted by the streaming variant of eval. `boot` and `warm`
+ * frame the warm-up phase, `case-start` / `case-done` straddle each per-case
+ * run, and `done` carries the final report path + summary. A `result`
+ * terminator follows so the HTTP layer can surface ok / error uniformly with
+ * the goldenGenerate stream.
+ */
+export type EvalStreamEvent =
+  | EvalProgressEvent
+  | { type: 'result'; ok: true; reportPath?: string }
+  | { type: 'result'; ok: false; error: string };
+
 export type ConsoleOps = {
   eval: (opts: EvalOptions) => Promise<OpResult>;
   analyzeRuns: (opts: AnalyzeRunsOptions) => Promise<OpResult>;
@@ -44,6 +56,14 @@ export type ConsoleOps = {
   goldenGenerateStream: (
     opts: GoldenGenerateOptions,
     onEvent: (e: GoldenGenerateEvent) => void,
+  ) => Promise<void>;
+  /**
+   * Streaming variant of eval. Forwards runEval's onProgress events plus a
+   * final `result` terminator. Promise resolves after `result` is emitted.
+   */
+  evalStream: (
+    opts: EvalOptions,
+    onEvent: (e: EvalStreamEvent) => void,
   ) => Promise<void>;
 };
 
@@ -120,6 +140,22 @@ export const defaultOps: ConsoleOps = {
       });
     } catch (err) {
       if (pending.length > 0) onEvent({ type: 'log', line: pending });
+      onEvent({ type: 'result', ok: false, error: (err as Error).message });
+    }
+  },
+  evalStream: async (opts, onEvent) => {
+    try {
+      const code = await runEval({
+        ...opts,
+        onProgress: (ev) => onEvent(ev),
+      });
+      if (code !== 0) {
+        onEvent({ type: 'result', ok: false, error: `eval exited with code ${code}` });
+        return;
+      }
+      const reportPath = findLatestReport(opts.stateRoot, 'eval');
+      onEvent(reportPath ? { type: 'result', ok: true, reportPath } : { type: 'result', ok: true });
+    } catch (err) {
       onEvent({ type: 'result', ok: false, error: (err as Error).message });
     }
   },

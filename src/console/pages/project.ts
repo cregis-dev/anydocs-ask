@@ -984,32 +984,112 @@ function bindEvalRun() {
   const btn = $('btn-run-eval');
   const sel = $('eval-baseline-select');
   const status = $('eval-run-status');
+  const progEl = $('eval-progress');
+  const progI = $('eval-prog-i');
+  const progTotal = $('eval-prog-total');
+  const progSlug = $('eval-prog-slug');
+  const progEta = $('eval-prog-eta');
+  const progBar = $('eval-prog-bar');
   if (!btn || !status) return;
   btn.addEventListener('click', async () => {
     btn.disabled = true;
-    status.textContent = 'running... (10–30s typical)';
+    status.textContent = 'warming up the runtime…';
     status.className = 'status';
+    if (progEl) {
+      progEl.hidden = false;
+      if (progI) progI.textContent = '0';
+      if (progTotal) progTotal.textContent = '—';
+      if (progSlug) progSlug.textContent = '';
+      if (progEta) progEta.textContent = '';
+      if (progBar) progBar.style.width = '0%';
+    }
     const t0 = Date.now();
     const baseline = sel ? (sel.value || null) : null;
+    // Per-case running average for the ETA.
+    let total = 0;
+    let doneCount = 0;
+    let sumMs = 0;
+    let lastResult = null;
+    function applyEvent(ev) {
+      if (ev.type === 'boot') {
+        total = ev.totalCases;
+        if (progTotal) progTotal.textContent = String(total);
+        status.textContent = total + ' cases loaded · waiting for runtime warm…';
+      } else if (ev.type === 'warm') {
+        status.textContent = 'warm in ' + ev.bootMs + 'ms · running cases';
+      } else if (ev.type === 'case-start') {
+        if (progI) progI.textContent = String(ev.i + 1);
+        if (progSlug) progSlug.textContent = ev.lang + ' · ' + ev.caseId;
+      } else if (ev.type === 'case-done') {
+        doneCount = ev.i + 1;
+        sumMs += ev.latencyMs;
+        const pct = total > 0 ? Math.round((doneCount / total) * 100) : 0;
+        if (progBar) progBar.style.width = pct + '%';
+        const avg = sumMs / Math.max(1, doneCount);
+        const remaining = Math.max(0, total - doneCount);
+        if (progEta && remaining > 0) {
+          const etaMs = remaining * avg;
+          progEta.textContent = etaMs > 1500
+            ? '~' + Math.round(etaMs / 1000) + 's remaining'
+            : '<1s remaining';
+        } else if (progEta) {
+          progEta.textContent = 'finishing…';
+        }
+      } else if (ev.type === 'done') {
+        status.textContent = 'wrote ' + ev.reportPath.split('/').pop() + ' · reloading';
+        status.className = 'status ok';
+      } else if (ev.type === 'result') {
+        lastResult = ev;
+      }
+    }
     try {
-      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/eval', {
+      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/eval/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(baseline ? { baseline_path: baseline } : {}),
       });
-      const body = await res.json();
-      const dt = Date.now() - t0;
-      if (!res.ok || body.ok === false) {
-        status.textContent = 'failed (' + dt + 'ms): ' + (body.error || res.statusText);
+      if (!res.ok || !res.body) {
+        const text = await res.text().catch(() => '');
+        status.textContent = 'failed: HTTP ' + res.status + ' ' + (text || res.statusText);
         status.className = 'status err';
-      } else {
-        status.textContent = 'done (' + dt + 'ms) — reloading';
+        if (progEl) progEl.hidden = true;
+        btn.disabled = false;
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf('\\n')) !== -1) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          try { applyEvent(JSON.parse(line)); } catch (_) {}
+        }
+      }
+      if (buf.trim()) {
+        try { applyEvent(JSON.parse(buf)); } catch (_) {}
+      }
+      const dt = Date.now() - t0;
+      if (lastResult && lastResult.ok) {
+        if (progBar) progBar.style.width = '100%';
+        status.textContent = (status.textContent || ('done in ' + (dt / 1000).toFixed(1) + 's')) + ' — reloading';
         status.className = 'status ok';
-        setTimeout(() => location.reload(), 500);
+        setTimeout(() => location.reload(), 600);
+      } else {
+        const err = (lastResult && lastResult.error) || 'unknown error';
+        status.textContent = 'failed (' + (dt / 1000).toFixed(1) + 's): ' + err;
+        status.className = 'status err';
+        if (progEl) progEl.hidden = true;
       }
     } catch (e) {
       status.textContent = 'network error: ' + (e && e.message ? e.message : e);
       status.className = 'status err';
+      if (progEl) progEl.hidden = true;
     } finally {
       btn.disabled = false;
     }

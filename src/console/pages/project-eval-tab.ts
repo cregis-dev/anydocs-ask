@@ -204,6 +204,17 @@ function runCard(
           </button>
         </div>
         <p id="eval-run-status" class="status" style="margin-top: var(--s-3);"></p>
+
+        <div id="eval-progress" hidden style="margin-top: var(--s-3);">
+          <div style="display: flex; justify-content: space-between; font-size: var(--t-13); margin-bottom: 6px; flex-wrap: wrap; gap: var(--s-2);">
+            <span>case <b id="eval-prog-i">0</b> of <span id="eval-prog-total">—</span>
+              <span id="eval-prog-slug" style="color: var(--fg-soft); margin-left: 8px; font-family: var(--font-mono);"></span>
+            </span>
+            <span id="eval-prog-eta" style="color: var(--fg-soft);"></span>
+          </div>
+          <div class="progress" style="height: 8px;"><i id="eval-prog-bar" style="width: 0%;"></i></div>
+        </div>
+
         <details style="margin-top: var(--s-4);">
           <summary style="font-size: var(--t-12); color: var(--fg-soft); cursor: pointer;">CLI equivalent</summary>
           <pre class="block" style="margin-top: var(--s-2);">anydocs-ask <span class="kw">eval</span> &lt;project&gt;${pinned ? ` --baseline ${pinned.filename.slice(0, 10)}` : ''}</pre>

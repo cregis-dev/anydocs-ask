@@ -636,6 +636,42 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     return c.json(r, r.ok ? 200 : 500);
   });
 
+  // Streaming variant: NDJSON, one event per line. Lets the Eval-tab UI
+  // show a real progress bar + "case N of M" while the loop runs, instead
+  // of waiting 10–30s for the single /eval fetch to come back. Body shape
+  // matches /eval (optional { baseline_path }).
+  app.post('/api/projects/:name/eval/stream', async (c) => {
+    const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
+    if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
+    let baselinePath: string | undefined;
+    try {
+      const body = (await c.req.json().catch(() => null)) as { baseline_path?: string } | null;
+      if (body && typeof body.baseline_path === 'string' && body.baseline_path.length > 0) {
+        if (!isReportFilename(body.baseline_path)) {
+          return c.json({ ok: false, error: 'invalid baseline filename' }, 400);
+        }
+        baselinePath = join(ctx.stateRoot, 'reports', body.baseline_path);
+      }
+    } catch {
+      // ignore — proceed with default baseline
+    }
+    c.header('Content-Type', 'application/x-ndjson; charset=utf-8');
+    c.header('Cache-Control', 'no-cache, no-transform');
+    c.header('X-Accel-Buffering', 'no');
+    return stream(c, async (s) => {
+      await ops.evalStream(
+        {
+          projectRoot: ctx.projectRoot,
+          stateRoot: ctx.stateRoot,
+          ...(baselinePath ? { baselinePath } : {}),
+        },
+        (ev) => {
+          void s.write(JSON.stringify(ev) + '\n');
+        },
+      );
+    });
+  });
+
   // pin / unpin baseline — ARCH §17.8 baseline 钉固。
   app.post('/api/projects/:name/eval/pin-baseline', async (c) => {
     const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
