@@ -1,10 +1,10 @@
 /**
  * Read-only Config drawer — ARCH §17.3.9.
  *
- * Right-side slide-over (opened via the header gear). Shows three layered
+ * Right-side slide-over (opened via the header gear). Shows the layered
  * config sources in precedence order: workspace .env · workspace
- * .console.json · per-project anydocs.ask.json. Secrets are partially
- * redacted to first 4 + last 2 chars.
+ * .console.json · per-project anydocs.ask.json · per-project ask.local.json.
+ * Secrets are partially redacted to first 4 + last 2 chars.
  */
 
 import { html } from 'hono/html';
@@ -29,37 +29,48 @@ export function renderConfigDrawer(vm: ConfigViewModel): Html {
           <span class="b-ico"><svg><use href="#i-info"/></svg></span>
           <div class="b-bd">
             <div class="b-ti">Read-only view</div>
-            <div class="b-de">Values merged in precedence order. Secrets show as <code class="inline">abcd***xy</code>.
-              Edit the source files and refresh to apply.</div>
+            <div class="b-de">Sources are merged top-to-bottom — later files override earlier ones.
+              Secrets show as <code class="inline">abcd…wxyz</code>. Edit the source files and refresh to apply.</div>
           </div>
         </div>
 
         ${section({
-          title: 'WORKSPACE · .env',
-          tag: 'precedence 1 · credentials',
+          title: '.env',
+          tag: 'base',
           file: vm.workspaceEnv,
           render: (entries) => envTable(entries as RedactedEnvEntry[]),
         })}
 
         ${section({
-          title: 'WORKSPACE · .console.json',
-          tag: 'precedence 2',
+          title: '.console.json',
+          tag: 'base',
           file: vm.consoleJson,
           render: (data) => jsonBlock(data),
         })}
 
         ${vm.projectAskJson
           ? section({
-              title: 'PROJECT · anydocs.ask.json',
-              tag: 'precedence 3 · overrides workspace',
+              title: 'anydocs.ask.json',
+              sub: '— project',
+              tag: 'override',
               file: vm.projectAskJson,
+              render: (data) => jsonBlock(data),
+            })
+          : ''}
+
+        ${vm.projectAskLocalJson
+          ? section({
+              title: 'ask.local.json',
+              sub: '— project, gitignored',
+              tag: 'override',
+              file: vm.projectAskLocalJson,
               render: (data) => jsonBlock(data),
             })
           : ''}
 
         <div style="font-size: var(--t-12); color: var(--fg-mute); padding-top: var(--s-3); border-top: 1px solid var(--bd-soft); line-height: 1.55;">
           <b>How redaction works:</b> values whose key matches
-          <code class="inline">/key|secret|token|password|auth_token|private_key/i</code> show first 4 + last 2 chars only.
+          <code class="inline">/key|secret|token|password|auth_token|private_key/i</code> show first 4 + last 4 chars only.
         </div>
       </div>
     </aside>
@@ -68,16 +79,20 @@ export function renderConfigDrawer(vm: ConfigViewModel): Html {
 
 function section<T>(args: {
   title: string;
+  /** Dimmed qualifier after the title, e.g. "— project". */
+  sub?: string;
   tag: string;
   file: ConfigFile<T>;
   render: (data: T) => Html;
 }): Html {
-  const { title, tag, file } = args;
+  const { title, sub, tag, file } = args;
   const mtime = file.mtimeISO ? file.mtimeISO.slice(0, 16).replace('T', ' ') : null;
   return html`
     <section class="drawer-sec">
       <div class="drawer-sec-hd">
-        <h3>${title}</h3>
+        <h3>${title}${sub
+          ? html` <span class="sub" style="font-weight: 400; color: var(--fg-mute);">${sub}</span>`
+          : ''}</h3>
         <span class="tag">${file.exists ? tag : tag + ' · not present'}</span>
         <span class="path">${file.path}${mtime ? ` · mtime ${mtime}` : ''}</span>
       </div>
@@ -113,11 +128,12 @@ function envTable(entries: RedactedEnvEntry[]): Html {
 }
 
 function renderRedacted(value: string): Html {
-  // Existing redactor returns "first4***last2" — render as text with the
-  // *** highlighted via <em>.
-  const idx = value.indexOf('***');
+  // Redactor returns "first4…last4" — render as text with the ellipsis
+  // highlighted via <em>. ('…' is one code unit; very short secrets fall
+  // back to "***", which has no '…' and renders verbatim.)
+  const idx = value.indexOf('…');
   if (idx === -1) return html`${value}`;
-  return html`${value.slice(0, idx)}<em>***</em>${value.slice(idx + 3)}`;
+  return html`${value.slice(0, idx)}<em>…</em>${value.slice(idx + 1)}`;
 }
 
 function jsonBlock(data: unknown): Html {
