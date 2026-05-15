@@ -23,8 +23,17 @@ export type LLMGenerateOutput = {
   modelUsed: string;
 };
 
+export type LLMStreamOptions = {
+  signal?: AbortSignal;
+  onDelta: (text: string) => void | Promise<void>;
+};
+
 export interface LLM {
   /** Stable identifier reported back in AskAnswer.model. */
   readonly model: string;
   generate(input: LLMGenerateInput): Promise<LLMGenerateOutput>;
+  streamGenerate?(
+    input: LLMGenerateInput,
+    options: LLMStreamOptions,
+  ): Promise<LLMGenerateOutput>;
 }

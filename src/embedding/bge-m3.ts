@@ -52,6 +52,10 @@ export class Bgem3Embedder implements Embedder {
     if (this.ready && this.pipeline) return;
     // Lazy-load to keep MockEmbedder users from paying the import cost.
     const tx = await import('@huggingface/transformers');
+    const remoteHost = process.env.HF_ENDPOINT?.trim() || process.env.TRANSFORMERS_REMOTE_HOST?.trim();
+    if (remoteHost) {
+      tx.env.remoteHost = remoteHost.endsWith('/') ? remoteHost : `${remoteHost}/`;
+    }
     if (this.cacheDir) {
       // mkdir before transformers.js touches it; getModelFile fails opaquely
       // if the parent dir doesn't exist on first run.

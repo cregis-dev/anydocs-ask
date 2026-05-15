@@ -10,7 +10,7 @@
  * (e.g. simulate cross-lang fallback by replying in the answer_lang).
  */
 
-import type { LLM, LLMGenerateInput, LLMGenerateOutput } from './types.ts';
+import type { LLM, LLMGenerateInput, LLMGenerateOutput, LLMStreamOptions } from './types.ts';
 
 export type MockResponder = (input: LLMGenerateInput) => string | LLMGenerateOutput;
 
@@ -37,6 +37,18 @@ export class MockLLM implements LLM {
     }
     return out;
   }
+
+  async streamGenerate(
+    input: LLMGenerateInput,
+    options: LLMStreamOptions,
+  ): Promise<LLMGenerateOutput> {
+    const out = await this.generate(input);
+    for (const chunk of chunkForMockStream(out.text)) {
+      if (options.signal?.aborted) break;
+      await options.onDelta(chunk);
+    }
+    return out;
+  }
 }
 
 /**
@@ -50,4 +62,9 @@ function defaultResponder(input: LLMGenerateInput): string {
     return 'No relevant context found.';
   }
   return `Based on the documentation: ${markers.join(' ')}`;
+}
+
+function chunkForMockStream(text: string): string[] {
+  const parts = text.match(/\S+\s*/g);
+  return parts && parts.length > 0 ? parts : text.length > 0 ? [text] : [];
 }

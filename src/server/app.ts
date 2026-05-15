@@ -15,16 +15,41 @@
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { Hono } from 'hono';
+import type { Context } from 'hono';
+import { streamSSE } from 'hono/streaming';
 import type { Runtime } from './runtime.ts';
 import { buildCorsMiddleware } from './cors.ts';
-import { askWithTrace, type AskTrace } from '../query/answer.ts';
+import { askWithTrace, askWithTraceStream, type AskTrace } from '../query/answer.ts';
 import { persistAnswer } from './answer-cache.ts';
 import type { AskRequest, AskResult, Citation } from '../query/types.ts';
+import type { LLM } from '../llm/types.ts';
 import type { RunCitation, RunRecord } from '../runs/types.ts';
+
+const SSE_HEARTBEAT_MS = 2_000;
+const SSE_INITIAL_PADDING_BYTES = 4_096;
+const SSE_FLUSH_PADDING_BYTES = 4_096;
 
 export type AppDeps = {
   runtime: Runtime;
 };
+
+type AskRouteOptions = {
+  dryRun: boolean;
+  source: 'reader' | 'console';
+};
+
+type PreparedAskCall =
+  | {
+      ok: true;
+      options: AskRouteOptions;
+      req: AskRequest;
+      llm: LLM;
+    }
+  | {
+      ok: false;
+      status: 400 | 503;
+      result: AskResult;
+    };
 
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
@@ -50,96 +75,144 @@ export function createApp(deps: AppDeps): Hono {
   // Ask
   // -----------------------------------------------------------------------
   app.post('/v1/ask', async (c) => {
-    if (!runtime.warm) {
-      return c.json({ type: 'error', code: 'warming', message: 'service is warming up' }, 503);
+    const prepared = await prepareAskCall(runtime, c);
+    if (!prepared.ok) {
+      return c.json(prepared.result, prepared.status);
     }
-    // dry_run=1 short-circuits both runs.jsonl append and answer-cache
-    // persist. Used by the v1 dev console (ARCH §17.3.3) so author dogfood
-    // queries don't pollute analytics or feedback identity. response gets
-    // `_dry_run: true` so the client UI can disable feedback affordances.
-    const dryRun = c.req.query('dry_run') === '1';
-    // source=console marks the run as originating from the dev console with
-    // persist=true (ARCH §17.8). dry_run wins — when dry_run=1, source is
-    // ignored. Default 'reader' covers the public path. Unknown values are
-    // rejected to keep the analyze/golden filter contract honest.
-    const sourceRaw = c.req.query('source');
-    let source: 'reader' | 'console' = 'reader';
-    if (sourceRaw !== undefined) {
-      if (sourceRaw === 'reader' || sourceRaw === 'console') {
-        source = sourceRaw;
-      } else {
-        return c.json(
-          { type: 'error', code: 'invalid_request', message: `unknown source: ${sourceRaw}` },
-          400,
-        );
-      }
-    }
-    let body: unknown;
+    const t0 = performance.now();
+    let ask: { result: AskResult; trace: AskTrace };
     try {
-      body = await c.req.json();
-    } catch {
-      return c.json(
-        { type: 'error', code: 'invalid_request', message: 'malformed JSON body' },
-        400,
+      ask = await askWithTrace(
+        { db: runtime.db, embedder: runtime.embedder, llm: prepared.llm },
+        prepared.req,
       );
-    }
-    if (typeof body !== 'object' || body === null) {
-      return c.json(
-        { type: 'error', code: 'invalid_request', message: 'body must be a JSON object' },
-        400,
-      );
-    }
-    const req = body as AskRequest;
-    let llm;
-    try {
-      llm = runtime.llm;
     } catch (err) {
       return c.json(
         {
           type: 'error',
-          code: 'llm_unavailable',
+          code: 'llm_request_failed',
           message: (err as Error).message,
         },
-        503,
+        502,
       );
     }
-    const t0 = performance.now();
-    const { result, trace } = await askWithTrace(
-      { db: runtime.db, embedder: runtime.embedder, llm },
-      req,
-    );
+    const { result, trace } = ask;
+    const bodyOut = finalizeAskCall({
+      runtime,
+      req: prepared.req,
+      result,
+      trace,
+      t0,
+      options: prepared.options,
+    });
 
-    // Persist + log to runs.jsonl regardless of outcome — analyze needs
-    // visibility into errors / clarifies / answers alike. Skipped for dry_run.
-    if (!dryRun) {
-      const requestId = randomUUID();
-      const latencyMs =
-        result.type === 'answer' ? result.latency_ms : Math.round(performance.now() - t0);
-      appendRun(runtime, {
-        requestId,
-        query: req.question ?? '',
-        filters: extractFilters(req),
-        contextPageId: req.context?.current_page_id ?? null,
-        result,
-        trace,
-        latencyMs,
-        source,
-      });
-    }
-
-    const body_out = dryRun ? { ...result, _dry_run: true as const } : result;
     if (result.type === 'error') {
       // llm_failed is an upstream/transient gateway problem — same family as
       // llm_unavailable (503). Everything else is client-side validation (400).
       const status = result.code === 'llm_failed' ? 503 : 400;
-      return c.json(body_out, status);
+      return c.json(bodyOut, status);
     }
-    // Persist for feedback join (v1 doesn't dedupe; every call is its own row).
-    // Skipped for dry_run — answer has no persistent identity in the cache.
-    if (!dryRun) {
-      persistAnswer(runtime.db, result, req.question);
-    }
-    return c.json(body_out, 200);
+    return c.json(bodyOut, 200);
+  });
+
+  app.post('/v1/ask/stream', (c) => {
+    c.header('X-Accel-Buffering', 'no');
+    return streamSSE(c, async (stream) => {
+      let writeQueue = Promise.resolve();
+      const writeRaw = async (input: string) => {
+        if (stream.aborted) return;
+        writeQueue = writeQueue
+          .then(async () => {
+            if (stream.aborted) return;
+            await stream.write(input);
+          })
+          .catch(() => undefined);
+        await writeQueue;
+      };
+      const writeComment = (comment: string) => writeRaw(`:${comment}\n\n`);
+      const write = (event: string, data: unknown) =>
+        writeRaw(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      const writeFlushPadding = () => writeComment(' '.repeat(SSE_FLUSH_PADDING_BYTES));
+      const writeFlushed = async (event: string, data: unknown) => {
+        await write(event, data);
+        await writeFlushPadding();
+      };
+      let heartbeat: ReturnType<typeof setInterval> | null = null;
+      let wroteFirstDelta = false;
+      const startHeartbeat = () => {
+        if (heartbeat) return;
+        heartbeat = setInterval(() => {
+          void writeFlushed('status', { stage: 'generating', heartbeat: true });
+        }, SSE_HEARTBEAT_MS);
+      };
+      const stopHeartbeat = () => {
+        if (!heartbeat) return;
+        clearInterval(heartbeat);
+        heartbeat = null;
+      };
+
+      await writeComment(' '.repeat(SSE_INITIAL_PADDING_BYTES));
+      await writeFlushed('status', { stage: 'received' });
+      const prepared = await prepareAskCall(runtime, c);
+      if (!prepared.ok) {
+        await write('result', prepared.result);
+        await write('done', { ok: true });
+        return;
+      }
+
+      const abortController = new AbortController();
+      stream.onAbort(() => {
+        stopHeartbeat();
+        abortController.abort();
+      });
+      const t0 = performance.now();
+      let ask: { result: AskResult; trace: AskTrace };
+      try {
+        ask = await askWithTraceStream(
+          { db: runtime.db, embedder: runtime.embedder, llm: prepared.llm },
+          prepared.req,
+          {
+            signal: abortController.signal,
+            onStatus: async (stage) => {
+              await writeFlushed('status', { stage });
+              if (stage === 'generating') {
+                startHeartbeat();
+              }
+            },
+            onDelta: async (text) => {
+              await write('delta', { text });
+              if (!wroteFirstDelta) {
+                wroteFirstDelta = true;
+                await writeFlushPadding();
+              }
+            },
+          },
+        );
+      } catch (err) {
+        stopHeartbeat();
+        if (stream.aborted || abortController.signal.aborted) return;
+        await write('result', {
+          type: 'error',
+          code: 'llm_request_failed',
+          message: (err as Error).message,
+        });
+        await write('done', { ok: true });
+        return;
+      }
+      stopHeartbeat();
+      if (stream.aborted || abortController.signal.aborted) return;
+
+      const bodyOut = finalizeAskCall({
+        runtime,
+        req: prepared.req,
+        result: ask.result,
+        trace: ask.trace,
+        t0,
+        options: prepared.options,
+      });
+      await write('result', bodyOut);
+      await write('done', { ok: true });
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -247,6 +320,119 @@ export function createApp(deps: AppDeps): Hono {
 
   app.notFound((c) => c.json({ type: 'error', code: 'not_found' }, 404));
   return app;
+}
+
+// ---------------------------------------------------------------------------
+// Ask route helpers
+// ---------------------------------------------------------------------------
+
+async function prepareAskCall(runtime: Runtime, c: Context): Promise<PreparedAskCall> {
+  if (!runtime.warm) {
+    return {
+      ok: false,
+      status: 503,
+      result: { type: 'error', code: 'warming', message: 'service is warming up' },
+    };
+  }
+
+  // dry_run=1 short-circuits both runs.jsonl append and answer-cache persist.
+  const dryRun = c.req.query('dry_run') === '1';
+  // source=console marks author dogfooding. dry_run still wins later by
+  // skipping all persistence.
+  const sourceRaw = c.req.query('source');
+  let source: 'reader' | 'console' = 'reader';
+  if (sourceRaw !== undefined) {
+    if (sourceRaw === 'reader' || sourceRaw === 'console') {
+      source = sourceRaw;
+    } else {
+      return {
+        ok: false,
+        status: 400,
+        result: {
+          type: 'error',
+          code: 'invalid_request',
+          message: `unknown source: ${sourceRaw}`,
+        },
+      };
+    }
+  }
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return {
+      ok: false,
+      status: 400,
+      result: { type: 'error', code: 'invalid_request', message: 'malformed JSON body' },
+    };
+  }
+  if (typeof body !== 'object' || body === null) {
+    return {
+      ok: false,
+      status: 400,
+      result: { type: 'error', code: 'invalid_request', message: 'body must be a JSON object' },
+    };
+  }
+
+  let llm: LLM;
+  try {
+    llm = runtime.llm;
+  } catch (err) {
+    return {
+      ok: false,
+      status: 503,
+      result: {
+        type: 'error',
+        code: 'llm_unavailable',
+        message: (err as Error).message,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    options: { dryRun, source },
+    req: body as AskRequest,
+    llm,
+  };
+}
+
+function finalizeAskCall(args: {
+  runtime: Runtime;
+  req: AskRequest;
+  result: AskResult;
+  trace: AskTrace;
+  t0: number;
+  options: AskRouteOptions;
+}): AskResult | (AskResult & { _dry_run: true }) {
+  const { runtime, req, result, trace, t0, options } = args;
+
+  // Persist + log to runs.jsonl regardless of outcome — analyze needs
+  // visibility into errors / clarifies / answers alike. Skipped for dry_run.
+  if (!options.dryRun) {
+    const requestId = randomUUID();
+    const latencyMs =
+      result.type === 'answer' ? result.latency_ms : Math.round(performance.now() - t0);
+    appendRun(runtime, {
+      requestId,
+      query: req.question ?? '',
+      filters: extractFilters(req),
+      contextPageId: req.context?.current_page_id ?? null,
+      result,
+      trace,
+      latencyMs,
+      source: options.source,
+    });
+  }
+
+  // Persist for feedback join (v1 doesn't dedupe; every call is its own row).
+  // Skipped for dry_run — answer has no persistent identity in the cache.
+  if (!options.dryRun && result.type !== 'error') {
+    persistAnswer(runtime.db, result, req.question);
+  }
+
+  return options.dryRun ? { ...result, _dry_run: true as const } : result;
 }
 
 // ---------------------------------------------------------------------------
