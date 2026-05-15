@@ -125,7 +125,6 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     );
     return c.html(
       renderHome({
-        workspacePath: deps.workspacePath,
         consolePort: deps.consolePort,
         idleTimeoutMin,
         projects,

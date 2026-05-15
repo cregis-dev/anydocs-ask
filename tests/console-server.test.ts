@@ -73,8 +73,6 @@ test('GET /: empty workspace shows guidance, not crash', async () => {
     const body = await res.text();
     assert.match(body, /projects/);
     assert.match(body, /还没有注册任何项目|workspace add/);
-    // workspace path appears in the header block
-    assert.ok(body.includes(ws));
   } finally {
     await cleanup();
   }

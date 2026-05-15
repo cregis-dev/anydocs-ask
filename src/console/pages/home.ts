@@ -15,7 +15,6 @@ import { renderConfigDrawer } from './config-drawer.ts';
 import type { ConfigViewModel } from '../config-state.ts';
 
 export type HomeViewModel = {
-  workspacePath: string;
   consolePort: number;
   idleTimeoutMin: number;
   projects: ProjectListing[];
@@ -43,7 +42,6 @@ export function renderHome(vm: HomeViewModel): Html {
       ${empty
         ? html`<h1 class="page-title">projects <span class="sub">— no projects yet</span></h1>`
         : html`<h1 class="page-title">projects</h1>`}
-      <div class="page-meta">${vm.workspacePath}</div>
     </div>
 
     ${!empty && vm.workspaceSummary ? workspaceStrip(vm.workspaceSummary) : ''}
