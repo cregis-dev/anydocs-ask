@@ -120,12 +120,17 @@ export function extractMarkdownSections(markdown: string, title: string): Search
   let activeFenceDelimiter: string | null = null;
 
   const flushCurrent = (): void => {
-    const text = stripMarkdown(currentLines.join('\n'));
-    if (!text) return;
+    const body = stripMarkdown(currentLines.join('\n'));
+    if (!body) return;
+    // Prepend the heading path so BM25 can index heading words even when the
+    // section body doesn't repeat them (e.g. "Checkpoints\n They are saved...").
+    const prefix = currentHeadingPath.length
+      ? currentHeadingPath.join(' > ') + '\n'
+      : '';
     sections.push({
       headingPath: [...currentHeadingPath],
       headingId: currentHeadingId,
-      text,
+      text: prefix + body,
     });
   };
 
@@ -176,6 +181,24 @@ export function extractMarkdownSections(markdown: string, title: string): Search
 }
 
 /**
+ * Collapse prose whitespace while preserving newlines inside fenced code
+ * blocks and inline code spans. This keeps shell examples readable for the
+ * LLM while still collapsing redundant whitespace in prose.
+ */
+function collapseProseWhitespace(text: string): string {
+  // Match fenced code blocks (``` or ~~~) and inline code (`...`) first so
+  // they pass through untouched; collapse everything else.
+  return text.replace(/(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]+`)|([^\S\n]+)|(\n{2,})/g,
+    (_m, code: string | undefined, spaces: string | undefined, blankLines: string | undefined) => {
+      if (code !== undefined) return code;   // code block — preserve as-is
+      if (spaces !== undefined) return ' ';  // multiple spaces → single space
+      if (blankLines !== undefined) return '\n'; // multiple blank lines → one newline
+      return _m;
+    },
+  ).trim();
+}
+
+/**
  * Slice a section's text into chunk-sized pieces. Short sections pass through
  * as a single chunk (preserves block-level completeness — the user's
  * principle); long sections are split at the last whitespace inside the cap
@@ -186,7 +209,7 @@ export function splitChunkText(
   maxChars: number = CHUNK_MAX_CHARS_DEFAULT,
   overlapChars: number = CHUNK_OVERLAP_CHARS_DEFAULT,
 ): string[] {
-  const normalized = text.replace(/\s+/g, ' ').trim();
+  const normalized = collapseProseWhitespace(text);
   if (!normalized) return [];
   if (normalized.length <= maxChars) return [normalized];
 

@@ -24,8 +24,8 @@
 import type { DocsLang } from '../anydocs/types.ts';
 import type { RerankedChunk } from './rerank.ts';
 
-export const SUBTREE_DOMINANCE = 0.65;
-export const SUBTREE_SPREAD = 0.15;
+export const SUBTREE_DOMINANCE = 0.55;
+export const SUBTREE_SPREAD = 0.25;
 /**
  * Minimum same-lang RRF score that counts as "we got a real hit". Reality
  * check on ARCH §6's 0.05: with K=60 RRF and per-path top-K=20, a chunk
@@ -57,6 +57,10 @@ export type AggregateOptions = {
   queryLang: DocsLang;
   /** Top-K to consider (default 10). */
   topK?: number;
+  /** Subtree root of the user's current page (from rerank context). When set,
+   *  used as a tiebreaker: if the current subtree appears in the clarify
+   *  candidates, prefer it over asking the user to choose. */
+  currentSubtreeRoot?: string | null;
 };
 
 export function aggregate(
@@ -90,20 +94,30 @@ export function aggregate(
   if (top1.share >= SUBTREE_DOMINANCE) {
     return {
       kind: 'answer-same-lang',
-      pick: top1.chunks,
+      pick: sameLang,
       dominantSubtree: top1.subtree_root,
     };
   }
   if (top2 && top1.share - top2.share < SUBTREE_SPREAD) {
-    // Two competing subtrees with similar weight — the user's intent is
-    // ambiguous; ask for clarification. The HTTP layer will materialise
-    // breadcrumbs + sample pages from this list.
+    // Two competing subtrees with similar weight — normally we'd ask the user
+    // to clarify. But if one of the candidates matches the user's current page
+    // subtree, that's a strong contextual signal: prefer it and answer directly.
+    if (opts.currentSubtreeRoot) {
+      const contextMatch = shares.find((s) => s.subtree_root === opts.currentSubtreeRoot);
+      if (contextMatch) {
+        return {
+          kind: 'answer-same-lang',
+          pick: sameLang,
+          dominantSubtree: contextMatch.subtree_root,
+        };
+      }
+    }
     return { kind: 'clarify', sameLangChunks: sameLang, topSubtrees: shares };
   }
   // Otherwise: leader by spread is clear enough to answer with.
   return {
     kind: 'answer-same-lang',
-    pick: top1.chunks,
+    pick: sameLang,
     dominantSubtree: top1.subtree_root,
   };
 }
