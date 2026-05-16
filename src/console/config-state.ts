@@ -6,7 +6,6 @@
  *   1. workspace `.env` (loaded by anydocs-ask before launching `serve`)
  *   2. workspace `.console.json` (idle reap / port range / etc.)
  *   3. per-project `anydocs.ask.json` (embedding / llm / retrieval / ...)
- *   4. per-project `ask.local.json` (gitignored local overrides)
  *
  * Secrets in `.env` (anything matching SECRET_KEYS_RE) are redacted to
  * `first4…last4`. Phase 1 ships read-only — inline edit is a Phase 2
@@ -28,8 +27,6 @@ export type ConfigViewModel = {
   workspaceEnv: ConfigFile<RedactedEnvEntry[]>;
   consoleJson: ConfigFile<unknown>;
   projectAskJson: ConfigFile<unknown> | null; // null when no project context (Home page)
-  /** Per-project gitignored override. null when no project context (Home). */
-  projectAskLocalJson: ConfigFile<unknown> | null;
 };
 
 export type ConfigFile<T> = {
@@ -49,13 +46,11 @@ export function loadConsoleConfigView(
   const workspaceEnvPath = join(workspacePath, '.env');
   const consoleJsonPath = join(workspacePath, '.console.json');
   const projectAskPath = projectRoot ? join(projectRoot, 'anydocs.ask.json') : null;
-  const projectAskLocalPath = projectRoot ? join(projectRoot, 'ask.local.json') : null;
 
   return {
     workspaceEnv: loadEnvFile(workspaceEnvPath),
     consoleJson: loadJsonFile(consoleJsonPath),
     projectAskJson: projectAskPath ? loadJsonFile(projectAskPath) : null,
-    projectAskLocalJson: projectAskLocalPath ? loadJsonFile(projectAskLocalPath) : null,
   };
 }
 
