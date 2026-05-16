@@ -473,30 +473,38 @@ function clarifyMessageFor(lang: DocsLang): string {
 }
 
 /**
- * Extract individual concept terms from a multi-entity query. Fires only when
- * the question contains ≥ 3 significant tokens separated by list punctuation or
- * conjunctions — e.g. "sessions, checkpoints, and memory" yields
- * ["sessions", "checkpoints", "memory"]. Single-concept queries return [] so
- * the entity injection pass is skipped entirely.
+ * Extract individual concept terms from a multi-entity query. Only fires for
+ * explicit comma-enumeration patterns like "sessions, checkpoints, and memory"
+ * — requires at least 2 commas so that generic phrases with a single comma
+ * ("what is the difference between X and Y?") are never affected.
  *
- * "Significant" = length ≥ 4 AND not a common stop word. Each surviving term
- * is passed to sanitizeFtsQuery inside retrieval.ts before the BM25 call.
+ * Each comma-segment is stripped of leading conjunctions (and/or/nor), then
+ * the first significant word of each segment is taken as the entity term. The
+ * result is undefined (injection skipped) unless ≥ 3 distinct terms survive.
  */
+const ENTITY_SEGMENT_STRIP = /^\s*(and|or|nor)\s+/i;
 const ENTITY_STOP_WORDS = new Set([
   'the', 'and', 'for', 'with', 'from', 'into', 'your', 'this', 'that',
-  'are', 'how', 'what', 'when', 'where', 'which', 'work', 'does', 'does',
-  'use', 'used', 'using', 'work', 'works',
+  'are', 'how', 'what', 'when', 'where', 'which', 'who', 'work', 'does',
+  'use', 'used', 'using', 'works', 'have', 'also', 'some', 'each',
 ]);
-const ENTITY_SPLIT = /[\s,.!?;。，！？；、（）「」/\\|]+/u;
 
 function extractEntityTerms(question: string): string[] | undefined {
-  const tokens = question.toLowerCase()
-    .split(ENTITY_SPLIT)
-    .map((t) => t.trim())
-    .filter((t) => t.length >= 4 && !ENTITY_STOP_WORDS.has(t));
-  // Only worth injecting when 3+ distinct concepts are in play.
-  if (tokens.length < 3) return undefined;
-  return tokens;
+  // Gate: need at least 2 commas in the question to indicate an enumeration.
+  const commaCount = (question.match(/,/g) ?? []).length;
+  if (commaCount < 2) return undefined;
+
+  // Split on commas and take the leading significant word of each segment.
+  const terms: string[] = [];
+  for (const segment of question.split(',')) {
+    const cleaned = segment.replace(ENTITY_SEGMENT_STRIP, '').trim().toLowerCase();
+    const word = cleaned.split(/\s+/)[0] ?? '';
+    if (word.length >= 3 && !ENTITY_STOP_WORDS.has(word)) {
+      terms.push(word);
+    }
+  }
+  if (terms.length < 3) return undefined;
+  return terms;
 }
 
 function errorResult(code: string, message: string): AskResult {
