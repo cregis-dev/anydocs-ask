@@ -54,10 +54,12 @@ export function stripMarkdown(markdown: string): string {
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     // HTML tags: drop entirely.
     .replace(/<\/?[^>]+>/g, ' ')
-    // Markdown emphasis / blockquote marks. Note: heading marks (#) are also
-    // stripped here, but extractMarkdownSections has already pulled headings
-    // out into section boundaries, so what hits this regex is body text only.
-    .replace(/[*#>~]/g, ' ')
+    // Strikethrough: ~~text~~ → text (must come before the bare-symbol strip).
+    .replace(/~~([^~]*)~~/g, '$1')
+    // Markdown emphasis / blockquote marks. ~ is intentionally excluded: it
+    // appears in shell paths (~/...) and removing it silently corrupts every
+    // command example in the indexed text.
+    .replace(/[*#>]/g, ' ')
     // Whitespace collapse.
     .replace(/\s+/g, ' ')
     .trim();

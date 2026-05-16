@@ -134,17 +134,32 @@ function truncateForLang(text: string, lang: DocsLang): string {
 }
 
 /**
- * Strip code identifiers from the answer that don't appear literally in any
- * cited chunk. Conservative — we only redact, we don't drop the surrounding
+ * Strip code identifiers from the answer that don't appear in any context
+ * chunk. Conservative — we only redact, we don't drop the surrounding
  * sentence (preserving readability over precision).
+ *
+ * Two exemptions prevent false positives:
+ *   1. Case-insensitive match — chunk text strips markdown formatting which
+ *      can capitalize words (e.g. table cells: "View" vs command "view").
+ *   2. Template placeholders — bodies containing <…> angle-bracket syntax
+ *      (e.g. `pages/<lang>/`, `<pageId>`) are intentional LLM generalisations
+ *      of concrete examples in the chunks; flagging them as hallucinations
+ *      breaks legitimate pattern explanations.
  */
 function filterHallucinations(answer: string, contextTexts: string[]): string {
   if (contextTexts.length === 0) return answer;
   const haystack = contextTexts.join('\n');
+  const haystackLower = haystack.toLowerCase();
+
+  const inHaystack = (body: string): boolean => {
+    // Template placeholder pattern — skip the check entirely.
+    if (/\{[^}]+\}|<[^>]+>/.test(body)) return true;
+    return haystackLower.includes(body.toLowerCase());
+  };
 
   // Inline-code identifiers (single backtick) — `getUserById`, `--flag`.
   let out = answer.replace(/`([^`\n]+)`/g, (match, body: string) => {
-    return haystack.includes(body) ? match : `\`${body}⚠\``;
+    return inHaystack(body) ? match : `\`${body}⚠\``;
   });
 
   // Fenced code blocks — only mark as suspicious if a non-trivial line in the
@@ -154,8 +169,8 @@ function filterHallucinations(answer: string, contextTexts: string[]): string {
     const suspicious = body
       .split('\n')
       .map((l) => l.trim())
-      .filter((l) => l.length >= 8 && /^[\w./-]+$/.test(l))
-      .some((l) => !haystack.includes(l));
+      .filter((l) => l.length >= 8 && /^[\w.~/-]+$/.test(l))
+      .some((l) => !inHaystack(l));
     return suspicious ? `${match}\n<!-- ⚠ contains identifiers not found in cited context -->` : match;
   });
 

@@ -61,6 +61,13 @@ export type AggregateOptions = {
    *  used as a tiebreaker: if the current subtree appears in the clarify
    *  candidates, prefer it over asking the user to choose. */
   currentSubtreeRoot?: string | null;
+  /**
+   * Subtrees that contain a title-matched page (computed by rerank's
+   * computeTitleMatches). When the top subtree in a near-tie contains a
+   * title-matched page, skip clarify and answer directly — the user's query
+   * explicitly names a page, so forcing a section-picker wastes a turn.
+   */
+  titleMatchedSubtrees?: Set<string>;
 };
 
 export function aggregate(
@@ -100,8 +107,13 @@ export function aggregate(
   }
   if (top2 && top1.share - top2.share < SUBTREE_SPREAD) {
     // Two competing subtrees with similar weight — normally we'd ask the user
-    // to clarify. But if one of the candidates matches the user's current page
-    // subtree, that's a strong contextual signal: prefer it and answer directly.
+    // to clarify. Two tiebreakers skip the clarify step:
+    //
+    //   1. current-page subtree: the user is already in a section; stay there.
+    //   2. title-match subtree: the query explicitly names a page title, so the
+    //      user doesn't need a section picker — they already know where to look.
+    //
+    // We prefer whichever tiebreaker fires first (current-page > title-match).
     if (opts.currentSubtreeRoot) {
       const contextMatch = shares.find((s) => s.subtree_root === opts.currentSubtreeRoot);
       if (contextMatch) {
@@ -109,6 +121,16 @@ export function aggregate(
           kind: 'answer-same-lang',
           pick: sameLang,
           dominantSubtree: contextMatch.subtree_root,
+        };
+      }
+    }
+    if (opts.titleMatchedSubtrees?.size) {
+      const titleMatch = shares.find((s) => opts.titleMatchedSubtrees!.has(s.subtree_root));
+      if (titleMatch) {
+        return {
+          kind: 'answer-same-lang',
+          pick: sameLang,
+          dominantSubtree: titleMatch.subtree_root,
         };
       }
     }

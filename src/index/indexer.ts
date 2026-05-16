@@ -77,13 +77,20 @@ export class Indexer {
 
   /**
    * Full bootstrap: load → project → upsertPages → chunk every live page.
-   * Idempotent: re-running on an unchanged project produces zero embed calls
-   * (every chunk hits the cache).
+   *
+   * Clears all existing chunks before rebuilding so the result is always a
+   * clean slate — no stale rows survive a chunk-algorithm change or a model
+   * swap. The embedding cache is left intact so hashes that haven't changed
+   * still get zero embed calls.
    */
   async fullReindex(): Promise<FullReindexStats> {
     const project = await loadProject(this.projectRoot);
     const structOut = projectStructure(project);
     const pagesResult = upsertPages(this.db, structOut.rows);
+
+    // Wipe all chunks before rebuilding. chunks_fts is cleaned by its DELETE
+    // triggers; chunks_vec has no FK so we clear it explicitly first.
+    this.clearAllChunks();
 
     const livePageKeys = new Set(structOut.rows.map((r) => keyOf(r.page_id, r.lang)));
     let writtenPages = 0;
@@ -97,6 +104,9 @@ export class Indexer {
       const pageDoc = pickPage(project, lang as DocsLang, pageId);
       if (!pageDoc) continue;
       const chunks = chunkPage(pageDoc);
+      // decideChunkWrite will always return 'write' after clearAllChunks, but
+      // we keep the call so applyChanges (which doesn't clear) stays on the
+      // same code path without a flag.
       const decision = this.decideChunkWrite(pageId, lang, chunks);
       if (decision === 'skip') {
         skippedPages++;
@@ -203,6 +213,27 @@ export class Indexer {
       navOnly,
       warnings: [...project.warnings, ...structOut.warnings],
     };
+  }
+
+  /**
+   * Drop every chunk row (and its chunks_vec mirror). Called at the top of
+   * fullReindex to guarantee a clean slate before rebuilding.
+   *
+   * chunks_fts is handled by the DELETE triggers on the chunks table, so we
+   * only need to clear chunks_vec manually (it has no FK / trigger wiring).
+   */
+  private clearAllChunks(): void {
+    this.db.transaction(() => {
+      // Must clear chunks_vec before chunks because we need the chunk_id list.
+      const ids = this.db
+        .prepare('SELECT chunk_id FROM chunks')
+        .all() as Array<{ chunk_id: number | bigint }>;
+      const deleteVec = this.db.prepare('DELETE FROM chunks_vec WHERE chunk_id = ?');
+      for (const { chunk_id } of ids) {
+        deleteVec.run(typeof chunk_id === 'bigint' ? chunk_id : BigInt(chunk_id));
+      }
+      this.db.prepare('DELETE FROM chunks').run();
+    })();
   }
 
   /**
