@@ -71,7 +71,7 @@ export function postprocess(input: PostprocessInput): PostprocessOutput {
   // 3. Hallucination filter: code-fenced blocks + backticked identifiers.
   const filteredAnswer = filterHallucinations(
     cleanedAnswer,
-    orderedIds.map((id) => input.chunkById.get(id)!.text),
+    [...input.chunkById.values()].map((c) => c.text),
   );
 
   // 4. Truncation.

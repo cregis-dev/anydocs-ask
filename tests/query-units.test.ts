@@ -245,7 +245,7 @@ test('aggregate: empty input -> translate-fallback (no signal)', () => {
   assert.equal(out.kind, 'translate-fallback');
 });
 
-test('aggregate: same-lang dominant subtree (≥0.65 share) -> answer-same-lang', () => {
+test('aggregate: same-lang dominant subtree (≥0.55 share) -> answer-same-lang', () => {
   const out = aggregate(
     [
       fakeReranked({ chunk_id: 1, lang: 'zh', subtree_root: 'A', rrf_score: 0.1, final_score: 1.0 }),
@@ -258,11 +258,12 @@ test('aggregate: same-lang dominant subtree (≥0.65 share) -> answer-same-lang'
   assert.equal(out.kind, 'answer-same-lang');
   if (out.kind === 'answer-same-lang') {
     assert.equal(out.dominantSubtree, 'A');
-    assert.equal(out.pick.length, 3);
+    // pick = sameLang (all same-lang chunks from top-K, across all subtrees).
+    assert.equal(out.pick.length, 4);
   }
 });
 
-test('aggregate: same-lang split with Δ<0.15 -> clarify', () => {
+test('aggregate: same-lang split with Δ<0.25 -> clarify', () => {
   const out = aggregate(
     [
       fakeReranked({ chunk_id: 1, lang: 'zh', subtree_root: 'A', rrf_score: 0.1, final_score: 1.0 }),

@@ -200,7 +200,7 @@ async function askWithTraceInternal(
   const confidence = computeConfidence(reranked);
 
   // 5. Aggregate.
-  const outcome = aggregate(reranked, { queryLang });
+  const outcome = aggregate(reranked, { queryLang, currentSubtreeRoot });
 
   if (outcome.kind === 'clarify') {
     return {
