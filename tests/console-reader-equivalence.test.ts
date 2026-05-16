@@ -99,6 +99,9 @@ function normalize(body: Record<string, unknown>): Record<string, unknown> {
   delete clone._dry_run;
   delete clone.answer_id;
   delete clone.latency_ms;
+  // v1.5 (ARCH §15.2.2 / RFC 0001 §4.1): session_id is minted per call when
+  // the Reader hasn't sent one, so it's also per-call non-deterministic.
+  delete clone.session_id;
   return clone;
 }
 

@@ -26,6 +26,7 @@ import type { Embedder } from '../embedding/types.ts';
 import type { LLM } from '../llm/types.ts';
 import { resolveTransformersCacheDir, type ResolvedConfig } from '../config.ts';
 import { ensureFeedbackDirs } from '../workspace.ts';
+import { SessionTable } from '../feedback/session-table.ts';
 
 export type RuntimeOptions = {
   /** Source: anydocs project (pages/ + navigation/). */
@@ -62,6 +63,13 @@ export class Runtime {
   readonly embedder: Embedder;
   readonly indexer: Indexer;
   readonly runs: RunsWriter;
+  /**
+   * γ session table — holds recent (question, embedding) pairs per Reader
+   * session for the 5min re-ask detector (ARCH §15.2.2). Always constructed
+   * so callers don't need a null-check; the orchestrator gates writes on
+   * config.feedback.{enabled, implicitSignals} (PRD §11.4 #6).
+   */
+  readonly sessions: SessionTable;
   private watcher: ProjectWatcher | null = null;
   private warmFlag = false;
   private startedAt: number | null = null;
@@ -99,6 +107,7 @@ export class Runtime {
       truncateQueryChars: opts.config.runs.truncateQueryChars,
       truncateAnswerChars: opts.config.runs.truncateAnswerChars,
     });
+    this.sessions = new SessionTable();
     if (!opts.skipWatcher) {
       this.watcher = new ProjectWatcher({
         projectRoot: this.projectRoot,

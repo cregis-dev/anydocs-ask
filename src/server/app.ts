@@ -24,6 +24,7 @@ import { persistAnswer } from './answer-cache.ts';
 import type { AskRequest, AskResult, Citation } from '../query/types.ts';
 import type { LLM } from '../llm/types.ts';
 import type { RunCitation, RunRecord } from '../runs/types.ts';
+import { observeAsk } from '../feedback/gamma.ts';
 
 const SSE_HEARTBEAT_MS = 2_000;
 const SSE_INITIAL_PADDING_BYTES = 4_096;
@@ -44,6 +45,8 @@ type PreparedAskCall =
       options: AskRouteOptions;
       req: AskRequest;
       llm: LLM;
+      /** session_id the Reader client echoed (null when first ask in session). */
+      requestedSessionId: string | null;
     }
   | {
       ok: false;
@@ -80,7 +83,7 @@ export function createApp(deps: AppDeps): Hono {
       return c.json(prepared.result, prepared.status);
     }
     const t0 = performance.now();
-    let ask: { result: AskResult; trace: AskTrace };
+    let ask: Awaited<ReturnType<typeof askWithTrace>>;
     try {
       ask = await askWithTrace(
         { db: runtime.db, embedder: runtime.embedder, llm: prepared.llm },
@@ -96,7 +99,7 @@ export function createApp(deps: AppDeps): Hono {
         502,
       );
     }
-    const { result, trace } = ask;
+    const { result, trace, queryVector } = ask;
     const bodyOut = finalizeAskCall({
       runtime,
       req: prepared.req,
@@ -104,6 +107,8 @@ export function createApp(deps: AppDeps): Hono {
       trace,
       t0,
       options: prepared.options,
+      requestedSessionId: prepared.requestedSessionId,
+      queryVector,
     });
 
     if (result.type === 'error') {
@@ -166,7 +171,7 @@ export function createApp(deps: AppDeps): Hono {
         abortController.abort();
       });
       const t0 = performance.now();
-      let ask: { result: AskResult; trace: AskTrace };
+      let ask: Awaited<ReturnType<typeof askWithTraceStream>>;
       try {
         ask = await askWithTraceStream(
           { db: runtime.db, embedder: runtime.embedder, llm: prepared.llm },
@@ -209,6 +214,8 @@ export function createApp(deps: AppDeps): Hono {
         trace: ask.trace,
         t0,
         options: prepared.options,
+        requestedSessionId: prepared.requestedSessionId,
+        queryVector: ask.queryVector,
       });
       await write('result', bodyOut);
       await write('done', { ok: true });
@@ -390,11 +397,17 @@ async function prepareAskCall(runtime: Runtime, c: Context): Promise<PreparedAsk
     };
   }
 
+  const requestedSessionId =
+    typeof (body as Record<string, unknown>).session_id === 'string'
+      ? ((body as Record<string, unknown>).session_id as string)
+      : null;
+
   return {
     ok: true,
     options: { dryRun, source },
     req: body as AskRequest,
     llm,
+    requestedSessionId,
   };
 }
 
@@ -405,8 +418,10 @@ function finalizeAskCall(args: {
   trace: AskTrace;
   t0: number;
   options: AskRouteOptions;
-}): AskResult | (AskResult & { _dry_run: true }) {
-  const { runtime, req, result, trace, t0, options } = args;
+  requestedSessionId: string | null;
+  queryVector: Float32Array | null;
+}): AskResult & { session_id: string; _dry_run?: true } {
+  const { runtime, req, result, trace, t0, options, requestedSessionId, queryVector } = args;
 
   // Persist + log to runs.jsonl regardless of outcome — analyze needs
   // visibility into errors / clarifies / answers alike. Skipped for dry_run.
@@ -432,7 +447,26 @@ function finalizeAskCall(args: {
     persistAnswer(runtime.db, result, req.question);
   }
 
-  return options.dryRun ? { ...result, _dry_run: true as const } : result;
+  // γ session observation (ARCH §15.2.2 / RFC 0001 §4.2). Gated internally
+  // on config.feedback.{enabled, implicitSignals}. Side effects (implicit-
+  // negative feedback row insertion) only happen on warm enabled boots —
+  // observeAsk is a no-op identity for the session_id otherwise.
+  //
+  // dry_run skips γ writes the same way it skips runs.jsonl / answer cache;
+  // a dry probe shouldn't leave session-state breadcrumbs in the DB.
+  const gamma = observeAsk({
+    db: runtime.db,
+    config: runtime.config,
+    sessionTable: runtime.sessions,
+    requestedSessionId,
+    question: (req.question ?? '').trim(),
+    queryVector: options.dryRun ? null : queryVector,
+    result,
+    now: Date.now(),
+  });
+
+  const withSession = { ...result, session_id: gamma.session_id };
+  return options.dryRun ? { ...withSession, _dry_run: true as const } : withSession;
 }
 
 // ---------------------------------------------------------------------------

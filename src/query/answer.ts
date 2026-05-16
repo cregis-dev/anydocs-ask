@@ -89,6 +89,21 @@ export type AskTraceFusedChunk = {
   nav_index_boost: number;
 };
 
+/**
+ * Server-internal return shape for the ask pipeline.
+ *
+ * `queryVector` is the embedder's output for the user's question — null when
+ * the pipeline short-circuits before embedding runs (validation / scope
+ * errors). Surfaced so the γ implicit-signal layer (ARCH §15.2.2) can do
+ * similarity against recent same-session asks without re-embedding. Never
+ * serialized to clients.
+ */
+export type AskWithTraceResult = {
+  result: AskResult;
+  trace: AskTrace;
+  queryVector: Float32Array | null;
+};
+
 export async function ask(deps: AskDeps, req: AskRequest): Promise<AskResult> {
   return (await askWithTrace(deps, req)).result;
 }
@@ -96,7 +111,7 @@ export async function ask(deps: AskDeps, req: AskRequest): Promise<AskResult> {
 export async function askWithTrace(
   deps: AskDeps,
   req: AskRequest,
-): Promise<{ result: AskResult; trace: AskTrace }> {
+): Promise<AskWithTraceResult> {
   return askWithTraceInternal(deps, req);
 }
 
@@ -104,7 +119,7 @@ export async function askWithTraceStream(
   deps: AskDeps,
   req: AskRequest,
   hooks: AskStreamHooks,
-): Promise<{ result: AskResult; trace: AskTrace }> {
+): Promise<AskWithTraceResult> {
   return askWithTraceInternal(deps, req, hooks);
 }
 
@@ -112,7 +127,7 @@ async function askWithTraceInternal(
   deps: AskDeps,
   req: AskRequest,
   hooks: AskStreamHooks = {},
-): Promise<{ result: AskResult; trace: AskTrace }> {
+): Promise<AskWithTraceResult> {
   const t0 = performance.now();
   const emptyTrace = (): AskTrace => ({
     fused: [],
@@ -128,6 +143,7 @@ async function askWithTraceInternal(
     return {
       result: errorResult('invalid_question', "field 'question' is required"),
       trace: emptyTrace(),
+      queryVector: null,
     };
   }
   const question = req.question.trim();
@@ -135,12 +151,14 @@ async function askWithTraceInternal(
     return {
       result: errorResult('invalid_question', 'question must not be empty'),
       trace: emptyTrace(),
+      queryVector: null,
     };
   }
   if (question.length > MAX_QUESTION_CHARS) {
     return {
       result: errorResult('invalid_question', `question exceeds ${MAX_QUESTION_CHARS} characters`),
       trace: emptyTrace(),
+      queryVector: null,
     };
   }
 
@@ -151,6 +169,7 @@ async function askWithTraceInternal(
       return {
         result: errorResult('invalid_scope', `scope_id '${scopeId}' is not a published subtree`),
         trace: emptyTrace(),
+        queryVector: null,
       };
     }
   }
@@ -194,6 +213,7 @@ async function askWithTraceInternal(
         tokens_in: null,
         tokens_out: null,
       },
+      queryVector,
     };
   }
 
@@ -241,6 +261,7 @@ async function askWithTraceInternal(
         tokens_in: null,
         tokens_out: null,
       },
+      queryVector,
     };
   }
   throwIfAborted(hooks.signal);
@@ -271,6 +292,7 @@ async function askWithTraceInternal(
       tokens_in: null,
       tokens_out: null,
     },
+    queryVector,
   };
 }
 
