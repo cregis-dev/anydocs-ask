@@ -96,7 +96,7 @@ function navIndexBoostFor(navIndex: number | null): number {
  * Both pages can still get the boost if the query mentions both titles
  * independently and neither contains the other.
  */
-function computeTitleMatches(chunks: RetrievedChunk[], query: string): Set<string> {
+export function computeTitleMatches(chunks: RetrievedChunk[], query: string): Set<string> {
   if (!query) return new Set();
   const queryLower = query.toLowerCase();
 
@@ -133,16 +133,38 @@ function computeTitleMatches(chunks: RetrievedChunk[], query: string): Set<strin
 }
 
 const ASCII_ONLY = /^[\x00-\x7f]+$/;
+// Common English words that carry no discriminative signal for a page title.
+const TITLE_STOP_WORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'into', 'your', 'this', 'that',
+  'are', 'has', 'have', 'was', 'were', 'will', 'how', 'what', 'when',
+  'where', 'which', 'who', 'using', 'getting', 'working',
+]);
+
 function hitsQuery(queryLower: string, titleLower: string): boolean {
-  if (ASCII_ONLY.test(titleLower)) {
-    // Word-aligned match: avoid pumping "Installation" page when query says
-    // "preinstallation" but no actual install context.
-    const escaped = titleLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`\\b${escaped}\\b`).test(queryLower);
+  if (!ASCII_ONLY.test(titleLower)) {
+    // Non-ASCII titles (CJK etc.) — no word boundaries; plain substring is the
+    // only sensible match.
+    return queryLower.includes(titleLower);
   }
-  // Non-ASCII titles (CJK etc.) — no word boundaries; plain substring is the
-  // only sensible match.
-  return queryLower.includes(titleLower);
+
+  // Exact phrase match (original behaviour).
+  const escaped = titleLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (new RegExp(`\\b${escaped}\\b`).test(queryLower)) return true;
+
+  // Partial-word match: filter stop-words and short tokens from the title,
+  // then require ≥ 50 % of the remaining "significant" words to appear in the
+  // query word-aligned. This lets "Working with Claude Code" match a query
+  // containing "Claude Code", and "MCP Tools Reference" match "MCP tools",
+  // without the query having to include the full title verbatim.
+  const significant = titleLower
+    .split(/\s+/)
+    .filter((w) => w.length > 3 && !TITLE_STOP_WORDS.has(w));
+  if (significant.length < 2) return false; // too few words; rely on exact only
+  const hits = significant.filter((w) => {
+    const we = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\b${we}\\b`).test(queryLower);
+  }).length;
+  return hits / significant.length >= 0.5;
 }
 
 /**

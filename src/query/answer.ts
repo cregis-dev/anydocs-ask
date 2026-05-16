@@ -28,6 +28,7 @@ import type { BreadcrumbNode } from '../db/schema.ts';
 import { detectLangFromText, langFromScopeId } from './lang.ts';
 import { sanitizeFtsQuery } from './sanitize.ts';
 import { retrieveWithTrace, type RetrievalTrace, type RetrievedChunk } from './retrieval.ts';
+import { computeTitleMatches } from './rerank.ts';
 import { rerank, lookupSubtreeRoot, type RerankedChunk } from './rerank.ts';
 import { aggregate, TOP_K_FOR_AGGREGATION, type AggregateOutcome, type SubtreeShare } from './aggregate.ts';
 import { buildPrompt, detectFormatHint } from './prompt.ts';
@@ -183,10 +184,12 @@ async function askWithTraceInternal(
   const queryVector = (await deps.embedder.embed([question]))[0]!.vector;
   throwIfAborted(hooks.signal);
   const ftsQuery = sanitizeFtsQuery(question);
+  const entityTerms = extractEntityTerms(question);
   const { chunks: retrieved, trace: retrievalTrace } = retrieveWithTrace(deps.db, {
     queryVector,
     ftsQuery,
     scopeId,
+    entityTerms,
   });
 
   // 4. Rerank.
@@ -200,7 +203,16 @@ async function askWithTraceInternal(
   const confidence = computeConfidence(reranked);
 
   // 5. Aggregate.
-  const outcome = aggregate(reranked, { queryLang, currentSubtreeRoot });
+  // Derive title-match subtrees so aggregate can skip clarify when the user's
+  // query explicitly names a page.
+  const titleMatchedPageIds = computeTitleMatches(retrieved, question);
+  const titleMatchedSubtrees = new Set<string>();
+  for (const c of reranked) {
+    if (titleMatchedPageIds.has(c.page_id) && c.subtree_root) {
+      titleMatchedSubtrees.add(c.subtree_root);
+    }
+  }
+  const outcome = aggregate(reranked, { queryLang, currentSubtreeRoot, titleMatchedSubtrees });
 
   if (outcome.kind === 'clarify') {
     return {
@@ -271,6 +283,25 @@ async function askWithTraceInternal(
     rawAnswer: llmOutput.text,
     chunkById: prompt.chunkById,
   });
+
+  // Guard: if postprocess stripped every citation (LLM produced no valid
+  // citation markers), returning a successful answer would silently deliver
+  // an uncited, unverifiable response. Surface it as an error so the caller
+  // can distinguish "retrieved but couldn't cite" from a real answer.
+  if (post.used_chunks === 0) {
+    return {
+      result: errorResult('no_citations', 'LLM response contained no valid citations'),
+      trace: {
+        fused: fusedTrace,
+        subtree_ask_triggered: false,
+        top_final_score,
+        confidence,
+        tokens_in: null,
+        tokens_out: null,
+      },
+      queryVector,
+    };
+  }
 
   return {
     result: {
@@ -439,6 +470,33 @@ function clarifyMessageFor(lang: DocsLang): string {
   return lang === 'zh'
     ? '您的问题可能涉及以下几个范围，请选择一个：'
     : 'Your question could refer to several areas; pick one:';
+}
+
+/**
+ * Extract individual concept terms from a multi-entity query. Fires only when
+ * the question contains ≥ 3 significant tokens separated by list punctuation or
+ * conjunctions — e.g. "sessions, checkpoints, and memory" yields
+ * ["sessions", "checkpoints", "memory"]. Single-concept queries return [] so
+ * the entity injection pass is skipped entirely.
+ *
+ * "Significant" = length ≥ 4 AND not a common stop word. Each surviving term
+ * is passed to sanitizeFtsQuery inside retrieval.ts before the BM25 call.
+ */
+const ENTITY_STOP_WORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'into', 'your', 'this', 'that',
+  'are', 'how', 'what', 'when', 'where', 'which', 'work', 'does', 'does',
+  'use', 'used', 'using', 'work', 'works',
+]);
+const ENTITY_SPLIT = /[\s,.!?;。，！？；、（）「」/\\|]+/u;
+
+function extractEntityTerms(question: string): string[] | undefined {
+  const tokens = question.toLowerCase()
+    .split(ENTITY_SPLIT)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 4 && !ENTITY_STOP_WORDS.has(t));
+  // Only worth injecting when 3+ distinct concepts are in play.
+  if (tokens.length < 3) return undefined;
+  return tokens;
 }
 
 function errorResult(code: string, message: string): AskResult {

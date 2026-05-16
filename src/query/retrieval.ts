@@ -45,6 +45,15 @@ export type RetrieveOptions = {
   perPathK?: number;
   /** Final top-K after RRF. */
   finalK?: number;
+  /**
+   * Individual concept terms extracted from a multi-entity query (e.g.
+   * ["sessions", "checkpoints", "memory"] for "how do sessions, checkpoints,
+   * and memory work?"). When present, a small per-term BM25 pass (top
+   * ENTITY_K each) is injected into the RRF pool at ENTITY_INJECT_RANK so
+   * each named concept has at least one representative in the candidate set,
+   * even if the combined OR query demoted those chunks below perPathK.
+   */
+  entityTerms?: string[];
 };
 
 const DEFAULT_PER_PATH_K = 20;
@@ -55,6 +64,15 @@ const RRF_K = 60;
  * after the boundary filter. 4× covers reasonable scope_id selectivity.
  */
 const VECTOR_OVERFETCH = 4;
+/** Max BM25 hits per entity term for the per-entity injection pass. */
+const ENTITY_K = 3;
+/**
+ * Synthetic rank assigned to entity-injected chunks that aren't in the main
+ * path pool. Rank perPathK (20) gives them 1/(RRF_K+20) ≈ 0.0125, well below
+ * a chunk appearing in both main paths at rank 1 (≈ 0.033), so they fill
+ * coverage gaps without displacing strong hits.
+ */
+const ENTITY_INJECT_RANK = DEFAULT_PER_PATH_K;
 
 /**
  * Trace metadata from the retrieve step — exposed by retrieveWithTrace() for
@@ -64,6 +82,8 @@ const VECTOR_OVERFETCH = 4;
 export type RetrievalTrace = {
   vecRanks: Map<number, number>;
   bm25Ranks: Map<number, number>;
+  /** chunk_ids that entered the pool via the per-entity injection pass. */
+  entityInjected: Set<number>;
 };
 
 export function retrieve(db: DbHandle, opts: RetrieveOptions): RetrievedChunk[] {
@@ -99,11 +119,33 @@ export function retrieveWithTrace(
     rrfScores.set(id, (rrfScores.get(id) ?? 0) + 1 / (RRF_K + (idx + 1)));
   });
 
+  // Per-entity injection: for each concept term, run a narrow BM25 pass and
+  // add any new chunk_ids at ENTITY_INJECT_RANK. This ensures that a query
+  // like "sessions, checkpoints, and memory" always has chunks from each named
+  // concept in the pool, even if the combined OR query ranked them past
+  // perPathK. New IDs only — chunks already in the pool keep their existing
+  // (higher) score.
+  const entityInjected = new Set<number>();
+  if (opts.entityTerms?.length) {
+    const entityInjectScore = 1 / (RRF_K + ENTITY_INJECT_RANK);
+    for (const term of opts.entityTerms) {
+      const sanitized = sanitizeFtsQuery(term);
+      if (!sanitized) continue;
+      const entityIds = bm25Path(db, sanitized, ENTITY_K, opts.scopeId);
+      for (const id of entityIds) {
+        if (!rrfScores.has(id)) {
+          rrfScores.set(id, entityInjectScore);
+          entityInjected.add(id);
+        }
+      }
+    }
+  }
+
   const ranked = [...rrfScores.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, finalK);
 
-  if (ranked.length === 0) return { chunks: [], trace: { vecRanks, bm25Ranks } };
+  if (ranked.length === 0) return { chunks: [], trace: { vecRanks, bm25Ranks, entityInjected } };
 
   const idList = ranked.map(([id]) => id);
   const rows = fetchChunkRows(db, idList);
@@ -115,7 +157,7 @@ export function retrieveWithTrace(
     if (!r) continue; // boundary check kicked it; shouldn't happen since we already filtered
     out.push({ ...r, rrf_score: score });
   }
-  return { chunks: out, trace: { vecRanks, bm25Ranks } };
+  return { chunks: out, trace: { vecRanks, bm25Ranks, entityInjected } };
 }
 
 // ---------------------------------------------------------------------------

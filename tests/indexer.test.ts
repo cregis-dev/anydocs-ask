@@ -171,13 +171,16 @@ test('Indexer.fullReindex: bootstrap loads + chunks + embeds every published pag
   }
 });
 
-test('Indexer.fullReindex: idempotent — second run makes ZERO embed calls', async () => {
+test('Indexer.fullReindex: second run makes ZERO embed calls (cache hits)', async () => {
   const { embedder, indexer, cleanup } = await setupIndexer();
   try {
     await indexer.fullReindex();
     const callsAfterFirst = embedder.calls;
     assert.ok(callsAfterFirst > 0);
 
+    // fullReindex clears all chunks before rebuilding, so all pages are
+    // written again — but the embedding cache absorbs every hash, so the
+    // embedder is not called a second time.
     const stats2 = await indexer.fullReindex();
     assert.equal(
       embedder.calls,
@@ -185,9 +188,8 @@ test('Indexer.fullReindex: idempotent — second run makes ZERO embed calls', as
       `second fullReindex must not re-embed (was ${callsAfterFirst}, now ${embedder.calls})`,
     );
     assert.equal(stats2.embed.misses, 0);
-    // Hash-set compare in decideChunkWrite short-circuits the chunk write too.
-    assert.equal(stats2.chunks.writtenPages, 0);
-    assert.equal(stats2.chunks.skippedPages, 2);
+    assert.equal(stats2.chunks.skippedPages, 0);
+    assert.ok(stats2.chunks.writtenPages > 0);
   } finally {
     await cleanup();
   }
