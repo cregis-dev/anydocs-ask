@@ -271,6 +271,44 @@ export function ensureStateRoot(workspacePath: string, projectId: string): strin
   return stateRoot;
 }
 
+/**
+ * v1.5 feedback loop directory layout (ARCH §15.5.1 + RFC 0001 §2.1 S1):
+ *
+ *   <stateRoot>/feedback/
+ *   ├── inbox/         # pending review (one markdown per query cluster)
+ *   ├── approved/      # accepted by author → JSONL, monthly rotation
+ *   ├── rejected/      # rejected by author → JSONL, monthly rotation
+ *   └── suggestions/   # A+ diagnose output (0.3+)
+ *
+ * Idempotent; safe to call on every server boot. Caller decides when to
+ * invoke — typically only when feedback.enabled = true (PRD §11.4 #6).
+ */
+export const FEEDBACK_SUBDIRS = ['inbox', 'approved', 'rejected', 'suggestions'] as const;
+export type FeedbackSubdir = (typeof FEEDBACK_SUBDIRS)[number];
+
+export function resolveFeedbackRoot(stateRoot: string): string {
+  return join(resolve(stateRoot), 'feedback');
+}
+
+export function ensureFeedbackDirs(stateRoot: string): {
+  feedbackRoot: string;
+  created: FeedbackSubdir[];
+} {
+  const feedbackRoot = resolveFeedbackRoot(stateRoot);
+  if (!existsSync(feedbackRoot)) {
+    mkdirSync(feedbackRoot, { recursive: true });
+  }
+  const created: FeedbackSubdir[] = [];
+  for (const sub of FEEDBACK_SUBDIRS) {
+    const p = join(feedbackRoot, sub);
+    if (!existsSync(p)) {
+      mkdirSync(p, { recursive: true });
+      created.push(sub);
+    }
+  }
+  return { feedbackRoot, created };
+}
+
 export type ProjectListing = {
   /** Registered name in projects.json */
   name: string;

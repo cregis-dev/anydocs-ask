@@ -31,13 +31,13 @@ test('resolveDbPath puts index.db inside the state root', () => {
   assert.equal(p, '/tmp/state/myproj/index.db');
 });
 
-test('openDatabase creates schema, loads sqlite-vec, sets user_version=1', () => {
+test('openDatabase creates schema, loads sqlite-vec, sets user_version=2', () => {
   const db = openDatabase({ dbPath: ':memory:' });
 
   assert.match(vecVersion(db), /^v?\d/);
 
   const version = db.pragma('user_version', { simple: true });
-  assert.equal(version, 1);
+  assert.equal(version, 2);
 
   const tables = db
     .prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view') ORDER BY name")
@@ -218,4 +218,87 @@ test('embedding_cache preserves multiple vectors per content_hash across models'
   );
 
   db.close();
+});
+
+// ---------------------------------------------------------------------------
+// Migration 002 — feedback v1.5 columns (RFC 0001 §2.1 S3 / ARCH §15.2.1)
+// ---------------------------------------------------------------------------
+
+test('migration 002 adds the v1.5 feedback columns and indexes', () => {
+  const db = openDatabase({ dbPath: ':memory:' });
+
+  // PRAGMA table_info returns one row per column. Build a name -> {type, dflt}
+  // map so the assertion below reads cleanly.
+  const cols = db.prepare(`PRAGMA table_info(feedback)`).all() as Array<{
+    name: string;
+    type: string;
+    notnull: number;
+    dflt_value: string | null;
+  }>;
+  const byName = Object.fromEntries(cols.map((c) => [c.name, c]));
+
+  for (const col of ['signal_source', 'reviewed_at', 'review_decision', 'session_id', 'cluster_id']) {
+    assert.ok(byName[col], `feedback.${col} should exist after migration 002`);
+  }
+
+  // signal_source must default to 'explicit' so pre-migration rows
+  // (β-channel /v1/ask/feedback writes) interpret correctly.
+  assert.equal(byName.signal_source?.notnull, 1, 'signal_source must be NOT NULL');
+  assert.match(byName.signal_source?.dflt_value ?? '', /'explicit'|"explicit"/);
+
+  // The other four are nullable.
+  for (const col of ['reviewed_at', 'review_decision', 'session_id', 'cluster_id']) {
+    assert.equal(byName[col]?.notnull, 0, `feedback.${col} should be nullable`);
+  }
+
+  // Indexes must be in place for the read patterns (γ session lookup,
+  // cluster join, signal_source filter).
+  const idx = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='feedback'`)
+    .all()
+    .map((r: any) => r.name as string);
+  for (const name of ['idx_feedback_session', 'idx_feedback_cluster', 'idx_feedback_signal_source']) {
+    assert.ok(idx.includes(name), `expected index ${name}; got ${idx.join(',')}`);
+  }
+
+  db.close();
+});
+
+test('migration 002 — inserting feedback without v1.5 columns falls back to default signal_source', () => {
+  // Mimics the v1 /v1/ask/feedback insert path (it doesn't know about the
+  // new columns). After migration 002 those legacy writes must still work
+  // and land with signal_source='explicit'.
+  const db = openDatabase({ dbPath: ':memory:' });
+
+  db.prepare(
+    `INSERT INTO feedback (answer_id, question, generated, rating, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run('ans_test', 'q', 'a', 1, 1);
+
+  const row = db.prepare(`SELECT * FROM feedback WHERE answer_id='ans_test'`).get() as {
+    signal_source: string;
+    reviewed_at: number | null;
+    review_decision: string | null;
+    session_id: string | null;
+    cluster_id: string | null;
+  };
+  assert.equal(row.signal_source, 'explicit');
+  assert.equal(row.reviewed_at, null);
+  assert.equal(row.review_decision, null);
+  assert.equal(row.session_id, null);
+  assert.equal(row.cluster_id, null);
+
+  db.close();
+});
+
+test('migration 002 is applied alongside 001 on a fresh DB (user_version=2)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'anydocs-ask-mig2-'));
+  try {
+    const dbPath = join(dir, 'index.db');
+    const db = openDatabase({ dbPath });
+    assert.equal(db.pragma('user_version', { simple: true }), 2);
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

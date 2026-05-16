@@ -47,6 +47,11 @@ import { runEval } from './commands/eval.ts';
 import { runAnalyzeRuns } from './commands/analyze.ts';
 import { runConsole } from './commands/console.ts';
 import {
+  runFeedbackExport,
+  runFeedbackImport,
+  runFeedbackStatus,
+} from './commands/feedback.ts';
+import {
   assertProjectRoot,
   ensureStateRoot,
   ensureWorkspace,
@@ -133,6 +138,9 @@ Usage:
   anydocs-ask golden review    <projectRoot> [--reviewer <name>]
   anydocs-ask eval             <projectRoot> [--baseline <path>]
   anydocs-ask analyze runs     <projectRoot> [--since 7d] [--include-console]
+  anydocs-ask feedback export  <projectRoot>
+  anydocs-ask feedback import  <projectRoot>
+  anydocs-ask feedback status  <projectRoot>
   anydocs-ask workspace init
   anydocs-ask workspace ls
   anydocs-ask workspace add    <path> [--name <name>]
@@ -247,6 +255,7 @@ async function main(): Promise<number> {
   let runsAction: 'tail' | 'export' | null = null;
   let goldenAction: 'generate' | 'review' | null = null;
   let analyzeAction: 'runs' | null = null;
+  let feedbackAction: 'export' | 'import' | 'status' | null = null;
   let projectArg: string | undefined;
   if (command === 'runs') {
     const action = positional[0];
@@ -274,6 +283,15 @@ async function main(): Promise<number> {
       return 2;
     }
     goldenAction = action;
+    projectArg = positional[1];
+  } else if (command === 'feedback') {
+    const action = positional[0];
+    if (action !== 'export' && action !== 'import' && action !== 'status') {
+      process.stderr.write(`error: 'feedback' requires an action (export | import | status)\n\n`);
+      printHelp();
+      return 2;
+    }
+    feedbackAction = action;
     projectArg = positional[1];
   } else {
     projectArg = positional[0];
@@ -428,6 +446,20 @@ async function main(): Promise<number> {
         ...(since !== undefined ? { since } : {}),
         ...(includeConsole ? { includeConsole: true } : {}),
       });
+    }
+    case 'feedback': {
+      switch (feedbackAction) {
+        case 'export':
+          return await runFeedbackExport({ projectRoot, stateRoot });
+        case 'import':
+          return await runFeedbackImport({ projectRoot, stateRoot });
+        case 'status':
+          return await runFeedbackStatus({ projectRoot, stateRoot });
+        default:
+          // Unreachable — dispatch above guarantees feedbackAction is non-null.
+          process.stderr.write(`error: missing feedback action\n`);
+          return 2;
+      }
     }
     default:
       process.stderr.write(`error: unknown command '${command}'\n\n`);

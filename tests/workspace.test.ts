@@ -10,15 +10,18 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  FEEDBACK_SUBDIRS,
   WORKSPACE_SUBDIRS,
   addToProjectRegistry,
   assertProjectRoot,
+  ensureFeedbackDirs,
   ensureStateRoot,
   ensureWorkspace,
   isBareName,
   loadProjectId,
   readProjectRegistry,
   removeFromProjectRegistry,
+  resolveFeedbackRoot,
   resolveProjectRoot,
   resolveStateRoot,
   resolveWorkspace,
@@ -476,6 +479,57 @@ test('readProjectRegistry: returns {} for malformed JSON', async () => {
   try {
     await fs.writeFile(join(ws, 'projects.json'), 'not json', 'utf8');
     assert.deepEqual(readProjectRegistry(ws), {});
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// feedback dir bootstrap (v1.5 / RFC 0001 §2.1 S1)
+// ---------------------------------------------------------------------------
+
+test('FEEDBACK_SUBDIRS matches the ARCH §15.5.1 layout exactly', () => {
+  assert.deepEqual([...FEEDBACK_SUBDIRS], ['inbox', 'approved', 'rejected', 'suggestions']);
+});
+
+test('ensureFeedbackDirs: creates feedback/ + 4 subdirs under stateRoot', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const stateRoot = ensureStateRoot(ws, 'proj-x');
+    const result = ensureFeedbackDirs(stateRoot);
+
+    assert.equal(result.feedbackRoot, resolveFeedbackRoot(stateRoot));
+    assert.deepEqual(result.created.sort(), ['approved', 'inbox', 'rejected', 'suggestions']);
+
+    for (const sub of FEEDBACK_SUBDIRS) {
+      assert.ok(existsSync(join(stateRoot, 'feedback', sub)), `${sub}/ should exist`);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('ensureFeedbackDirs: idempotent on second call', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const stateRoot = ensureStateRoot(ws, 'proj-y');
+    ensureFeedbackDirs(stateRoot);
+
+    const result2 = ensureFeedbackDirs(stateRoot);
+    assert.deepEqual(result2.created, [], 'second call must report nothing newly created');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('ensureStateRoot does NOT create feedback/ by itself', async () => {
+  // feedback/ is gated on config.feedback.enabled (PRD §11.4 #6). The plain
+  // stateRoot bootstrap must stay byte-identical to v1 — runtime.start() is
+  // the only place that opts in.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const stateRoot = ensureStateRoot(ws, 'proj-z');
+    assert.equal(existsSync(join(stateRoot, 'feedback')), false);
   } finally {
     await cleanup();
   }

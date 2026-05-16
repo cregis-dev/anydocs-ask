@@ -56,6 +56,12 @@ export type FeedbackRow = {
   tags: string | null;             // JSON
   model_used: string | null;
   created_at: number;
+  // v1.5 (migration 002 / ARCH §15.2.1):
+  signal_source: 'explicit' | 'implicit' | 'curated';
+  reviewed_at: number | null;
+  review_decision: 'approved' | 'rejected' | null;
+  session_id: string | null;
+  cluster_id: string | null;
 };
 
 export type AnswerRow = {
