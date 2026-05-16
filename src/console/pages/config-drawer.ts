@@ -3,8 +3,8 @@
  *
  * Right-side slide-over (opened via the header gear). Shows the layered
  * config sources in precedence order: workspace .env · workspace
- * .console.json · per-project anydocs.ask.json · per-project ask.local.json.
- * Secrets are partially redacted to first 4 + last 4 chars.
+ * .console.json · per-project anydocs.ask.json. Secrets are partially
+ * redacted to first 4 + last 4 chars.
  *
  * NOTE: the design handoff's "Runtime workspace" section (console runtime
  * path / registry size / cache size) is intentionally omitted — that's the
@@ -59,16 +59,6 @@ export function renderConfigDrawer(vm: ConfigViewModel): Html {
               sub: '— project',
               tag: 'override',
               file: vm.projectAskJson,
-              render: (data) => jsonBlock(data),
-            })
-          : ''}
-
-        ${vm.projectAskLocalJson
-          ? section({
-              title: 'ask.local.json',
-              sub: '— project, gitignored',
-              tag: 'override',
-              file: vm.projectAskLocalJson,
               render: (data) => jsonBlock(data),
             })
           : ''}
