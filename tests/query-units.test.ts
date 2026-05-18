@@ -437,28 +437,15 @@ test('postprocess: file paths / JSON file names not ⚠ when chunk references th
   assert.doesNotMatch(out.answer_md, /⚠/, `unexpected ⚠ in: ${out.answer_md}`);
 });
 
-// Counterpart guard: dotted config-key shapes that don't appear in either
-// chunks or question (even after softening) must still get ⚠'d. Without this,
-// the exemption would defeat the filter entirely for config keys.
-//
-// Note on scope of the guard: tokens that look like file names with a known
-// extension (e.g. `totally/made-up/config.json`) are EXEMPT by design — see
-// `isClearlyTechnicalIdentifier`. The eval round-3 feedback showed that
-// requiring haystack proof for every file name produced too many false
-// positives on legitimate identifiers; we accept letting an occasional
-// fabricated file name through as the tradeoff. The check that remains
-// teeth-bearing is on dotted keys without an extension.
-test('postprocess: dotted config-key absent from haystack still ⚠ flagged', () => {
-  const chunkById = new Map<string, RerankedChunk>([
-    ['cit_1', fakeReranked({ text: 'unrelated content about authentication' })],
-  ]);
-  const out = postprocess({
-    answerLang: 'en',
-    rawAnswer: 'Set `fake.nested.key` to true [cit_1]',
-    chunkById,
-  });
-  assert.match(out.answer_md, /`fake\.nested\.key⚠`/);
-});
+// Scope-of-guard note: file-extension shapes, URLs, loopback endpoints,
+// well-known no-ext files, AND dotted config keys (e.g. `site.theme.id`,
+// `build.outputDir`) are all direct-allow regardless of haystack. The eval
+// rounds showed that requiring haystack proof for every "shaped-like-tech"
+// identifier produced too many false positives — we accept letting an
+// occasional fabricated config key through (readers can verify against the
+// docs anyway) in exchange for never polluting a legitimate one. The check
+// that remains teeth-bearing is on plain single-token identifiers that
+// don't match any of those shapes.
 
 // Regression from local dogfood (codex round-3 follow-up): when the user
 // asks "what's in `imports/manifest.json`?" and the docs DON'T mention that
@@ -572,18 +559,59 @@ test('postprocess: quoted dotted config key matches as if unquoted', () => {
   assert.doesNotMatch(out.answer_md, /⚠/);
 });
 
-// Counter-test: quoted key absent from chunks / question still ⚠'d. The
-// quote-strip is normalization, not a free pass for arbitrary fabrications.
-test('postprocess: quoted but absent dotted key still ⚠ flagged', () => {
+// Counter-test for the quote-strip normalization: the strip itself is just
+// equivalence — quoted/unquoted dotted keys take the same code path. With
+// dotted-config-key direct-allow above, neither form is ⚠'d regardless of
+// haystack. The single-segment fabricated-identifier counter-test (above)
+// is what proves the filter still has teeth.
+
+// Dotted config keys (2+ segments, segments ≥2 chars, lowercase/camelCase)
+// are direct-allow regardless of haystack. Regression: `site.theme.id`
+// reappeared with ⚠ when the relevant chunk wasn't in the prompt — the
+// softened-haystack lookup failed because the chunk that has the literal
+// string wasn't retrieved. Direct allow eliminates that brittleness.
+test('postprocess: dotted config-key (≥2 segments) is direct-allow', () => {
   const chunkById = new Map<string, RerankedChunk>([
-    ['cit_1', fakeReranked({ text: 'unrelated content' })],
+    ['cit_1', fakeReranked({ text: 'unrelated content about authentication' })],
   ]);
   const out = postprocess({
     answerLang: 'en',
-    rawAnswer: 'Set `"fake.nested.key"` to true [cit_1]',
+    rawAnswer:
+      'Set `site.theme.id`, `build.outputDir`, and `app.feature.enabled` [cit_1]',
     chunkById,
   });
-  assert.match(out.answer_md, /"fake\.nested\.key"⚠/);
+  assert.doesNotMatch(out.answer_md, /⚠/);
+});
+
+// Directory paths with trailing slash (`dist/imports/`, `pages/en/`, `src/`)
+// are direct-allow — docs reference output layouts without naming a
+// specific file all the time, and they failed the file-extension rule.
+test('postprocess: directory-shaped trailing-slash paths are direct-allow', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'unrelated' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer:
+      'Artifacts live under `dist/imports/`, `pages/en/`, and `src/` [cit_1]',
+    chunkById,
+  });
+  assert.doesNotMatch(out.answer_md, /⚠/);
+});
+
+// Boundary: single-segment fabricated identifiers (no dot, no extension)
+// still get ⚠'d. The exemption is for "shaped like a config key", not for
+// any inline-code body.
+test('postprocess: single-segment fabricated identifier still ⚠ flagged', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'real identifier: getUser' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer: 'Use `definitelyHallucinatedFunction` [cit_1]',
+    chunkById,
+  });
+  assert.match(out.answer_md, /`definitelyHallucinatedFunction⚠`/);
 });
 
 // 2-segment dotted config keys (`build.outputDir`, `site.theme.id`) — previous
