@@ -521,6 +521,47 @@ test('postprocess: prose sentence wrapped in backticks is not ⚠ flagged', () =
   assert.doesNotMatch(out.answer_md, /⚠/);
 });
 
+// Regression for codex round-8 dogfood: LLMs sometimes wrap a JSON / YAML
+// key/value snippet in inline backticks (a formatting accident — should be a
+// fenced code block) and the hallucination filter then ⚠'s the snippet
+// because the literal whitespace/quote layout doesn't match the haystack
+// verbatim. Snippets with a `:` / `=` followed by a quoted value are now
+// recognized as data slices and exempted.
+// Bare quoted string literals like `"API Reference"` or `'My Documentation'`
+// are example values pulled from a doc, not code identifiers. With internal
+// whitespace they can't be hallucinated identifier names, so exempt them
+// before the haystack check. Without this guard, LLMs that backticked
+// example label strings produced ⚠'d output even when the value came
+// straight from the docs.
+test('postprocess: bare quoted string with whitespace is not ⚠ flagged', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'unrelated chunk' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer:
+      'Common values are `"API Reference"`, `"User Guide"`, and `\'My Documentation\'` [cit_1]',
+    chunkById,
+  });
+  assert.doesNotMatch(out.answer_md, /⚠/);
+});
+
+test('postprocess: JSON-like key/value snippet wrapped in backticks is not ⚠ flagged', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'config-reference example' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer:
+      'Configure like so:\n' +
+      '- `siteTitle": "My Documentation"` [cit_1]\n' +
+      '- `outputDir: "./dist"` [cit_1]\n' +
+      '- `enabled = true` [cit_1]',
+    chunkById,
+  });
+  assert.doesNotMatch(out.answer_md, /⚠/);
+});
+
 // Counter-test: short, identifier-shaped strings are still subject to the
 // hallucination check (the prose exemption only kicks in for whitespace +
 // sentence-ending punctuation + length).

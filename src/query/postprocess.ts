@@ -234,6 +234,36 @@ function isProseSentence(body: string): boolean {
   return false;
 }
 
+/**
+ * Detect inline-code bodies that look like a key/value snippet from a JSON,
+ * YAML, or config-block — e.g. `siteTitle": "My Documentation"` or
+ * `outputDir: "./dist"` or `enabled = true`. LLMs occasionally wrap these
+ * in inline backticks rather than fenced blocks; the hallucination filter
+ * was then demanding a literal haystack match for what's effectively a
+ * pasted-out config slice. Treat any key/value separator (`: ` / `:"` /
+ * ` = `) followed by a quoted or bare value as the signal — these
+ * patterns don't occur in legitimate code identifiers.
+ *
+ * Conservative on length so short colon-bearing identifiers (e.g.
+ * `ns::method`) don't slip through.
+ */
+function isJsonLikeSnippet(body: string): boolean {
+  // Bare quoted-string example value (e.g. `"API Reference"`, `'My Docs'`).
+  // LLMs occasionally backtick a string literal pulled from a doc example;
+  // when it has whitespace inside it can't be a code identifier. Length
+  // floor of 6 + whitespace inside the quotes filters out trivial `"foo"`.
+  if (/^["'].+["']$/.test(body) && body.length >= 6 && /\s/.test(body.slice(1, -1))) return true;
+  if (body.length < 10) return false;
+  if (!/\s/.test(body)) return false;
+  // Key/value separator followed by a quote (JSON/TS string value).
+  if (/[:=]\s*["']/.test(body)) return true;
+  // Bare `key: value` / `key = value` with key followed by space-padded sep.
+  // Requires whitespace around the separator so we don't confuse `foo:bar`
+  // path-style tokens with config assignments.
+  if (/^[A-Za-z_][A-Za-z0-9_.-]*\s*[:=]\s+[^\s]+/.test(body)) return true;
+  return false;
+}
+
 function isStructuralCandidate(body: string): boolean {
   if (!PATH_OR_KEY_SHAPE.test(body)) return false;
   if (body.includes('/')) return true; // any slash-bearing token
@@ -275,6 +305,7 @@ function filterHallucinations(answer: string, contextTexts: string[]): string {
     // sentence-tail ⚠'s on entirely legitimate descriptive text. Bail out
     // before any other check.
     if (isProseSentence(body)) return true;
+    if (isJsonLikeSnippet(body)) return true;
     // LLMs frequently wrap JSON-style keys in double quotes (e.g.
     // `"site.theme.id"` or `'build.outputDir'`). The quotes are display
     // formatting, not part of the identifier — strip them before any
