@@ -232,13 +232,19 @@ function filterHallucinations(answer: string, contextTexts: string[]): string {
   let haystackSoftened: string | null = null;
 
   const inHaystack = (body: string): boolean => {
+    // LLMs frequently wrap JSON-style keys in double quotes (e.g.
+    // `"site.theme.id"` or `'build.outputDir'`). The quotes are display
+    // formatting, not part of the identifier — strip them before any
+    // shape check so the underlying token can match the same way the
+    // unquoted form would.
+    const unquoted = body.replace(/^["'`]+|["'`]+$/g, '');
     // Template placeholder pattern — skip the check entirely.
-    if (/\{[^}]+\}|<[^>]+>/.test(body)) return true;
+    if (/\{[^}]+\}|<[^>]+>/.test(unquoted)) return true;
     // Clearly-technical shapes (file names, URLs, loopback) — direct allow.
-    if (isClearlyTechnicalIdentifier(body)) return true;
-    const bodyLower = body.toLowerCase();
+    if (isClearlyTechnicalIdentifier(unquoted)) return true;
+    const bodyLower = unquoted.toLowerCase();
     if (haystackLower.includes(bodyLower)) return true;
-    if (isStructuralCandidate(body)) {
+    if (isStructuralCandidate(unquoted)) {
       const softened = bodyLower.replace(/[./_-]+/g, '');
       if (softened.length < 6) return false; // too short — risk of incidental match
       if (haystackSoftened === null) {

@@ -459,6 +459,43 @@ test('postprocess: filename-with-extension is exempt from ⚠ regardless of hays
   assert.doesNotMatch(out.answer_md, /⚠/);
 });
 
+// LLMs often wrap JSON-style config keys in double quotes
+// (`"site.theme.id"`). Codex round-5 flagged this — the quoted form was
+// failing every shape check and getting ⚠'d. The fix strips surrounding
+// quote/backtick characters before all whitelist + haystack lookups.
+test('postprocess: quoted dotted config key matches as if unquoted', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    [
+      'cit_1',
+      fakeReranked({
+        text:
+          'You configure site.theme.id, site.theme.branding.siteTitle, and site.theme.codeTheme in anydocs.config.json.',
+      }),
+    ],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer:
+      'Set `"site.theme.id"`, `"site.theme.branding.siteTitle"`, and `"site.theme.codeTheme"` [cit_1]',
+    chunkById,
+  });
+  assert.doesNotMatch(out.answer_md, /⚠/);
+});
+
+// Counter-test: quoted key absent from chunks / question still ⚠'d. The
+// quote-strip is normalization, not a free pass for arbitrary fabrications.
+test('postprocess: quoted but absent dotted key still ⚠ flagged', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'unrelated content' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer: 'Set `"fake.nested.key"` to true [cit_1]',
+    chunkById,
+  });
+  assert.match(out.answer_md, /"fake\.nested\.key"⚠/);
+});
+
 // 2-segment dotted config keys (`build.outputDir`, `site.theme.id`) — previous
 // rule required ≥3 segments, leaving these polluted. Now allowed as long as
 // the softened form shows up somewhere in the haystack.
