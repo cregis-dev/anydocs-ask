@@ -398,6 +398,43 @@ test('postprocess: path-shaped identifier absent from haystack still ⚠ flagged
   assert.match(out.answer_md, /`fake\.nested\.key⚠`/);
 });
 
+// Regression from local dogfood (codex round-3 follow-up): when the user
+// asks "what's in `imports/manifest.json`?" and the docs DON'T mention that
+// file, the LLM commonly replies "the context does not describe
+// `imports/manifest.json`". The identifier is technically absent from any
+// chunk, but it came verbatim from the user's question — flagging it as a
+// hallucination misleads the user into thinking the answer itself is broken.
+// Solution: the question is a trusted source alongside chunk text.
+test('postprocess: identifier repeated from the user question is not ⚠ flagged', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'docs about anydocs.config.json and other unrelated topics' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    question: 'What is in imports/manifest.json? Is it required for the build?',
+    rawAnswer:
+      'The provided context does not describe `imports/manifest.json` at all [cit_1].',
+    chunkById,
+  });
+  assert.doesNotMatch(out.answer_md, /⚠/);
+});
+
+// Counter-test for the question-as-trusted-source rule: identifiers that
+// appear NEITHER in chunks NOR in the question must still be ⚠'d. Without
+// this, the exemption would let any LLM-fabricated identifier through.
+test('postprocess: identifier absent from both chunks and question still ⚠ flagged', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'unrelated content' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    question: 'How do I configure the system?',
+    rawAnswer: 'You can call `fabricated/path/never-mentioned.json` to do it [cit_1].',
+    chunkById,
+  });
+  assert.match(out.answer_md, /`fabricated\/path\/never-mentioned\.json⚠`/);
+});
+
 test('postprocess: citation URL appends heading anchor when in_page_path encodes one', () => {
   const chunkById = new Map<string, RerankedChunk>([
     [

@@ -286,6 +286,7 @@ async function askWithTraceInternal(
     answerLang: queryLang,
     rawAnswer: llmOutput.text,
     chunkById: prompt.chunkById,
+    question,
   });
 
   // Guard: if postprocess stripped every citation (LLM produced no valid

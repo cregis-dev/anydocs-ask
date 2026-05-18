@@ -26,6 +26,17 @@ export type PostprocessInput = {
   answerLang: DocsLang;
   rawAnswer: string;
   chunkById: Map<string, RerankedChunk>;
+  /**
+   * Original user question. Counts as a trusted source for the
+   * hallucination filter so that identifiers the user wrote (e.g. `mcp/pages.json`
+   * in "what does mcp/pages.json contain?") aren't flagged when the answer
+   * legitimately repeats them — common when the LLM says "the docs don't
+   * mention X" and X is shaped like a path.
+   *
+   * Optional for backwards compatibility with callers that don't have the
+   * question handy (e.g. older tests); when absent, only chunks are trusted.
+   */
+  question?: string;
 };
 
 export type PostprocessOutput = {
@@ -69,10 +80,12 @@ export function postprocess(input: PostprocessInput): PostprocessOutput {
   });
 
   // 3. Hallucination filter: code-fenced blocks + backticked identifiers.
-  const filteredAnswer = filterHallucinations(
-    cleanedAnswer,
-    [...input.chunkById.values()].map((c) => c.text),
-  );
+  //    Trusted sources = cited chunks + the user's original question (an
+  //    identifier the user already wrote can't be a hallucination when the
+  //    LLM repeats it).
+  const trustedTexts = [...input.chunkById.values()].map((c) => c.text);
+  if (input.question) trustedTexts.push(input.question);
+  const filteredAnswer = filterHallucinations(cleanedAnswer, trustedTexts);
 
   // 4. Truncation.
   const finalAnswer = truncateForLang(filteredAnswer, input.answerLang);
