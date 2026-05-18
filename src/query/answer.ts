@@ -264,7 +264,11 @@ async function askWithTraceInternal(
     // append a kind='error' record with the partial retrieval trace so
     // analyze D1 / D2 stay honest about upstream instability (ARCH §16.4).
     return {
-      result: errorResult('llm_failed', (err as Error).message),
+      result: errorResult(
+        'llm_failed',
+        userMessageForError('llm_failed', queryLang),
+        (err as Error).message,
+      ),
       trace: {
         fused: fusedTrace,
         subtree_ask_triggered: false,
@@ -290,7 +294,11 @@ async function askWithTraceInternal(
   // can distinguish "retrieved but couldn't cite" from a real answer.
   if (post.used_chunks === 0) {
     return {
-      result: errorResult('no_citations', 'LLM response contained no valid citations'),
+      result: errorResult(
+        'no_citations',
+        userMessageForError('no_citations', queryLang),
+        'LLM response contained no valid citations',
+      ),
       trace: {
         fused: fusedTrace,
         subtree_ask_triggered: false,
@@ -507,8 +515,26 @@ function extractEntityTerms(question: string): string[] | undefined {
   return terms;
 }
 
-function errorResult(code: string, message: string): AskResult {
-  return { type: 'error', code, message };
+function errorResult(code: string, message: string, detail?: string | null): AskResult {
+  return { type: 'error', code, message, detail: detail ?? null };
+}
+
+/**
+ * Localized user-facing messages for error codes whose original strings
+ * leaked internal phrasing (e.g. "LLM response contained no valid citations").
+ * Internal codes like `invalid_question` already pass acceptable strings;
+ * only the codes listed here are remapped.
+ */
+function userMessageForError(code: 'no_citations' | 'llm_failed', lang: DocsLang): string {
+  if (code === 'no_citations') {
+    return lang === 'zh'
+      ? '文档中没有找到能够回答这个问题的内容。'
+      : "Couldn't find content in the documentation that answers this question.";
+  }
+  // llm_failed
+  return lang === 'zh'
+    ? '回答生成服务暂时不可用，请稍后重试。'
+    : 'The answer generation service is temporarily unavailable. Please try again.';
 }
 
 function makeAnswerId(): string {

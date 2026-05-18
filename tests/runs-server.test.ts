@@ -144,16 +144,28 @@ test('/v1/ask LLM throw: 503 + appends one RunRecord with kind=error/llm_failed 
       body: JSON.stringify({ question: '如何鉴权？' }),
     });
     assert.equal(res.status, 503);
-    const body = (await res.json()) as { type: string; code?: string; message?: string };
+    const body = (await res.json()) as {
+      type: string;
+      code?: string;
+      message?: string;
+      detail?: string | null;
+    };
     assert.equal(body.type, 'error');
     assert.equal(body.code, 'llm_failed');
-    assert.match(body.message ?? '', /gateway/i);
+    // User-facing message must NOT leak upstream / internal phrasing.
+    assert.doesNotMatch(body.message ?? '', /gateway|undefined|mock/i);
+    // ... but the upstream diagnostic must still be carried in `detail` for
+    // operators / runs analysis.
+    assert.match(body.detail ?? '', /gateway/i);
 
     const file = findRunsFile(stateRoot);
     assert.ok(file, 'expected a runs file (the throw must not skip appendRun)');
     const r = JSON.parse(readFileSync(file!, 'utf8').trim()) as RunRecord;
     assert.equal(r.answer.kind, 'error');
     assert.equal(r.answer.error_code, 'llm_failed');
+    // runs.jsonl should keep the upstream diagnostic (md = detail ?? message)
+    // so eval / analyze still see gateway-flavour incidents.
+    assert.match(r.answer.md ?? '', /gateway/i);
     // partial trace must survive: retrieval ran before the LLM died
     assert.ok(r.retrieval.fused.length > 0, 'partial fused trace should be present');
   } finally {

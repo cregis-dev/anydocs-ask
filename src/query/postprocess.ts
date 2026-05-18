@@ -134,27 +134,68 @@ function truncateForLang(text: string, lang: DocsLang): string {
 }
 
 /**
+ * Path/config-key shape — used to soften the haystack check for structural
+ * identifiers (file paths, dotted config keys, JSON keys) that LLMs commonly
+ * write with different separator conventions than the source chunks. See
+ * `inHaystack` below for the softened-match logic.
+ *
+ * Conservative on purpose: must look like a path (slash + recognized ext) or
+ * a deeply-dotted key (3+ alphanumeric segments). 2-segment dotted forms like
+ * `obj.method` aren't exempt — those would let too many real hallucinations
+ * through.
+ */
+const PATH_OR_KEY_SHAPE = /^[A-Za-z0-9_./-]+$/;
+const FILE_EXT_RE = /\.(json|ya?ml|toml|md|txt|tsx?|jsx?|mjs|cjs|py|css|html|sh|env|csv|sql|xml|conf)$/i;
+const DEEP_DOTTED_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){2,}$/;
+
+function isPathOrConfigKey(body: string): boolean {
+  if (!PATH_OR_KEY_SHAPE.test(body)) return false;
+  if (body.includes('/') && FILE_EXT_RE.test(body)) return true; // e.g. openapi/index.json
+  if (!body.includes('/') && FILE_EXT_RE.test(body)) return true; // e.g. search-index.json
+  if (DEEP_DOTTED_KEY_RE.test(body)) return true; // e.g. site.theme.branding
+  return false;
+}
+
+/**
  * Strip code identifiers from the answer that don't appear in any context
  * chunk. Conservative — we only redact, we don't drop the surrounding
  * sentence (preserving readability over precision).
  *
- * Two exemptions prevent false positives:
+ * Three exemptions prevent false positives:
  *   1. Case-insensitive match — chunk text strips markdown formatting which
  *      can capitalize words (e.g. table cells: "View" vs command "view").
  *   2. Template placeholders — bodies containing <…> angle-bracket syntax
  *      (e.g. `pages/<lang>/`, `<pageId>`) are intentional LLM generalisations
  *      of concrete examples in the chunks; flagging them as hallucinations
  *      breaks legitimate pattern explanations.
+ *   3. Path/key softened-match — file paths and deeply-dotted config keys
+ *      (e.g. `openapi/index.json`, `site.theme.branding`) match even when the
+ *      chunk uses different separators or surrounding prose. Without this,
+ *      every technical identifier mentioned in passing in docs gets ⚠'d.
+ *      The shape is restrictive (slash + known ext, or ≥3 dotted segments)
+ *      so true hallucinations like `nonexistent.fn` still get flagged.
  */
 function filterHallucinations(answer: string, contextTexts: string[]): string {
   if (contextTexts.length === 0) return answer;
   const haystack = contextTexts.join('\n');
   const haystackLower = haystack.toLowerCase();
+  // Lazy: built on first path/key check; many answers have none.
+  let haystackSoftened: string | null = null;
 
   const inHaystack = (body: string): boolean => {
     // Template placeholder pattern — skip the check entirely.
     if (/\{[^}]+\}|<[^>]+>/.test(body)) return true;
-    return haystackLower.includes(body.toLowerCase());
+    const bodyLower = body.toLowerCase();
+    if (haystackLower.includes(bodyLower)) return true;
+    if (isPathOrConfigKey(body)) {
+      const softened = bodyLower.replace(/[./_-]+/g, '');
+      if (softened.length < 6) return false; // too short — risk of incidental match
+      if (haystackSoftened === null) {
+        haystackSoftened = haystackLower.replace(/[./_\-\s]+/g, '');
+      }
+      if (haystackSoftened.includes(softened)) return true;
+    }
+    return false;
   };
 
   // Inline-code identifiers (single backtick) — `getUserById`, `--flag`.

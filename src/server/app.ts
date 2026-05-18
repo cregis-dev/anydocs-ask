@@ -529,7 +529,9 @@ function appendRun(
   } else {
     kind = 'error';
     errorCode = result.code;
-    md = result.message;
+    // Prefer internal `detail` for runs analysis (e.g. upstream LLM error
+    // text on `llm_failed`); fall back to the user-facing message.
+    md = result.detail ?? result.message;
   }
   const record: RunRecord = {
     ts: new Date().toISOString(),

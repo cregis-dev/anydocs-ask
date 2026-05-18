@@ -351,6 +351,53 @@ test('postprocess: hallucinated inline-code identifier marked with ⚠', () => {
   assert.match(out.answer_md, /`madeUpFn⚠`/);          // not in context — flagged
 });
 
+// Regression for codex eval round-2 false-positives. The hallucination filter
+// used to ⚠ legitimate technical identifiers (file paths, JSON file names,
+// deeply-dotted config keys) when the chunk mentioned them with different
+// separators or in surrounding prose. The softened-match exemption now
+// recognises them as legitimate.
+test('postprocess: file paths / JSON file names not ⚠ when chunk references them with prose separators', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    [
+      'cit_1',
+      // Chunk talks about the same identifiers but with different separators
+      // / surrounding prose — exactly the case where the old filter misfired.
+      fakeReranked({
+        text:
+          'The openapi index lives at openapi index.json. Manifest is in imports manifest.json. ' +
+          'The branding is configured via site theme branding key. Tools register in mcp pages.json. ' +
+          'Search uses the search index.json file in the build output.',
+      }),
+    ],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer:
+      'See `openapi/index.json`, `imports/manifest.json`, `site.theme.branding`, ' +
+      '`mcp/pages.json`, and `search-index.json` [cit_1]',
+    chunkById,
+  });
+  // None of these should carry the ⚠ marker — they're shaped like paths or
+  // deeply-dotted config keys and the softened haystack contains them.
+  assert.doesNotMatch(out.answer_md, /⚠/, `unexpected ⚠ in: ${out.answer_md}`);
+});
+
+// Counterpart guard: blatant hallucinations of similar-shaped identifiers
+// (path or config-key shape but not in haystack) must still get ⚠'d. Without
+// this, the exemption would defeat the filter entirely.
+test('postprocess: path-shaped identifier absent from haystack still ⚠ flagged', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'unrelated content about authentication' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer: 'Configure `totally/made-up/config.json` and `fake.nested.key` [cit_1]',
+    chunkById,
+  });
+  assert.match(out.answer_md, /`totally\/made-up\/config\.json⚠`/);
+  assert.match(out.answer_md, /`fake\.nested\.key⚠`/);
+});
+
 test('postprocess: citation URL appends heading anchor when in_page_path encodes one', () => {
   const chunkById = new Map<string, RerankedChunk>([
     [
