@@ -382,19 +382,26 @@ test('postprocess: file paths / JSON file names not ⚠ when chunk references th
   assert.doesNotMatch(out.answer_md, /⚠/, `unexpected ⚠ in: ${out.answer_md}`);
 });
 
-// Counterpart guard: blatant hallucinations of similar-shaped identifiers
-// (path or config-key shape but not in haystack) must still get ⚠'d. Without
-// this, the exemption would defeat the filter entirely.
-test('postprocess: path-shaped identifier absent from haystack still ⚠ flagged', () => {
+// Counterpart guard: dotted config-key shapes that don't appear in either
+// chunks or question (even after softening) must still get ⚠'d. Without this,
+// the exemption would defeat the filter entirely for config keys.
+//
+// Note on scope of the guard: tokens that look like file names with a known
+// extension (e.g. `totally/made-up/config.json`) are EXEMPT by design — see
+// `isClearlyTechnicalIdentifier`. The eval round-3 feedback showed that
+// requiring haystack proof for every file name produced too many false
+// positives on legitimate identifiers; we accept letting an occasional
+// fabricated file name through as the tradeoff. The check that remains
+// teeth-bearing is on dotted keys without an extension.
+test('postprocess: dotted config-key absent from haystack still ⚠ flagged', () => {
   const chunkById = new Map<string, RerankedChunk>([
     ['cit_1', fakeReranked({ text: 'unrelated content about authentication' })],
   ]);
   const out = postprocess({
     answerLang: 'en',
-    rawAnswer: 'Configure `totally/made-up/config.json` and `fake.nested.key` [cit_1]',
+    rawAnswer: 'Set `fake.nested.key` to true [cit_1]',
     chunkById,
   });
-  assert.match(out.answer_md, /`totally\/made-up\/config\.json⚠`/);
   assert.match(out.answer_md, /`fake\.nested\.key⚠`/);
 });
 
@@ -419,20 +426,73 @@ test('postprocess: identifier repeated from the user question is not ⚠ flagged
   assert.doesNotMatch(out.answer_md, /⚠/);
 });
 
-// Counter-test for the question-as-trusted-source rule: identifiers that
-// appear NEITHER in chunks NOR in the question must still be ⚠'d. Without
-// this, the exemption would let any LLM-fabricated identifier through.
-test('postprocess: identifier absent from both chunks and question still ⚠ flagged', () => {
+// Counter-test for the question-as-trusted-source rule: an identifier that
+// appears NEITHER in chunks NOR in the question, AND is shaped as a generic
+// code identifier (not a file extension / URL / loopback), must still be ⚠'d.
+test('postprocess: generic identifier absent from both chunks and question still ⚠ flagged', () => {
   const chunkById = new Map<string, RerankedChunk>([
     ['cit_1', fakeReranked({ text: 'unrelated content' })],
   ]);
   const out = postprocess({
     answerLang: 'en',
     question: 'How do I configure the system?',
-    rawAnswer: 'You can call `fabricated/path/never-mentioned.json` to do it [cit_1].',
+    rawAnswer: 'You can call `definitelyHallucinatedFunction` to do it [cit_1].',
     chunkById,
   });
-  assert.match(out.answer_md, /`fabricated\/path\/never-mentioned\.json⚠`/);
+  assert.match(out.answer_md, /`definitelyHallucinatedFunction⚠`/);
+});
+
+// Regression for codex round-3 follow-up: `anydocs.config.json` and similar
+// file-extensioned identifiers are now direct-allow (no haystack required).
+// Previously chunks had to reference the literal filename verbatim, which
+// failed often enough that legitimate config-file mentions polluted answers.
+test('postprocess: filename-with-extension is exempt from ⚠ regardless of haystack', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'this chunk does not mention the file' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer:
+      'See `anydocs.config.json`, `package.json`, `Dockerfile`, and `.env` [cit_1]',
+    chunkById,
+  });
+  assert.doesNotMatch(out.answer_md, /⚠/);
+});
+
+// 2-segment dotted config keys (`build.outputDir`, `site.theme.id`) — previous
+// rule required ≥3 segments, leaving these polluted. Now allowed as long as
+// the softened form shows up somewhere in the haystack.
+test('postprocess: 2-segment dotted config key passes when softened-match hits', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    [
+      'cit_1',
+      fakeReranked({
+        text: 'the build output directory is set via build outputDir in the config',
+      }),
+    ],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer: 'Configure `build.outputDir` to change the destination [cit_1]',
+    chunkById,
+  });
+  assert.doesNotMatch(out.answer_md, /⚠/);
+});
+
+// New whitelist class: URLs / loopback endpoints are direct-allow regardless
+// of haystack. Codex eval round-3 explicitly called out the need so that
+// `localhost:3100`, `https://example.com`, etc. are never ⚠'d.
+test('postprocess: URLs and loopback endpoints are exempt from ⚠', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'configuration documentation' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer:
+      'Run on `localhost:3100` and `127.0.0.1:8080`; the docs live at `https://example.com/docs` [cit_1]',
+    chunkById,
+  });
+  assert.doesNotMatch(out.answer_md, /⚠/);
 });
 
 test('postprocess: citation URL appends heading anchor when in_page_path encodes one', () => {

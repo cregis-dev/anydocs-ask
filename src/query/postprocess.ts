@@ -147,25 +147,60 @@ function truncateForLang(text: string, lang: DocsLang): string {
 }
 
 /**
- * Path/config-key shape — used to soften the haystack check for structural
- * identifiers (file paths, dotted config keys, JSON keys) that LLMs commonly
- * write with different separator conventions than the source chunks. See
- * `inHaystack` below for the softened-match logic.
- *
- * Conservative on purpose: must look like a path (slash + recognized ext) or
- * a deeply-dotted key (3+ alphanumeric segments). 2-segment dotted forms like
- * `obj.method` aren't exempt — those would let too many real hallucinations
- * through.
+ * "Clearly a technical identifier" — body shapes that are exempted from the
+ * hallucination check outright (no haystack lookup required). The codex eval
+ * round-3 follow-up made it clear that technical docs lean on file names,
+ * config keys, URLs, and placeholders heavily enough that requiring each to
+ * appear verbatim (even softened) in the chunks produces too many false
+ * positives. We accept that the occasional fabricated file name slips through
+ * un-flagged — readers can check the docs directly — in exchange for not
+ * polluting every legitimate identifier with ⚠.
+ */
+const URL_SCHEME_RE = /:\/\//;
+const LOOPBACK_RE = /(^|[^a-zA-Z0-9])(localhost|127\.0\.0\.1|0\.0\.0\.0)(:[0-9]+)?(\/|$)/;
+// File extensions that look like file names rather than config-key suffixes.
+// `.key` is intentionally absent — too easily confused with `app.config.key`
+// style keys. PEM private keys generally appear in paths (`certs/server.key`)
+// so they get covered by the path branch below anyway.
+const FILE_EXT_RE = /\.(json|ya?ml|toml|md|txt|tsx?|jsx?|mjs|cjs|py|css|html?|sh|env|csv|sql|xml|conf|ini|lock|yaml|log|map|pem|crt|dockerfile)(\b|$)/i;
+// Well-known no-extension file names. Docs reference these constantly and
+// `Dockerfile`/`Makefile` etc. don't fit any extension rule.
+const WELL_KNOWN_FILE_NAMES = new Set([
+  'dockerfile', 'makefile', 'gemfile', 'procfile', 'pipfile', 'jenkinsfile',
+  'rakefile', 'guardfile', 'vagrantfile', 'brewfile',
+]);
+
+/**
+ * Identifiers that look "obviously technical" enough that we trust them
+ * without a haystack match. The buckets:
+ *   - URL with scheme (`https://...`).
+ *   - Loopback endpoints (`localhost:3100`, `127.0.0.1:8080`).
+ *   - File names / paths ending in a recognized extension
+ *     (`anydocs.config.json`, `imports/manifest.json`).
+ *   - Well-known no-extension files (`Dockerfile`, `Makefile`, ...).
+ */
+function isClearlyTechnicalIdentifier(body: string): boolean {
+  if (URL_SCHEME_RE.test(body)) return true;
+  if (LOOPBACK_RE.test(body)) return true;
+  if (FILE_EXT_RE.test(body) && /^[A-Za-z0-9_./@:~-]+$/.test(body)) return true;
+  if (WELL_KNOWN_FILE_NAMES.has(body.toLowerCase())) return true;
+  return false;
+}
+
+/**
+ * Identifiers that are *probably* structural but ambiguous enough that we
+ * still demand a softened haystack match (e.g. dotted config keys without a
+ * file extension). Catches `site.theme.branding` and `build.outputDir` while
+ * leaving room for the haystack check to reject true hallucinations like
+ * `fake.nested.key` when the source corpus says nothing of the kind.
  */
 const PATH_OR_KEY_SHAPE = /^[A-Za-z0-9_./-]+$/;
-const FILE_EXT_RE = /\.(json|ya?ml|toml|md|txt|tsx?|jsx?|mjs|cjs|py|css|html|sh|env|csv|sql|xml|conf)$/i;
-const DEEP_DOTTED_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){2,}$/;
+const DOTTED_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$/;
 
-function isPathOrConfigKey(body: string): boolean {
+function isStructuralCandidate(body: string): boolean {
   if (!PATH_OR_KEY_SHAPE.test(body)) return false;
-  if (body.includes('/') && FILE_EXT_RE.test(body)) return true; // e.g. openapi/index.json
-  if (!body.includes('/') && FILE_EXT_RE.test(body)) return true; // e.g. search-index.json
-  if (DEEP_DOTTED_KEY_RE.test(body)) return true; // e.g. site.theme.branding
+  if (body.includes('/')) return true; // any slash-bearing token
+  if (DOTTED_KEY_RE.test(body)) return true; // foo.bar / foo.bar.baz
   return false;
 }
 
@@ -174,33 +209,36 @@ function isPathOrConfigKey(body: string): boolean {
  * chunk. Conservative — we only redact, we don't drop the surrounding
  * sentence (preserving readability over precision).
  *
- * Three exemptions prevent false positives:
- *   1. Case-insensitive match — chunk text strips markdown formatting which
- *      can capitalize words (e.g. table cells: "View" vs command "view").
- *   2. Template placeholders — bodies containing <…> angle-bracket syntax
- *      (e.g. `pages/<lang>/`, `<pageId>`) are intentional LLM generalisations
- *      of concrete examples in the chunks; flagging them as hallucinations
- *      breaks legitimate pattern explanations.
- *   3. Path/key softened-match — file paths and deeply-dotted config keys
- *      (e.g. `openapi/index.json`, `site.theme.branding`) match even when the
- *      chunk uses different separators or surrounding prose. Without this,
- *      every technical identifier mentioned in passing in docs gets ⚠'d.
- *      The shape is restrictive (slash + known ext, or ≥3 dotted segments)
- *      so true hallucinations like `nonexistent.fn` still get flagged.
+ * Exemptions (in order of cost):
+ *   1. Template placeholders — `<lang>`, `<pageId>`, `{org}` etc. Always
+ *      legitimate authoring patterns.
+ *   2. Clearly-technical identifiers — file names with a known extension,
+ *      URLs, loopback endpoints. Direct allow; the false-positive cost
+ *      (polluting `anydocs.config.json` / `https://x` / `localhost:3100`) far
+ *      exceeds the cost of letting an occasional fabricated file name through.
+ *   3. Case-insensitive haystack — chunks strip markdown which can capitalize
+ *      identifiers; lowercase compare keeps these clean.
+ *   4. Softened haystack — for "looks structural but no file extension" tokens
+ *      like `site.theme.branding`, drop `./_-` and compare on the normalized
+ *      form so prose like "site theme branding key" still counts as a match.
+ *      Still requires *some* haystack presence so true hallucinations like
+ *      `totally.fake.key` get flagged.
  */
 function filterHallucinations(answer: string, contextTexts: string[]): string {
   if (contextTexts.length === 0) return answer;
   const haystack = contextTexts.join('\n');
   const haystackLower = haystack.toLowerCase();
-  // Lazy: built on first path/key check; many answers have none.
+  // Lazy: built on first softened-check; many answers have none.
   let haystackSoftened: string | null = null;
 
   const inHaystack = (body: string): boolean => {
     // Template placeholder pattern — skip the check entirely.
     if (/\{[^}]+\}|<[^>]+>/.test(body)) return true;
+    // Clearly-technical shapes (file names, URLs, loopback) — direct allow.
+    if (isClearlyTechnicalIdentifier(body)) return true;
     const bodyLower = body.toLowerCase();
     if (haystackLower.includes(bodyLower)) return true;
-    if (isPathOrConfigKey(body)) {
+    if (isStructuralCandidate(body)) {
       const softened = bodyLower.replace(/[./_-]+/g, '');
       if (softened.length < 6) return false; // too short — risk of incidental match
       if (haystackSoftened === null) {

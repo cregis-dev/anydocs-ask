@@ -41,7 +41,20 @@ export type SearchSection = {
  * insides of fenced + inline code blocks.
  */
 export function stripMarkdown(markdown: string): string {
-  return markdown
+  // Stash author-written placeholders (`<lang>`, `<pageId>`, …) before any
+  // strip pass so neither the HTML rule nor the bare-`>` blockquote rule can
+  // mangle them. Restored verbatim at the end. Real HTML tags fall through to
+  // the strip path as before.
+  const placeholders: string[] = [];
+  const PH_OPEN = 'PH';
+  const PH_CLOSE = 'PH';
+  const stash = (raw: string): string => {
+    const i = placeholders.length;
+    placeholders.push(raw);
+    return `${PH_OPEN}${i}${PH_CLOSE}`;
+  };
+
+  const stripped = markdown
     // Fenced code: keep the inner code, drop the fence + language tag.
     // Match either ``` or ~~~, optional language, body, then matching close.
     .replace(/```[a-zA-Z0-9_-]*\n?([\s\S]*?)```/g, '$1')
@@ -52,8 +65,10 @@ export function stripMarkdown(markdown: string): string {
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     // Links: keep link text.
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-    // HTML tags: drop entirely.
-    .replace(/<\/?[^>]+>/g, ' ')
+    // HTML tags vs placeholders. Real HTML (with attributes or a known
+    // element name) is dropped; a bare `<word>` is treated as an author
+    // placeholder and stashed so the later `>`-strip can't break it.
+    .replace(/<\/?[^>]+>/g, (m) => (isHtmlTag(m) ? ' ' : stash(m)))
     // Strikethrough: ~~text~~ → text (must come before the bare-symbol strip).
     .replace(/~~([^~]*)~~/g, '$1')
     // Markdown emphasis / blockquote marks. ~ is intentionally excluded: it
@@ -63,6 +78,47 @@ export function stripMarkdown(markdown: string): string {
     // Whitespace collapse.
     .replace(/\s+/g, ' ')
     .trim();
+
+  if (placeholders.length === 0) return stripped;
+  return stripped.replace(
+    new RegExp(`${PH_OPEN}(\\d+)${PH_CLOSE}`, 'g'),
+    (_m, i) => placeholders[Number(i)]!,
+  );
+}
+
+/**
+ * Common HTML5 element names that docs (and anydocs core) actually inline.
+ * Conservative set — anything not on this list is treated as a placeholder
+ * (e.g. `<lang>`, `<pageId>`, `<your-token>`) and left in place. If an exotic
+ * HTML tag slips through and pollutes a chunk, add it here rather than
+ * widening the regex.
+ */
+const HTML_TAG_NAMES = new Set([
+  'a', 'abbr', 'address', 'area', 'article', 'aside', 'audio', 'b', 'base', 'bdi',
+  'bdo', 'blockquote', 'body', 'br', 'button', 'canvas', 'caption', 'cite', 'code',
+  'col', 'colgroup', 'data', 'datalist', 'dd', 'del', 'details', 'dfn', 'dialog',
+  'div', 'dl', 'dt', 'em', 'embed', 'fieldset', 'figcaption', 'figure', 'footer',
+  'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header', 'hgroup', 'hr',
+  'html', 'i', 'iframe', 'img', 'input', 'ins', 'kbd', 'label', 'legend', 'li',
+  'link', 'main', 'map', 'mark', 'menu', 'meta', 'meter', 'nav', 'noscript',
+  'object', 'ol', 'optgroup', 'option', 'output', 'p', 'param', 'picture', 'pre',
+  'progress', 'q', 'rp', 'rt', 'ruby', 's', 'samp', 'script', 'section', 'select',
+  'small', 'source', 'span', 'strong', 'style', 'sub', 'summary', 'sup', 'svg',
+  'table', 'tbody', 'td', 'template', 'textarea', 'tfoot', 'th', 'thead', 'time',
+  'title', 'tr', 'track', 'u', 'ul', 'var', 'video', 'wbr',
+]);
+
+/**
+ * Decide whether an angle-bracket-wrapped string is a real HTML tag (drop) or
+ * an author-written placeholder like `<lang>` (keep). The heuristic: any tag
+ * that carries whitespace or `=` is treated as HTML (attributes); a bare
+ * `<word>` is HTML only when `word` matches a known HTML element name.
+ */
+function isHtmlTag(s: string): boolean {
+  if (/[\s=]/.test(s)) return true; // attributes present → real HTML
+  const m = /^<\s*\/?\s*([a-zA-Z][a-zA-Z0-9-]*)\s*\/?\s*>$/.exec(s);
+  if (!m) return false;
+  return HTML_TAG_NAMES.has(m[1]!.toLowerCase());
 }
 
 function extractHeadingPlainText(source: string): string {
