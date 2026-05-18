@@ -24,6 +24,27 @@ test('stripMarkdown drops link URLs but keeps link text', () => {
   );
 });
 
+// Regression for codex eval round-3 follow-up. Doc authors write artifact
+// names like `search-index.<lang>.json` and `dist/mcp/chunks.<lang>.json`
+// where `<lang>` is a placeholder. The previous strip rule treated every
+// `<...>` as an HTML tag and replaced it with whitespace, leaving chunks
+// (and any answer that cites them) showing `search-index. .json` — and the
+// LLM faithfully echoed the broken form. Bare-identifier angle-brackets are
+// now kept verbatim; only known HTML element names are stripped.
+test('stripMarkdown preserves <lang>-style placeholders inside inline code', () => {
+  assert.equal(
+    stripMarkdown('See `search-index.<lang>.json` and `<pageId>` for details'),
+    'See search-index.<lang>.json and <pageId> for details',
+  );
+});
+
+test('stripMarkdown still strips real HTML tags (with or without attributes)', () => {
+  assert.equal(
+    stripMarkdown('Wrapped <p>text</p> and <br/> and <a href="x">link</a>'),
+    'Wrapped text and and link',
+  );
+});
+
 test('extractMarkdownSections strips the leading H1 page title', () => {
   const md = '# Welcome\n\n## First section\n\nbody text';
   const sections = extractMarkdownSections(md, 'Welcome');

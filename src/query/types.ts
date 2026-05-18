@@ -72,7 +72,17 @@ export type AskError = {
   type: 'error';
   /** Stable code for clients to switch on (e.g. 'invalid_scope'). */
   code: string;
+  /**
+   * User-facing message. Safe to render directly in the console / reader UI.
+   * Localized to the query language when known.
+   */
   message: string;
+  /**
+   * Internal diagnostic info — upstream error text, LLM failure detail, etc.
+   * Persisted to runs.jsonl for analysis but NOT shown to end users. May be
+   * null when no extra detail beyond `code` + `message` is available.
+   */
+  detail?: string | null;
 };
 
 export type AskResult = AskAnswer | AskClarify | AskError;

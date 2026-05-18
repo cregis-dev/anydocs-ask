@@ -162,6 +162,51 @@ test('ask: unknown scope_id returns invalid_scope error (no silent fallback)', a
   }
 });
 
+// Regression for codex eval round-2: `no_citations` used to surface the
+// internal phrase "LLM response contained no valid citations" directly to
+// users. The message is now user-friendly and lang-aware; the internal
+// diagnostic moves to `detail` for operators / runs analysis.
+test('ask: no_citations carries a localized user message; internal diagnostic is in detail', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', { id: 'a', title: '配置', body: '系统配置说明文档内容。' });
+    await writeNav(root, 'zh', { version: 1, items: [{ type: 'page', pageId: 'a' }] });
+  });
+  try {
+    // Force the LLM to emit text with no [cit_N] markers, so postprocess
+    // strips every citation and the pipeline returns no_citations.
+    ctx.llm.setResponder(() => 'I cannot find the answer in the docs.');
+    const r = await ask(ctx, { question: '怎么配置' });
+    assert.equal(r.type, 'error');
+    if (r.type !== 'error') return;
+    assert.equal(r.code, 'no_citations');
+    // zh query → zh user message; must not contain internal phrasing.
+    assert.match(r.message, /文档|没有|未找到/);
+    assert.doesNotMatch(r.message, /LLM|citation|response/i);
+    // Internal diagnostic remains accessible to operators.
+    assert.equal(r.detail, 'LLM response contained no valid citations');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: no_citations on an English question returns an English user message', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'en', { id: 'a', title: 'Config', body: 'System configuration docs.' });
+    await writeNav(root, 'en', { version: 1, items: [{ type: 'page', pageId: 'a' }] });
+  });
+  try {
+    ctx.llm.setResponder(() => 'I cannot find the answer.');
+    const r = await ask(ctx, { question: 'how to configure' });
+    assert.equal(r.type, 'error');
+    if (r.type !== 'error') return;
+    assert.equal(r.code, 'no_citations');
+    assert.match(r.message, /Couldn'?t find|documentation/i);
+    assert.doesNotMatch(r.message, /LLM|citation|response/i);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // PRD §8 #11 — cross-lang translation fallback
 // ---------------------------------------------------------------------------
