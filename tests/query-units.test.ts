@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detectLangFromText, langFromScopeId } from '../src/query/lang.ts';
 import { sanitizeFtsQuery } from '../src/query/sanitize.ts';
-import { rerank } from '../src/query/rerank.ts';
+import { rerank, computeTitleMatches } from '../src/query/rerank.ts';
 import { aggregate } from '../src/query/aggregate.ts';
 import { postprocess } from '../src/query/postprocess.ts';
 import { detectFormatHint } from '../src/query/prompt.ts';
@@ -85,6 +85,28 @@ test('sanitizeFtsQuery: returns null when nothing useful survives', () => {
   assert.equal(sanitizeFtsQuery('   '), null);
   assert.equal(sanitizeFtsQuery('?!'), null);
   assert.equal(sanitizeFtsQuery('AND OR'), null);
+});
+
+// CamelCase identifiers expand to both the original token AND a phrase form
+// so BM25 hits chunks that author the same concept as separate words.
+// Regression for codex eval clarify follow-up: a query like `codeGroup`
+// previously missed every chunk that wrote "code group" as two words.
+test('sanitizeFtsQuery: camelCase token emits both literal and phrase form', () => {
+  assert.equal(
+    sanitizeFtsQuery('does Markdown support codeGroup?'),
+    '"does" OR "Markdown" OR "support" OR "codeGroup" OR "code Group"',
+  );
+});
+
+test('sanitizeFtsQuery: deeper compound identifiers split too', () => {
+  assert.equal(
+    sanitizeFtsQuery('parse XMLHttpRequest body'),
+    '"parse" OR "XMLHttpRequest" OR "XML Http Request" OR "body"',
+  );
+});
+
+test('sanitizeFtsQuery: plain lowercase tokens are not duplicated', () => {
+  assert.equal(sanitizeFtsQuery('plain login flow'), '"plain" OR "login" OR "flow"');
 });
 
 // ---------------------------------------------------------------------------
@@ -218,6 +240,38 @@ test('rerank: title_match_boost skipped for titles below min length', () => {
   assert.equal(tts.final_score, voice.final_score, 'short titles get no title boost');
 });
 
+// Singular/plural tolerance in title matching — query types "tool" but the
+// title is "Tools Runtime" (or vice versa). Both directions should match.
+// Regression for codex clarify follow-up: `tool` query failed to title-match
+// `Tools Runtime` so the title-match tiebreaker never fired.
+test('computeTitleMatches: query singular hits title plural via trailing -s', () => {
+  const out = computeTitleMatches(
+    [fakeRetrieved({ chunk_id: 1, page_id: 'tools-runtime', page_title: 'Tools Runtime' })],
+    'how do I create a custom tool safely?',
+  );
+  assert.ok(out.has('tools-runtime'), 'expected `tool` query to match `Tools Runtime` title');
+});
+
+test('computeTitleMatches: query plural hits title singular via trailing -s', () => {
+  const out = computeTitleMatches(
+    [fakeRetrieved({ chunk_id: 1, page_id: 'session', page_title: 'Session Management' })],
+    'how do sessions work?',
+  );
+  assert.ok(out.has('session'));
+});
+
+// Regression for codex codeGroup clarify case. Query `codeGroup` (camelCase,
+// no whitespace) used to be opaque to word-boundary matching, so it never
+// aligned with "Code Blocks and Code Groups". Normalizing the query by
+// splitting on case boundaries lets `code` and `groups` words hit naturally.
+test('computeTitleMatches: camelCase query token splits before word-boundary match', () => {
+  const out = computeTitleMatches(
+    [fakeRetrieved({ chunk_id: 1, page_id: 'code-blocks', page_title: 'Code Blocks and Code Groups' })],
+    'does the Markdown conversion path support codeGroup?',
+  );
+  assert.ok(out.has('code-blocks'), 'expected `codeGroup` query to title-match `Code Blocks and Code Groups`');
+});
+
 test('rerank: sorted descending by final_score', () => {
   const out = rerank(
     [
@@ -302,6 +356,7 @@ test('aggregate: only en chunks for a zh query -> translate-fallback (PRD §8 #1
   assert.equal(out.kind, 'translate-fallback');
 });
 
+
 // ---------------------------------------------------------------------------
 // postprocess.ts
 // ---------------------------------------------------------------------------
@@ -382,28 +437,15 @@ test('postprocess: file paths / JSON file names not ⚠ when chunk references th
   assert.doesNotMatch(out.answer_md, /⚠/, `unexpected ⚠ in: ${out.answer_md}`);
 });
 
-// Counterpart guard: dotted config-key shapes that don't appear in either
-// chunks or question (even after softening) must still get ⚠'d. Without this,
-// the exemption would defeat the filter entirely for config keys.
-//
-// Note on scope of the guard: tokens that look like file names with a known
-// extension (e.g. `totally/made-up/config.json`) are EXEMPT by design — see
-// `isClearlyTechnicalIdentifier`. The eval round-3 feedback showed that
-// requiring haystack proof for every file name produced too many false
-// positives on legitimate identifiers; we accept letting an occasional
-// fabricated file name through as the tradeoff. The check that remains
-// teeth-bearing is on dotted keys without an extension.
-test('postprocess: dotted config-key absent from haystack still ⚠ flagged', () => {
-  const chunkById = new Map<string, RerankedChunk>([
-    ['cit_1', fakeReranked({ text: 'unrelated content about authentication' })],
-  ]);
-  const out = postprocess({
-    answerLang: 'en',
-    rawAnswer: 'Set `fake.nested.key` to true [cit_1]',
-    chunkById,
-  });
-  assert.match(out.answer_md, /`fake\.nested\.key⚠`/);
-});
+// Scope-of-guard note: file-extension shapes, URLs, loopback endpoints,
+// well-known no-ext files, AND dotted config keys (e.g. `site.theme.id`,
+// `build.outputDir`) are all direct-allow regardless of haystack. The eval
+// rounds showed that requiring haystack proof for every "shaped-like-tech"
+// identifier produced too many false positives — we accept letting an
+// occasional fabricated config key through (readers can verify against the
+// docs anyway) in exchange for never polluting a legitimate one. The check
+// that remains teeth-bearing is on plain single-token identifiers that
+// don't match any of those shapes.
 
 // Regression from local dogfood (codex round-3 follow-up): when the user
 // asks "what's in `imports/manifest.json`?" and the docs DON'T mention that
@@ -517,18 +559,59 @@ test('postprocess: quoted dotted config key matches as if unquoted', () => {
   assert.doesNotMatch(out.answer_md, /⚠/);
 });
 
-// Counter-test: quoted key absent from chunks / question still ⚠'d. The
-// quote-strip is normalization, not a free pass for arbitrary fabrications.
-test('postprocess: quoted but absent dotted key still ⚠ flagged', () => {
+// Counter-test for the quote-strip normalization: the strip itself is just
+// equivalence — quoted/unquoted dotted keys take the same code path. With
+// dotted-config-key direct-allow above, neither form is ⚠'d regardless of
+// haystack. The single-segment fabricated-identifier counter-test (above)
+// is what proves the filter still has teeth.
+
+// Dotted config keys (2+ segments, segments ≥2 chars, lowercase/camelCase)
+// are direct-allow regardless of haystack. Regression: `site.theme.id`
+// reappeared with ⚠ when the relevant chunk wasn't in the prompt — the
+// softened-haystack lookup failed because the chunk that has the literal
+// string wasn't retrieved. Direct allow eliminates that brittleness.
+test('postprocess: dotted config-key (≥2 segments) is direct-allow', () => {
   const chunkById = new Map<string, RerankedChunk>([
-    ['cit_1', fakeReranked({ text: 'unrelated content' })],
+    ['cit_1', fakeReranked({ text: 'unrelated content about authentication' })],
   ]);
   const out = postprocess({
     answerLang: 'en',
-    rawAnswer: 'Set `"fake.nested.key"` to true [cit_1]',
+    rawAnswer:
+      'Set `site.theme.id`, `build.outputDir`, and `app.feature.enabled` [cit_1]',
     chunkById,
   });
-  assert.match(out.answer_md, /"fake\.nested\.key"⚠/);
+  assert.doesNotMatch(out.answer_md, /⚠/);
+});
+
+// Directory paths with trailing slash (`dist/imports/`, `pages/en/`, `src/`)
+// are direct-allow — docs reference output layouts without naming a
+// specific file all the time, and they failed the file-extension rule.
+test('postprocess: directory-shaped trailing-slash paths are direct-allow', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'unrelated' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer:
+      'Artifacts live under `dist/imports/`, `pages/en/`, and `src/` [cit_1]',
+    chunkById,
+  });
+  assert.doesNotMatch(out.answer_md, /⚠/);
+});
+
+// Boundary: single-segment fabricated identifiers (no dot, no extension)
+// still get ⚠'d. The exemption is for "shaped like a config key", not for
+// any inline-code body.
+test('postprocess: single-segment fabricated identifier still ⚠ flagged', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'real identifier: getUser' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer: 'Use `definitelyHallucinatedFunction` [cit_1]',
+    chunkById,
+  });
+  assert.match(out.answer_md, /`definitelyHallucinatedFunction⚠`/);
 });
 
 // 2-segment dotted config keys (`build.outputDir`, `site.theme.id`) — previous

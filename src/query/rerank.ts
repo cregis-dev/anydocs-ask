@@ -98,7 +98,15 @@ function navIndexBoostFor(navIndex: number | null): number {
  */
 export function computeTitleMatches(chunks: RetrievedChunk[], query: string): Set<string> {
   if (!query) return new Set();
-  const queryLower = query.toLowerCase();
+  // Normalize compound identifiers in the query — `codeGroup` becomes
+  // `code group` before lowercasing — so word-boundary matches against
+  // titles like "Code Blocks and Code Groups" succeed. Without this the
+  // query token `codeGroup` is a single opaque blob and never aligns with
+  // any natural-language title word.
+  const queryLower = query
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .toLowerCase();
 
   // Unique (page_id, title) pairs from the candidate chunks.
   const titlesByPage = new Map<string, string>();
@@ -156,13 +164,21 @@ function hitsQuery(queryLower: string, titleLower: string): boolean {
   // query word-aligned. This lets "Working with Claude Code" match a query
   // containing "Claude Code", and "MCP Tools Reference" match "MCP tools",
   // without the query having to include the full title verbatim.
+  //
+  // Singular/plural tolerance: word boundaries default to exact match, so
+  // a query containing "tool" wouldn't hit a title with "Tools". Allow an
+  // optional trailing 's' on either side so the match is bidirectional.
+  // Trade-off: a few low-frequency words like "glass" → "glas" become loose,
+  // but the win on natural-language queries (user types singular, docs use
+  // plural or vice versa) is worth that noise.
   const significant = titleLower
     .split(/\s+/)
     .filter((w) => w.length > 3 && !TITLE_STOP_WORDS.has(w));
   if (significant.length < 2) return false; // too few words; rely on exact only
   const hits = significant.filter((w) => {
     const we = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`\\b${we}\\b`).test(queryLower);
+    const stem = we.endsWith('s') ? we.slice(0, -1) : we;
+    return new RegExp(`\\b${stem}s?\\b`).test(queryLower);
   }).length;
   return hits / significant.length >= 0.5;
 }

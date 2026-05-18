@@ -44,8 +44,38 @@ export function sanitizeFtsQuery(text: string): string | null {
   for (const t of tokens) {
     if (FTS5_KEYWORDS.has(t.toUpperCase())) continue; // drop AND/OR/NOT/NEAR
     useful.push(`"${t}"`);
+    // Compound camelCase ("codeGroup", "getUserById"): also emit a phrase
+    // form so BM25 hits the same identifier spelled as separate words
+    // ("code group", "get user by id"). Without this, a user query of
+    // `codeGroup` doesn't surface chunks whose prose writes "code group"
+    // — which is exactly how most authored docs render the concept.
+    const altered = splitCompoundIdentifier(t);
+    if (altered && altered.toLowerCase() !== t.toLowerCase()) {
+      useful.push(`"${altered}"`);
+    }
   }
 
   if (useful.length === 0) return null;
   return useful.join(' OR ');
+}
+
+/**
+ * Split a camelCase / PascalCase / mixed identifier into a space-separated
+ * phrase. Returns null when the token has no internal case boundary (no
+ * useful split to emit).
+ *
+ *   codeGroup       → "code Group"
+ *   getUserById     → "get User By Id"
+ *   XMLHttpRequest  → "XML Http Request"
+ *   plainword       → null
+ */
+function splitCompoundIdentifier(token: string): string | null {
+  if (!/[a-z][A-Z]|[A-Z]{2,}[a-z]/.test(token)) return null;
+  const split = token
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .split(/\s+/)
+    .filter((p) => p.length > 0);
+  if (split.length < 2) return null;
+  return split.join(' ');
 }

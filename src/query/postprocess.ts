@@ -170,6 +170,18 @@ const WELL_KNOWN_FILE_NAMES = new Set([
   'rakefile', 'guardfile', 'vagrantfile', 'brewfile',
 ]);
 
+// Dotted config keys (≥2 segments, each ≥2 chars, lowercase/camelCase).
+// Catches `site.theme.id`, `build.outputDir`, `app.feature.enabled`, etc.
+// Excludes single-char segments (`a.b`) and anything with non-identifier
+// characters. Method-call shapes like `obj.method()` are filtered by the
+// outer charset check and by the trailing `()` not matching this pattern.
+const DOTTED_CONFIG_KEY_RE = /^[a-zA-Z][a-zA-Z0-9]+(\.[a-zA-Z][a-zA-Z0-9]+)+$/;
+// Directory-shaped paths ending in a trailing slash (`dist/imports/`,
+// `pages/en/`, `src/`). Docs reference these constantly to point at output
+// layouts without naming a specific file; refusing to whitelist them
+// produced ⚠ on legitimate directory references.
+const DIRECTORY_PATH_RE = /^[a-zA-Z0-9_-]+(\/[a-zA-Z0-9_-]+)*\/$/;
+
 /**
  * Identifiers that look "obviously technical" enough that we trust them
  * without a haystack match. The buckets:
@@ -184,6 +196,8 @@ function isClearlyTechnicalIdentifier(body: string): boolean {
   if (LOOPBACK_RE.test(body)) return true;
   if (FILE_EXT_RE.test(body) && /^[A-Za-z0-9_./@:~-]+$/.test(body)) return true;
   if (WELL_KNOWN_FILE_NAMES.has(body.toLowerCase())) return true;
+  if (DOTTED_CONFIG_KEY_RE.test(body)) return true;
+  if (DIRECTORY_PATH_RE.test(body)) return true;
   return false;
 }
 
