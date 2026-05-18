@@ -20,7 +20,7 @@ import { openDatabase } from '../src/db/index.ts';
 import { MockEmbedder } from '../src/embedding/mock.ts';
 import { MockLLM } from '../src/llm/mock.ts';
 import { Indexer } from '../src/index/indexer.ts';
-import { ask } from '../src/query/answer.ts';
+import { ask, askWithTrace } from '../src/query/answer.ts';
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -232,6 +232,81 @@ test('ask: en queryLang with zh-replying LLM corrects answer_lang to zh', async 
     assert.equal(r.answer_lang, 'zh', 'answer_lang follows the actual answer text, not the prompt hint');
     // Citations came from en chunks → cross-lang relative to corrected answer_lang.
     assert.notEqual(r.translation_notice, null);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+// Regression for codex round-8 citation-validation flake. LLMs occasionally
+// omit [cit_N] markers on the first try; we now issue one transparent retry
+// with a reinforced citation reminder. If the retry succeeds, the caller
+// gets a normal answer (just slower); trace flags the retry for analyze.
+test('ask: no_citations on first call → retry → answer on second call', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'en', { id: 'a', title: 'Config', body: 'System configuration docs.' });
+    await writeNav(root, 'en', { version: 1, items: [{ type: 'page', pageId: 'a' }] });
+  });
+  try {
+    let call = 0;
+    ctx.llm.setResponder((input) => {
+      call += 1;
+      if (call === 1) return 'Some answer text but with no citation markers.';
+      // Second call: the reinforced reminder must be present in the system prompt.
+      assert.match(input.systemPrompt, /Important correction|previous response|MUST/);
+      // Pull any [cit_N] from userPrompt and cite it back.
+      const markers = input.userPrompt.match(/\[cit_\d+\]/g) ?? [];
+      return `Configured via the docs ${markers[0] ?? ''}.`;
+    });
+    const { result, trace } = await askWithTrace(ctx, { question: 'how to configure' });
+    assert.equal(result.type, 'answer', 'retry should recover into a citable answer');
+    assert.equal(call, 2, 'exactly one retry');
+    assert.equal(trace.citation_retry_attempted, true);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: retry also fails → still no_citations, trace flag set', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'en', { id: 'a', title: 'Config', body: 'System configuration docs.' });
+    await writeNav(root, 'en', { version: 1, items: [{ type: 'page', pageId: 'a' }] });
+  });
+  try {
+    let call = 0;
+    ctx.llm.setResponder(() => {
+      call += 1;
+      return 'Still no citation marker on either attempt.';
+    });
+    const { result, trace } = await askWithTrace(ctx, { question: 'how to configure' });
+    assert.equal(result.type, 'error');
+    if (result.type !== 'error') return;
+    assert.equal(result.code, 'no_citations');
+    assert.equal(call, 2, 'one initial + one retry');
+    assert.equal(trace.citation_retry_attempted, true);
+    // detail stays stable across the retry path (user-facing message is the
+    // same, retry just adds a chance to recover before surfacing the error).
+    assert.equal(result.detail, 'LLM response contained no valid citations');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: first call succeeds → no retry, trace flag is false', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'en', { id: 'a', title: 'Config', body: 'System configuration docs.' });
+    await writeNav(root, 'en', { version: 1, items: [{ type: 'page', pageId: 'a' }] });
+  });
+  try {
+    let call = 0;
+    ctx.llm.setResponder((input) => {
+      call += 1;
+      const markers = input.userPrompt.match(/\[cit_\d+\]/g) ?? [];
+      return `Use the docs ${markers[0] ?? ''}.`;
+    });
+    const { result, trace } = await askWithTrace(ctx, { question: 'how to configure' });
+    assert.equal(result.type, 'answer');
+    assert.equal(call, 1, 'no retry on first-call success');
+    assert.equal(trace.citation_retry_attempted, false);
   } finally {
     await ctx.cleanup();
   }
