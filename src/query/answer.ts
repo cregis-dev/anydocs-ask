@@ -75,6 +75,10 @@ export type AskTrace = {
    *  later stages can set them when the LLM interface is widened. */
   tokens_in: number | null;
   tokens_out: number | null;
+  /** True when the first LLM response had no valid citations and a second
+   *  call with a reinforced citation prompt was issued. Visible in
+   *  runs.jsonl for analyze to track flake rate over time. */
+  citation_retry_attempted?: boolean;
 };
 
 export type AskTraceFusedChunk = {
@@ -248,14 +252,14 @@ async function askWithTraceInternal(
     systemPrompt: prompt.system,
     userPrompt: prompt.user,
   };
+  const isStreaming = !!(hooks.onDelta && deps.llm.streamGenerate);
   try {
-    llmOutput =
-      hooks.onDelta && deps.llm.streamGenerate
-        ? await deps.llm.streamGenerate(llmInput, {
-            signal: hooks.signal,
-            onDelta: hooks.onDelta,
-          })
-        : await deps.llm.generate(llmInput);
+    llmOutput = isStreaming
+      ? await deps.llm.streamGenerate!(llmInput, {
+          signal: hooks.signal,
+          onDelta: hooks.onDelta!,
+        })
+      : await deps.llm.generate(llmInput);
   } catch (err) {
     // LLM call failure (gateway returned garbage / timed out / threw mid-
     // stream). Distinct from `llm_unavailable` which is the *construction*
@@ -282,16 +286,49 @@ async function askWithTraceInternal(
   }
   throwIfAborted(hooks.signal);
 
-  const post = postprocess({
+  let post = postprocess({
     answerLang: queryLang,
     rawAnswer: llmOutput.text,
     chunkById: prompt.chunkById,
     question,
   });
 
+  // Citation-validation retry. When the first response strips to zero
+  // citations, the model produced text but forgot the `[cit_N]` markers
+  // — a documented flake mode (codex round-8). Issue one retry with a
+  // reinforced system prompt that explicitly calls out the prior failure
+  // and demands the marker. Streaming requests skip retry: the client
+  // already received the failed deltas and a second pass would scramble
+  // the user-visible stream. Non-streaming callers see a transparent
+  // retry — same JSON shape, slightly higher latency.
+  let citationRetryAttempted = false;
+  if (post.used_chunks === 0 && !isStreaming) {
+    citationRetryAttempted = true;
+    const retryInput = {
+      systemPrompt: prompt.system + '\n\n' + citationReinforcementFor(queryLang),
+      userPrompt: prompt.user,
+    };
+    try {
+      const retryOutput = await deps.llm.generate(retryInput);
+      const retryPost = postprocess({
+        answerLang: queryLang,
+        rawAnswer: retryOutput.text,
+        chunkById: prompt.chunkById,
+        question,
+      });
+      if (retryPost.used_chunks > 0) {
+        llmOutput = retryOutput;
+        post = retryPost;
+      }
+    } catch {
+      // Retry itself failed — fall through to the original no_citations
+      // path below. We don't surface the retry error to the caller; the
+      // primary diagnostic is "first call had no citations".
+    }
+  }
+
   // Guard: if postprocess stripped every citation (LLM produced no valid
-  // citation markers), returning a successful answer would silently deliver
-  // an uncited, unverifiable response. Surface it as an error so the caller
+  // citation markers, retry included), surface as an error so the caller
   // can distinguish "retrieved but couldn't cite" from a real answer.
   if (post.used_chunks === 0) {
     return {
@@ -307,6 +344,7 @@ async function askWithTraceInternal(
         confidence,
         tokens_in: null,
         tokens_out: null,
+        citation_retry_attempted: citationRetryAttempted,
       },
       queryVector,
     };
@@ -346,9 +384,30 @@ async function askWithTraceInternal(
       confidence,
       tokens_in: null,
       tokens_out: null,
+      citation_retry_attempted: citationRetryAttempted,
     },
     queryVector,
   };
+}
+
+/**
+ * Reinforced instruction appended to the system prompt when the first LLM
+ * call returned text without citation markers. The retry prompt names the
+ * prior failure explicitly so the model is less likely to skip them again.
+ */
+function citationReinforcementFor(lang: DocsLang): string {
+  if (lang === 'zh') {
+    return [
+      '【重要修正】上一次回答没有包含任何 [cit_N] 标记，输出被丢弃。',
+      '这一次必须在答案中每个事实陈述后内联 [cit_1] / [cit_2] 等标记。',
+      '可用 cit 编号已经在上方参考片段每个 [cit_N] 标头处给出，请逐条引用。',
+    ].join('\n');
+  }
+  return [
+    '[Important correction] The previous response contained no [cit_N] markers and was discarded.',
+    'This time you MUST end every factual statement with an inline [cit_1] / [cit_2] / ... marker.',
+    'The available cit ids are shown at the head of each context snippet above. Use them verbatim.',
+  ].join('\n');
 }
 
 /**
