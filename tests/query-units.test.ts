@@ -35,8 +35,32 @@ test('detectLangFromText: mixed but ≥30% CJK -> zh', () => {
 });
 
 test('detectLangFromText: mostly English with a couple of zh chars stays en', () => {
-  // 2/30 chars are CJK ≈ 6.7%, below 30% threshold.
+  // ~6.7% CJK well below the 15% threshold.
   assert.equal(detectLangFromText('how do I configure the 设置 endpoint properly'), 'en');
+});
+
+// Regression for codex round-8 zh-lang-aware findings. Real zh queries
+// frequently mix in English technical terms; under the old 30% threshold
+// they got misdetected as 'en' and the LLM was prompted to reply in English.
+test('detectLangFromText: zh question with technical terms (16% CJK) detects zh', () => {
+  // 如何配置 (4) + 里的 (2) = 6 CJK chars in 37 non-WS chars = 16.2%.
+  assert.equal(
+    detectLangFromText('如何配置 anydocs.config.json 里的 site.theme.id？'),
+    'zh',
+  );
+});
+
+test('detectLangFromText: CJK punctuation counts as zh signal', () => {
+  // 5 CJK chars (有什么区别) + 3 CJK punct (、、？) in 36 chars = 22%.
+  assert.equal(
+    detectLangFromText('sessions、checkpoints、memory 有什么区别？'),
+    'zh',
+  );
+});
+
+test('detectLangFromText: zh-only short query stays zh', () => {
+  // 3 chars (什么是) + codeGroup (9) + ？ (1 — CJK punct) = 4 CJK / 13 = 30%.
+  assert.equal(detectLangFromText('什么是 codeGroup？'), 'zh');
 });
 
 test('detectLangFromText: empty string -> en (benign default)', () => {

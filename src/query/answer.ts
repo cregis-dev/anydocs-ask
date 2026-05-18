@@ -312,13 +312,28 @@ async function askWithTraceInternal(
     };
   }
 
+  // Answer-text lang sanity (one-way correction only): if queryLang detected
+  // as 'en' but the LLM actually replied in zh (common with mostly-ASCII zh
+  // queries — the model picks up on Chinese phrasing and outputs zh even
+  // when the prompt label said en), surface the answer as zh so the client
+  // gets a coherent answer_lang. We DON'T correct the reverse (zh queryLang
+  // with en answer) — that's the legitimate cross-lang fallback where the
+  // LLM was told to translate en chunks to zh but the cross-lang prompt
+  // failed or mock-LLM tests use stub responders; PRD §8 #11 explicitly
+  // expects answer_lang=queryLang in that direction.
+  const answerLangFromText = detectLangFromText(post.answer_md);
+  const finalAnswerLang: DocsLang =
+    queryLang === 'en' && answerLangFromText === 'zh' ? 'zh' : queryLang;
+  const citationLangs = new Set(post.citations.map((c) => c.lang));
+  const finalIsCrossLang = !citationLangs.has(finalAnswerLang);
+
   return {
     result: {
       type: 'answer',
       answer_id: makeAnswerId(),
-      answer_lang: queryLang,
+      answer_lang: finalAnswerLang,
       answer_md: post.answer_md,
-      translation_notice: isCrossLang ? translationNoticeFor(queryLang) : null,
+      translation_notice: finalIsCrossLang ? translationNoticeFor(finalAnswerLang) : null,
       citations: post.citations,
       used_chunks: post.used_chunks,
       model: llmOutput.modelUsed,

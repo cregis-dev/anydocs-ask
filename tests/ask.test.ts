@@ -207,6 +207,36 @@ test('ask: no_citations on an English question returns an English user message',
   }
 });
 
+// Regression for codex round-8 zh-lang-aware: when the LLM picks up on
+// Chinese phrasing in a query that detected as en (low CJK ratio) and replies
+// in zh anyway, answer_lang should be corrected to match the actual answer
+// text. This is the one-way en→zh correction; zh→en stays as cross-lang
+// fallback (covered by PRD §8 #11).
+test('ask: en queryLang with zh-replying LLM corrects answer_lang to zh', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'en', {
+      id: 'auth',
+      title: 'Authentication',
+      body: 'Use a JWT bearer token in the Authorization header for every request.',
+    });
+    await writeNav(root, 'en', { version: 1, items: [{ type: 'page', pageId: 'auth' }] });
+  });
+  try {
+    // Stub the LLM to reply in zh regardless of the (en) prompt hint —
+    // simulates real-LLM behaviour on mixed-language queries.
+    ctx.llm.setResponder(() => '使用 JWT bearer token 即可 [cit_1]');
+    // Mostly-ASCII query so detectLangFromText classifies it as 'en'.
+    const r = await ask(ctx, { question: 'How do I authenticate with JWT?' });
+    assert.equal(r.type, 'answer');
+    if (r.type !== 'answer') return;
+    assert.equal(r.answer_lang, 'zh', 'answer_lang follows the actual answer text, not the prompt hint');
+    // Citations came from en chunks → cross-lang relative to corrected answer_lang.
+    assert.notEqual(r.translation_notice, null);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // PRD §8 #11 — cross-lang translation fallback
 // ---------------------------------------------------------------------------
