@@ -459,6 +459,41 @@ test('postprocess: filename-with-extension is exempt from ⚠ regardless of hays
   assert.doesNotMatch(out.answer_md, /⚠/);
 });
 
+// Regression for codex eval round-6: when the LLM accidentally wraps a
+// table-cell description (a prose sentence) in backticks, the hallucination
+// filter should not run on it. Otherwise descriptive copy gets ⚠'d at the
+// sentence tail, polluting answers that are otherwise faithful to chunks.
+test('postprocess: prose sentence wrapped in backticks is not ⚠ flagged', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'table of theme fields and their semantics' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer:
+      'The fields are described as:\n' +
+      '- `Theme identifier. Currently "classic-docs" is the standard theme.` [cit_1]\n' +
+      '- `Site title shown in the browser tab and site header.` [cit_1]\n' +
+      '- `Syntax highlighting theme for code blocks...` [cit_1]',
+    chunkById,
+  });
+  assert.doesNotMatch(out.answer_md, /⚠/);
+});
+
+// Counter-test: short, identifier-shaped strings are still subject to the
+// hallucination check (the prose exemption only kicks in for whitespace +
+// sentence-ending punctuation + length).
+test('postprocess: identifier-looking string (no sentence punctuation) still ⚠ when absent', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'real identifier: getUser' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer: 'Use `madeUpFn` to do it [cit_1]',
+    chunkById,
+  });
+  assert.match(out.answer_md, /`madeUpFn⚠`/);
+});
+
 // LLMs often wrap JSON-style config keys in double quotes
 // (`"site.theme.id"`). Codex round-5 flagged this — the quoted form was
 // failing every shape check and getting ⚠'d. The fix strips surrounding

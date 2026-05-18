@@ -197,6 +197,29 @@ function isClearlyTechnicalIdentifier(body: string): boolean {
 const PATH_OR_KEY_SHAPE = /^[A-Za-z0-9_./-]+$/;
 const DOTTED_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$/;
 
+/**
+ * Detect inline-code bodies that are actually prose sentences (LLM formatting
+ * mistake — e.g. wrapping a table-cell description in backticks). Telltale
+ * combination: at least one whitespace, a sentence-ending punctuation mark
+ * mid-body or at the end, and enough length to rule out short identifiers
+ * like `getUser(...)`.
+ *
+ * Conservative thresholds — we'd rather miss a prose case and let ⚠ stand
+ * than incorrectly exempt a long identifier-like string. Bodies under 20
+ * chars are never treated as prose.
+ */
+function isProseSentence(body: string): boolean {
+  if (body.length < 20) return false;
+  if (!/\s/.test(body)) return false; // no whitespace → not a sentence
+  // Sentence-ending punctuation followed by whitespace anywhere in the body
+  // ("...is the standard theme. Currently...") — strong prose signal.
+  if (/[.!?。！？](\s|["'])/.test(body)) return true;
+  // Body ends in terminal punctuation including ellipsis (…/...) AND has
+  // multiple words — also prose.
+  if (/(\.{3}|…|[.!?。！？])["'”’]?$/.test(body) && /\s/.test(body.trim())) return true;
+  return false;
+}
+
 function isStructuralCandidate(body: string): boolean {
   if (!PATH_OR_KEY_SHAPE.test(body)) return false;
   if (body.includes('/')) return true; // any slash-bearing token
@@ -232,6 +255,12 @@ function filterHallucinations(answer: string, contextTexts: string[]): string {
   let haystackSoftened: string | null = null;
 
   const inHaystack = (body: string): boolean => {
+    // Prose sentences wrapped in backticks (e.g. table-cell descriptions
+    // the LLM accidentally formatted as inline code). These aren't code-
+    // identifier claims — running the hallucination check on them produces
+    // sentence-tail ⚠'s on entirely legitimate descriptive text. Bail out
+    // before any other check.
+    if (isProseSentence(body)) return true;
     // LLMs frequently wrap JSON-style keys in double quotes (e.g.
     // `"site.theme.id"` or `'build.outputDir'`). The quotes are display
     // formatting, not part of the identifier — strip them before any
