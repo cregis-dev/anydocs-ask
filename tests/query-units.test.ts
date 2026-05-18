@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detectLangFromText, langFromScopeId } from '../src/query/lang.ts';
 import { sanitizeFtsQuery } from '../src/query/sanitize.ts';
-import { rerank } from '../src/query/rerank.ts';
+import { rerank, computeTitleMatches } from '../src/query/rerank.ts';
 import { aggregate } from '../src/query/aggregate.ts';
 import { postprocess } from '../src/query/postprocess.ts';
 import { detectFormatHint } from '../src/query/prompt.ts';
@@ -85,6 +85,28 @@ test('sanitizeFtsQuery: returns null when nothing useful survives', () => {
   assert.equal(sanitizeFtsQuery('   '), null);
   assert.equal(sanitizeFtsQuery('?!'), null);
   assert.equal(sanitizeFtsQuery('AND OR'), null);
+});
+
+// CamelCase identifiers expand to both the original token AND a phrase form
+// so BM25 hits chunks that author the same concept as separate words.
+// Regression for codex eval clarify follow-up: a query like `codeGroup`
+// previously missed every chunk that wrote "code group" as two words.
+test('sanitizeFtsQuery: camelCase token emits both literal and phrase form', () => {
+  assert.equal(
+    sanitizeFtsQuery('does Markdown support codeGroup?'),
+    '"does" OR "Markdown" OR "support" OR "codeGroup" OR "code Group"',
+  );
+});
+
+test('sanitizeFtsQuery: deeper compound identifiers split too', () => {
+  assert.equal(
+    sanitizeFtsQuery('parse XMLHttpRequest body'),
+    '"parse" OR "XMLHttpRequest" OR "XML Http Request" OR "body"',
+  );
+});
+
+test('sanitizeFtsQuery: plain lowercase tokens are not duplicated', () => {
+  assert.equal(sanitizeFtsQuery('plain login flow'), '"plain" OR "login" OR "flow"');
 });
 
 // ---------------------------------------------------------------------------
@@ -218,6 +240,38 @@ test('rerank: title_match_boost skipped for titles below min length', () => {
   assert.equal(tts.final_score, voice.final_score, 'short titles get no title boost');
 });
 
+// Singular/plural tolerance in title matching — query types "tool" but the
+// title is "Tools Runtime" (or vice versa). Both directions should match.
+// Regression for codex clarify follow-up: `tool` query failed to title-match
+// `Tools Runtime` so the title-match tiebreaker never fired.
+test('computeTitleMatches: query singular hits title plural via trailing -s', () => {
+  const out = computeTitleMatches(
+    [fakeRetrieved({ chunk_id: 1, page_id: 'tools-runtime', page_title: 'Tools Runtime' })],
+    'how do I create a custom tool safely?',
+  );
+  assert.ok(out.has('tools-runtime'), 'expected `tool` query to match `Tools Runtime` title');
+});
+
+test('computeTitleMatches: query plural hits title singular via trailing -s', () => {
+  const out = computeTitleMatches(
+    [fakeRetrieved({ chunk_id: 1, page_id: 'session', page_title: 'Session Management' })],
+    'how do sessions work?',
+  );
+  assert.ok(out.has('session'));
+});
+
+// Regression for codex codeGroup clarify case. Query `codeGroup` (camelCase,
+// no whitespace) used to be opaque to word-boundary matching, so it never
+// aligned with "Code Blocks and Code Groups". Normalizing the query by
+// splitting on case boundaries lets `code` and `groups` words hit naturally.
+test('computeTitleMatches: camelCase query token splits before word-boundary match', () => {
+  const out = computeTitleMatches(
+    [fakeRetrieved({ chunk_id: 1, page_id: 'code-blocks', page_title: 'Code Blocks and Code Groups' })],
+    'does the Markdown conversion path support codeGroup?',
+  );
+  assert.ok(out.has('code-blocks'), 'expected `codeGroup` query to title-match `Code Blocks and Code Groups`');
+});
+
 test('rerank: sorted descending by final_score', () => {
   const out = rerank(
     [
@@ -301,6 +355,7 @@ test('aggregate: only en chunks for a zh query -> translate-fallback (PRD §8 #1
   );
   assert.equal(out.kind, 'translate-fallback');
 });
+
 
 // ---------------------------------------------------------------------------
 // postprocess.ts
