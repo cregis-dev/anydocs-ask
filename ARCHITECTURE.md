@@ -696,6 +696,10 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
       "allowedOrigins": []
     }
   },
+  "prompt": {
+    "assistantName": null,
+    "systemInstructions": []
+  },
   "indexing": {
     "chunkMaxTokens": 500,
     "chunkHardCap": 1000,
@@ -705,6 +709,8 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
 ```
 
 LLM API key **仅从环境变量读取**，不写配置文件。配置里只写 `apiKeyEnv` 字段名。
+
+`prompt` 是项目级追加说明：`assistantName` 只替换助手身份文案，`systemInstructions` 按行追加到 system prompt 末尾。它不能覆盖核心规则：答案仍必须只基于检索片段、必须内联 `[cit_N]` 引用、不能编造代码/API/路径。为控制 token 体积，加载和 Console 保存都会规范化空白字符，并限制 `assistantName` 最多 80 字符、`systemInstructions` 最多 20 条、每条最多 500 字符；被截断或忽略的内容会进入 warning。
 
 ---
 

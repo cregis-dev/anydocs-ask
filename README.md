@@ -222,6 +222,21 @@ anydocs-ask analyze runs     <projectRoot> [--since 7d]
 
 在 `<projectRoot>` 放置 `anydocs.ask.json` 可覆盖默认配置（模型、检索权重、CORS 域名等），所有字段均为可选。完整字段列表见 ARCHITECTURE.md §9。
 
+项目也可以追加自定义 Prompt 说明，用于按文档站的业务语境特调回答风格；核心的“只基于片段回答 / 必须引用 / 不编造”规则不会被覆盖。也可在 Web Console 的项目页 `Prompt settings` 里编辑。为避免 prompt 过大，保存时会把换行/多空格压成单空格，并限制 `assistantName` 最多 80 字符、`systemInstructions` 最多 20 条、每条最多 500 字符。
+
+```json
+{
+  "prompt": {
+    "assistantName": "Cregis AI 助手",
+    "systemInstructions": [
+      "Payment Engine 主要用于订单、收款、托管收银台、支付回调和订单状态查询。",
+      "WaaS 主要用于钱包、地址、充值、归集、提币和链上资产管理。",
+      "回答时先给直接结论，再给必要步骤或注意事项。"
+    ]
+  }
+}
+```
+
 ---
 
 ## 设计原则

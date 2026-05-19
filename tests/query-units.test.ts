@@ -13,7 +13,7 @@ import { sanitizeFtsQuery } from '../src/query/sanitize.ts';
 import { rerank, computeTitleMatches } from '../src/query/rerank.ts';
 import { aggregate } from '../src/query/aggregate.ts';
 import { postprocess } from '../src/query/postprocess.ts';
-import { detectFormatHint } from '../src/query/prompt.ts';
+import { buildPrompt, detectFormatHint } from '../src/query/prompt.ts';
 import type { RerankedChunk } from '../src/query/rerank.ts';
 import type { RetrievedChunk } from '../src/query/retrieval.ts';
 
@@ -177,6 +177,40 @@ function fakeRetrieved(over: Partial<RetrievedChunk> = {}): RetrievedChunk {
     ...over,
   };
 }
+
+test('buildPrompt: appends project-specific assistant identity and instructions after core rules', () => {
+  const prompt = buildPrompt({
+    question: '支付引擎和 WaaS 有什么区别？',
+    chunks: [
+      {
+        ...fakeRetrieved({
+          chunk_id: 1,
+          page_id: 'payment-engine',
+          page_title: '支付引擎',
+          text: 'Payment Engine handles orders and checkout.',
+          breadcrumb: [{ id: 'payment-engine', title: '支付引擎', type: 'section' }],
+        }),
+        final_score: 0.2,
+      },
+    ],
+    answerLang: 'zh',
+    isCrossLang: false,
+    formatHint: 'table',
+    promptConfig: {
+      assistantName: 'Cregis AI 助手',
+      systemInstructions: [
+        'Payment Engine 主要用于订单、收款、托管收银台、支付回调和订单状态查询。',
+        'WaaS 主要用于钱包、地址、充值、归集、提币和链上资产管理。',
+      ],
+    },
+  });
+
+  assert.match(prompt.system, /你是 Cregis AI 助手。/);
+  assert.match(prompt.system, /答案必须基于下方提供的参考片段/);
+  assert.match(prompt.system, /项目自定义说明：/);
+  assert.match(prompt.system, /Payment Engine 主要用于订单/);
+  assert.match(prompt.system, /WaaS 主要用于钱包/);
+});
 
 test('rerank: lang_boost +0.30 applied when chunk.lang == query_lang', () => {
   const out = rerank(

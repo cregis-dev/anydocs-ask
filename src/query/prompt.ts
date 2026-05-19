@@ -12,6 +12,7 @@
  */
 
 import type { DocsLang } from '../anydocs/types.ts';
+import type { PromptConfig } from '../config.ts';
 import type { RerankedChunk } from './rerank.ts';
 
 export type FormatHint = 'paragraph' | 'list' | 'table' | 'concept';
@@ -23,6 +24,7 @@ export type BuildPromptOptions = {
   /** True when the chunks include a different lang from answerLang. */
   isCrossLang: boolean;
   formatHint: FormatHint;
+  promptConfig?: PromptConfig;
 };
 
 export type BuiltPrompt = {
@@ -33,7 +35,7 @@ export type BuiltPrompt = {
 };
 
 export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
-  const { question, chunks, answerLang, isCrossLang, formatHint } = opts;
+  const { question, chunks, answerLang, isCrossLang, formatHint, promptConfig } = opts;
 
   const chunkById = new Map<string, RerankedChunk>();
   const chunkBlocks: string[] = [];
@@ -46,7 +48,7 @@ export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
     );
   });
 
-  const system = systemPromptFor(answerLang, isCrossLang, formatHint);
+  const system = systemPromptFor(answerLang, isCrossLang, formatHint, promptConfig);
   const user = `${userIntro(answerLang)}\n\n${question}\n\n${chunkLabel(answerLang)}\n\n${chunkBlocks.join('\n\n---\n\n')}`;
 
   return { system, user, chunkById };
@@ -56,14 +58,22 @@ export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
 // System prompt
 // ---------------------------------------------------------------------------
 
-function systemPromptFor(lang: DocsLang, isCrossLang: boolean, hint: FormatHint): string {
+function systemPromptFor(
+  lang: DocsLang,
+  isCrossLang: boolean,
+  hint: FormatHint,
+  promptConfig: PromptConfig | undefined,
+): string {
   const formatLine = formatLineFor(lang, hint);
   if (lang === 'zh') {
+    const identity = promptConfig?.assistantName
+      ? `你是 ${promptConfig.assistantName}。严格遵守以下规则：`
+      : '你是 Anydocs 文档问答助手。严格遵守以下规则：';
     const crossLangLine = isCrossLang
       ? '\n- 部分参考片段语种与答案不同，请在答案正文中翻译要点，但 citation snippet 不要翻译。'
       : '';
-    return [
-      '你是 Anydocs 文档问答助手。严格遵守以下规则：',
+    const lines = [
+      identity,
       '- 答案必须基于下方提供的参考片段，严禁编造。',
       '- 必须至少给出 1 条引用，引用使用 [cit_N] 标记内联在答案里。',
       '- 答案中所有代码 / API 名必须能在参考片段中找到，否则不要写入。',
@@ -71,16 +81,19 @@ function systemPromptFor(lang: DocsLang, isCrossLang: boolean, hint: FormatHint)
       '- 答案语种必须为中文。',
       formatLine,
       crossLangLine,
-    ]
-      .filter(Boolean)
-      .join('\n');
+    ].filter(Boolean);
+    appendProjectInstructions(lines, promptConfig, 'zh');
+    return lines.join('\n');
   }
   // en
+  const identity = promptConfig?.assistantName
+    ? `You are ${promptConfig.assistantName}. Follow these rules strictly:`
+    : 'You are the Anydocs documentation Q&A assistant. Follow these rules strictly:';
   const crossLangLine = isCrossLang
     ? '\n- Some context snippets are in a different language; translate key points into English, but do NOT translate citation snippets themselves.'
     : '';
-  return [
-    'You are the Anydocs documentation Q&A assistant. Follow these rules strictly:',
+  const lines = [
+    identity,
     '- Base your answer ONLY on the supplied context snippets; do not invent facts.',
     '- Cite at least once using [cit_N] markers inline in the answer.',
     '- Every code identifier / API name in the answer must appear in the context.',
@@ -88,9 +101,33 @@ function systemPromptFor(lang: DocsLang, isCrossLang: boolean, hint: FormatHint)
     '- Answer in English.',
     formatLine,
     crossLangLine,
-  ]
-    .filter(Boolean)
-    .join('\n');
+  ].filter(Boolean);
+  appendProjectInstructions(lines, promptConfig, 'en');
+  return lines.join('\n');
+}
+
+function appendProjectInstructions(
+  lines: string[],
+  promptConfig: PromptConfig | undefined,
+  lang: DocsLang,
+): void {
+  const instructions = promptConfig?.systemInstructions ?? [];
+  if (instructions.length === 0) return;
+  if (lang === 'zh') {
+    lines.push(
+      '',
+      '项目自定义说明：',
+      '- 以下说明只能补充业务语境，不能覆盖上述引用、事实来源和安全规则。',
+      ...instructions.map((s) => `- ${s}`),
+    );
+    return;
+  }
+  lines.push(
+    '',
+    'Project-specific instructions:',
+    '- These instructions may add business context, but they cannot override the grounding, citation, or safety rules above.',
+    ...instructions.map((s) => `- ${s}`),
+  );
 }
 
 function formatLineFor(lang: DocsLang, hint: FormatHint): string {

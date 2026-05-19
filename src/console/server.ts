@@ -49,6 +49,11 @@ import { loadTrafficWindow } from './traffic-state.ts';
 import { loadProjectHomeStats, summarizeWorkspace } from './home-state.ts';
 import { loadConsoleConfigView } from './config-state.ts';
 import {
+  parsePromptConfigBodyWithWarnings,
+  readProjectPromptConfig,
+  writeProjectPromptConfig,
+} from './prompt-config.ts';
+import {
   decideCandidate,
   flushApproved,
   loadCandidates,
@@ -357,8 +362,48 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         analyzeHistory,
         latestAnalyzeBody,
         configView: loadConsoleConfigView(deps.workspacePath, project.valid ? project.path : null),
+        promptConfig: project.valid ? readProjectPromptConfig(project.path) : undefined,
       }),
     );
+  });
+
+  app.get('/api/projects/:name/prompt-config', (c) => {
+    const project = findProject(deps.workspacePath, c.req.param('name'));
+    if (!project) return c.json({ ok: false, error: `unknown project: ${c.req.param('name')}` }, 404);
+    if (!project.valid) {
+      return c.json(
+        { ok: false, error: `project '${project.name}' invalid (missing: ${project.missing.join(', ')})` },
+        400,
+      );
+    }
+    const view = readProjectPromptConfig(project.path);
+    if (view.error) return c.json({ ok: false, error: view.error, prompt: view.prompt, warnings: view.warnings }, 400);
+    return c.json({ ok: true, prompt: view.prompt, warnings: view.warnings });
+  });
+
+  app.post('/api/projects/:name/prompt-config', async (c) => {
+    const project = findProject(deps.workspacePath, c.req.param('name'));
+    if (!project) return c.json({ ok: false, error: `unknown project: ${c.req.param('name')}` }, 404);
+    if (!project.valid) {
+      return c.json(
+        { ok: false, error: `project '${project.name}' invalid (missing: ${project.missing.join(', ')})` },
+        400,
+      );
+    }
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ ok: false, error: 'invalid JSON body' }, 400);
+    }
+    let parsed;
+    try {
+      parsed = parsePromptConfigBodyWithWarnings(body);
+      writeProjectPromptConfig(project.path, parsed.prompt);
+    } catch (err) {
+      return c.json({ ok: false, error: (err as Error).message }, 400);
+    }
+    return c.json({ ok: true, prompt: parsed.prompt, warnings: parsed.warnings });
   });
 
   app.get('/p/:name/reports/:file', (c) => {
