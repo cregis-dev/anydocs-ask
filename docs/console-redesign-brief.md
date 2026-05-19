@@ -39,15 +39,18 @@ The console talks to a workspace at `~/anydocs-ask-runtime/` that contains one o
 
 ---
 
-## 3. Five canonical user journeys
+## 3. Six canonical user journeys
 
 The redesign must make these feel natural and obvious. Numbered in priority order.
+
+> **2026-05-20 update**: Journey 6 added to formalize the "console as feedback-loop studio" direction. Detailed scope lives in [RFC 0002](./rfcs/0002-console-studio-feedback-loop.md).
 
 1. **First-time setup**: I just installed anydocs-ask. I want to add my docs folder, see it index, and ask my first question.
 2. **Dogfood a question**: I made some doc edits. I want to ask 3 questions, see if citations are right, and iterate.
 3. **Run an eval**: My golden case set has 30 questions. I want to run them all, see R@5 / Citation / Answer-rule pass rates, and compare against the last report.
 4. **Manage the golden case set**: I want to generate candidate questions from doc structure, approve/reject them one by one, and flush approved ones into the active case set.
 5. **Diagnose live traffic**: My Reader integration is in production. I want to see this week's confidence / latency / error trends and drill into the worst requests.
+6. **Close the feedback loop** *(new — RFC 0002)*: I want to see which queries failed last week (no_citations / low confidence / 👎), see them clustered against my nav tree, drill from a failed query straight to the doc page that should have answered it, and one-click draft a golden case from a real failure. Cross-journey jumps make every other journey a starting point for this one.
 
 ---
 
@@ -278,6 +281,40 @@ For each page, deliver **all listed states**. Each "state" is a separate mockup.
 3. **Has runs + recent analyze report**: All sections visible. Analyze report rendered inline.
 4. **Concerning metrics**: P95 latency > 3s and error rate > 5% — show warn / err tinting on the KPI cards.
 
+### 7.5.1 Project page — Feedback tab (`#feedback`) *(new — RFC 0002)*
+
+**Role**: Surface real-traffic feedback (👍 / 👎 / implicit signals from RFC 0001) so the author can see which queries failed and where docs have gaps. The studio-mode home of Journey 6.
+
+**Layout**: three columns. Left KPI rail (240px) · middle list (flex) · right detail drawer (toggled, 480px).
+
+**Left KPI rail**:
+- This-week tiles: `feedback count · explicit % · mean confidence · non-answer rate · A+ candidates`
+- 7-day mini sparklines per tile
+- Last refresh timestamp + manual refresh button
+- A+ candidates tile is empty-stated until 0.3 (PRD §10.3 threshold ≥ 50)
+
+**Middle list**:
+- Filter chips: `all | 👍 | 👎 | implicit | no_citations | semantic_check_failed` (last two reflect RFC 0005 once landed)
+- Each row: question (truncated) · rating badge · confidence pill · breadcrumb of the dominant nav subtree · timestamp
+- Sort: newest first; secondary sort by confidence ascending available
+
+**Right detail drawer** (opens on row click):
+- Question (full) + answer (rendered markdown)
+- Retrieval trace (collapsible): top-8 chunks with rank, RRF score, boost breakdown
+- Feedback state + signal source (β explicit / γ implicit / curated)
+- *(0.3+)* Semantic check verdict per citation, from RFC 0005
+- Action chips (cross-journey jump pattern from §8):
+  - `add to golden cases →` (prefills Golden Workshop pending list — Q5 in RFC 0002 = must go through the prefill form, not direct flush)
+  - `jump to doc section →` (focuses Index tab on the matching nav node)
+  - `replay in ask →` (prefills Ask tab textarea, dry-run by default)
+
+**States**:
+1. **Disabled** (`feedback.enabled=false`): tab is shown disabled with one-line explainer + link to config drawer.
+2. **Enabled, no data yet**: KPI tiles show `—`; middle list shows a friendly empty state explaining how β / γ signals arrive.
+3. **Enabled, < 10 records**: KPIs visible; middle list with onboarding banner above ("collecting signal — A+ clustering unlocks at 50, see PRD §10.3").
+4. **Enabled, healthy traffic**: full layout; KPI tiles with sparklines; list populated.
+5. **A+ ready (0.3+)**: A+ candidates tile populated; clicking it switches the middle list to "by cluster" grouping (each row = a failure cluster + sample queries + suggested nav node). Not in 0.2 scope.
+
 ### 7.6 Config drawer (right-side slide-over, triggered by ⚙)
 
 **Role**: Read-only summary of effective env / config files. Author-comfort: "what credentials is this actually using?"
@@ -319,6 +356,7 @@ These appear across multiple pages — please design them as reusable components
 - **Citation chip** (numbered circle, used in answer text and citation list)
 - **Detail / disclosure** (collapsed-by-default `<details>`)
 - **Diff indicator** (`+0.05` green / `-0.03` red / `±0.00` mute — used in eval metric deltas)
+- **Cross-journey jump** *(new — RFC 0002)*: a small action chip with a forward arrow (e.g. `add to golden cases →`, `jump to doc section →`). Used in Traffic rows, Feedback tab drawer, and Eval case rows to take the user from one journey into another with the target item pre-focused. Must keep the originating tab in browser history so back-button returns.
 
 ---
 
@@ -365,6 +403,10 @@ design-output/
     traffic-empty.html
     traffic-active.html
     traffic-with-analyze.html
+    feedback-disabled.html
+    feedback-empty.html
+    feedback-onboarding.html
+    feedback-active.html
     config-drawer.html
     report-viewer.html
   components.html              ← isolated showcase of every component variant

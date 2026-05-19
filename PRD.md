@@ -326,12 +326,91 @@ v1 落库的反馈数据是后续多个版本的基础设施：
 
 ---
 
-## 10. 后续版本展望（非承诺）
+## 10. 后续版本展望（修订版）
 
-| 版本 | 重点 |
-|---|---|
-| **v1.5** | **QA 反馈回路（见 §11，已立项）** / 实体表 + query expansion / 意图分流 + 摘要层 / 流式响应 / Ollama 选项 |
-| **v2** | DSPy 编译（基于 v1 数据）/ MCP 接口 / 多项目托管 |
+> 修订日期：2026-05-20
+> 触发：0.1.0 发布（2026-05-16）+ 1–2 家外部 design partner 真实使用反馈 + 0.2 反馈回路 RFC 起草过程中的认识更新
+> 旧版（2026-05-04）保留在 git 历史；以本节为准
+
+### 10.1 叙事演进：从"文档问答"到"文档质量闭环"
+
+v1 立项时的叙事是"读懂目录结构的文档问答服务"。0.1.0 上线、首批 design partner 接入后，**ask 工程的差异化定位收敛为"文档质量的闭环引擎"**：
+
+- **本体能力**（检索 + 生成）在 0.1.0 已接近这个语料下结构化方案的上限（RRF + 实体注入 + 结构化 rerank），继续做边际优化性价比快速下降；
+- **真正不可复制的位**：anydocs 全家桶同时拥有"文档内容"和"用户问答行为"两侧数据，能形成"提问 → 命中分析 → 文档盲点 → 作者补文档 → 答案改善"的完整闭环；竞品（chat widget 单点 / 文档平台单点）都做不到；
+- **后续 roadmap 围绕"闭环"这条主线编排**。本体的检索/生成增强（reranker、query 重写等）只服务于闭环数据所揭示的真实瓶颈，**不做先验优化**。
+
+### 10.2 版本路线（按时间顺序）
+
+| 版本 | 期 | 主线 | 关联 RFC |
+|---|---|---|---|
+| **0.2**（进行中） | 2026-05–06 | 反馈回路管道铺通 + Console → Studio 升级、反馈闭环主线 | [RFC 0001](./docs/rfcs/0001-feedback-loop-v0.2.md) / [RFC 0002](./docs/rfcs/0002-console-studio-feedback-loop.md) |
+| **0.3** | 2026-06–07 | A+ 失败查询诊断（≥ 50 条反馈门槛）+ Citation 语义校验 | [RFC 0005](./docs/rfcs/0005-citation-semantic-validation.md) |
+| **0.4** | 2026-07–08 | 多轮对话 + Session 重写 + 嵌入式 Ask Widget 设计 | [RFC 0003](./docs/rfcs/0003-multi-turn-session-rewrite.md) / [RFC 0004](./docs/rfcs/0004-embedded-ask-widget.md) |
+| **0.5+** | 2026-Q3+ | 嵌入式 Widget 落地 + Reranker 数据驱动启用（≥ 200 条门槛后 shadow → 上线） | RFC 0004 落地 / RFC 待立项 |
+| **远期**（v1.x / v2） | 待定 | DSPy 编译、MCP 接口、Ollama 选项、意图分流 + 摘要层、实体表 + query expansion 整合为"query 理解增强"线 | 待立项 |
+
+### 10.3 0.3 启动阈值（拆分）
+
+原 RFC 0001 §2.2 用 "≥ 200 条反馈" 单一阈值卡所有 0.3 项启动；本次修订**拆分为按子项**的阈值，避免诊断功能被 reranker 的样本量要求拖累：
+
+| 0.3 子项 | 启动阈值 | 理由 |
+|---|---|---|
+| **A+ 失败查询诊断** | ≥ 50 条反馈 + ≥ 4 周观察窗 | 诊断是聚类 + 建议生成，对样本质量敏感性高于样本量；50 条已能形成 ≥ 3 个有效语义簇；早 1–2 周给作者补文档信号 |
+| **Reranker A 路径加权** | ≥ 200 条反馈 + 显式负反馈 ≥ 30 条 | 调权需统计显著的负样本；门槛沿用原值；额外补充"必须先 shadow 模式跑两周对比"的前置（详见 §10.5） |
+| **Citation 语义校验** | 无反馈量门槛 | 独立功能，作为反馈回路精度增强项；与 A+ 并行推进 |
+
+### 10.4 Console → Studio 的定位升级（0.2 内）
+
+[console-redesign-brief](./docs/console-redesign-brief.md) 已经把 Console 定位为主要接口，列了 5 个 user journey。本次修订**新增 Journey 6 "Close the feedback loop"**（详见 RFC 0002），并把它升级为 Studio 化叙事的主轴：
+
+- 反馈数据可视化（no_citations / 低 confidence / 显式 👎）
+- 失败 query 聚类视图，挂回 nav 子树
+- 文档章节页显示"过去 7 天用户在附近问的问题 + 命中率"
+- Journey 之间的穿透式跳转（traffic → golden case / eval 回归 → trace + 文档章节）
+
+这条主线落地后，design partner 续费理由从"AI 问答可用"升级为"它让我知道文档要改哪里"，是 ask 工程从工具到产品的拐点。
+
+### 10.5 Reranker 的"先量再加"原则（0.5+）
+
+原 PRD §11 / RFC 0001 默认 0.3 起就加 reranker。本次修订把 reranker 启用做了三档前置：
+
+1. **前置 1**：运行 `anydocs-ask eval` 量出现有 top-K 精度基线（用 golden 集，不需要反馈数据）；
+2. **前置 2**：满足 §10.3 表中 reranker 阈值（≥ 200 条反馈 + ≥ 30 条显式负）后，**shadow 模式**接入 `bge-reranker-v2-m3`，跑 ≥ 2 周对比当前结构化 rerank 与 cross-encoder rerank 的 top-8 差异；
+3. **前置 3**：shadow 数据证明胜过现状（precision@8 提升 ≥ 0.05 或失败 query 命中率提升明显）才合并到生产路径。
+
+不满足三档之一不强行上线 reranker。
+
+### 10.6 不再保留 / 优先级下调
+
+- ~~"v1.5 / v2" 标号~~ → 改用 0.x 语义化版本号，对齐 [CHANGELOG.md](./CHANGELOG.md)
+- "Ollama 选项" → **保留但移到 0.5+**，触发条件改为"有 design partner 明确提出本地 LLM 诉求"（多见于企业内网客户）
+- "意图分流 + 摘要层" → **保留但移到 0.5+**，触发条件改为"0.3 诊断数据显示 vocabulary mismatch 失败率 ≥ 阈值"，与"实体表 + query expansion"合并为单一"query 理解增强"线
+- "流式响应" → 已在 0.1.0 实现（`/v1/ask/stream` SSE），从展望清单移除
+- "DSPy 编译" → 远期目标不变，依赖 0.3 数据积累 ≥ 6 个月 + 200+ 审过 QA
+
+### 10.7 新增明确不做（与 §11.2 红线一致）
+
+延续 §11.2 已锁的四条红线，本次再追加四条：
+
+- **审过的 QA 进检索** ❌（§11.2 决策 ① 沿用）
+- **自动写回 anydocs `pages/*.json`** ❌（§11.2 决策 ② 沿用）
+- **内置 Web 审核面板** ❌（§11.2 决策 ③ 沿用；Studio 化也保持"审核走文件 + git"）
+- **强制 anydocs Reader 全量改造** ❌（§11.2 决策 ④ 沿用）
+- **Reranker 凭直觉添加** ❌（必须满足 §10.5 三档前置）
+- **多轮对话以"Reader 多轮 UI"为优先支撑场景** ❌（Reader 多轮在 anydocs 主仓评估；ask 工程的 multi-turn 设计**优先服务于嵌入式产品 UI**，避免被 Reader UI 排期拖累，详见 RFC 0003）
+- **嵌入式 Widget 自动抓取宿主 DOM 数据** ❌（数据上下文必须由宿主显式 `setContext()` 注入，避免隐私边界争议，详见 RFC 0004）
+- **用小模型替代大 LLM 生成最终答案** ❌（grounding 保真度风险；小模型只承担 query 重写 / citation 校验 / 可答性判断等辅助角色，详见 RFC 0003 / 0005）
+
+### 10.8 RFC 索引
+
+| RFC | 标题 | 状态 | 关联版本 |
+|---|---|---|---|
+| [0001](./docs/rfcs/0001-feedback-loop-v0.2.md) | 0.2 反馈回路落地 | Draft 起草中 | 0.2 |
+| [0002](./docs/rfcs/0002-console-studio-feedback-loop.md) | Console → Studio：反馈闭环主线 | Draft 起草中 | 0.2 |
+| [0003](./docs/rfcs/0003-multi-turn-session-rewrite.md) | 多轮对话 + Session 重写 | Draft 起草中 | 0.4 |
+| [0004](./docs/rfcs/0004-embedded-ask-widget.md) | 嵌入式 Ask Widget | Draft 起草中 | 0.4 设计 / 0.5+ 落地 |
+| [0005](./docs/rfcs/0005-citation-semantic-validation.md) | Citation 语义校验（小模型层） | Draft 起草中 | 0.3 |
 
 ---
 
@@ -427,7 +506,9 @@ anydocs-ask feedback diagnose  # 触发 A+ 失败查询诊断
 | 4 | inbox/ 文件审过 import 后自动归档（作者侧零额外操作） | 集成测试 |
 | 5 | feedback 关闭时（默认）查询管线行为与 v1 等价（无副作用） | 回归测试 |
 
-> 阈值在 v1 上线、积累 ≥ 200 条 feedback 后基于真实数据校准；当前仅占位。
+> 阈值在 v1 上线后基于真实数据校准。
+>
+> **2026-05-20 修订**：原"≥ 200 条 feedback"单一启动阈值已按子项拆分——A+ 失败查询诊断 ≥ 50 条即可启动，Reranker 加权仍需 ≥ 200 条 + 显式负 ≥ 30 条，Citation 语义校验无反馈量门槛。详见 §10.3。
 
 ---
 
