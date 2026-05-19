@@ -423,6 +423,14 @@ function askCard(live: boolean): Html {
             <div id="ask-clarify" class="banner warn" hidden style="margin: 0 0 var(--s-3);"></div>
             <div id="ask-answer-md" class="md"></div>
             <div id="ask-error" class="banner err" hidden style="margin: 0;"></div>
+            <div id="ask-feedback" hidden style="margin-top: var(--s-4); padding-top: var(--s-3); border-top: 1px solid var(--bd-soft); display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap;">
+              <span style="font-size: var(--t-12); color: var(--fg-soft);">这个回答怎么样？</span>
+              <div style="display: flex; gap: var(--s-2);">
+                <button id="ask-fb-up" class="btn sm" type="button" aria-label="答得好" title="答得好">👍 答得好</button>
+                <button id="ask-fb-down" class="btn sm" type="button" aria-label="答得差" title="答得差">👎 答得差</button>
+              </div>
+              <span id="ask-fb-status" class="status" style="margin-left: auto;"></span>
+            </div>
           </div>
           <div id="tab-citations" class="tab-panel" data-tab="citations" hidden>
             <div id="ask-cite-list" class="cite-list"></div>
@@ -1315,6 +1323,69 @@ function renderAnswer(body) {
     errEl.hidden = false;
     errEl.innerHTML = '<span class="b-ico"><svg><use href="#i-err"/></svg></span><div class="b-bd"><div class="b-ti">unexpected response shape</div></div>';
   }
+
+  // Only an answer with an answer_id can be rated. clarify/error responses
+  // have no answer_id; dry_run answers do (the child mints one even when it
+  // doesn't write to the answers table — POST /v1/ask/feedback is permissive
+  // about missing FK, just loses the retrieved snapshot).
+  setFeedbackBar(body && body.type === 'answer' && typeof body.answer_id === 'string' ? body.answer_id : null);
+}
+
+// ---------------------------------------------------------------------
+// Ask feedback bar — 👍 / 👎 buttons under the answer.
+// ---------------------------------------------------------------------
+let lastAnswerId = null;
+
+function setFeedbackBar(answerId) {
+  const bar = $('ask-feedback');
+  const up = $('ask-fb-up');
+  const down = $('ask-fb-down');
+  const status = $('ask-fb-status');
+  if (!bar || !up || !down || !status) return;
+  lastAnswerId = answerId;
+  if (!answerId) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  up.disabled = false;
+  down.disabled = false;
+  up.classList.remove('primary');
+  down.classList.remove('danger');
+  status.textContent = '';
+  status.className = 'status';
+}
+
+async function sendFeedback(rating, btn) {
+  if (!lastAnswerId) return;
+  const up = $('ask-fb-up');
+  const down = $('ask-fb-down');
+  const status = $('ask-fb-status');
+  if (!up || !down || !status) return;
+  up.disabled = true;
+  down.disabled = true;
+  status.textContent = '提交中…';
+  status.className = 'status';
+  try {
+    const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answer_id: lastAnswerId, rating }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || (body && body.ok === false)) {
+      throw new Error((body && body.error) || ('http ' + res.status));
+    }
+    if (rating > 0) btn.classList.add('primary');
+    else btn.classList.add('danger');
+    status.textContent = '已提交 · 感谢反馈';
+    status.className = 'status ok';
+  } catch (err) {
+    up.disabled = false;
+    down.disabled = false;
+    status.textContent = '提交失败：' + (err && err.message ? err.message : err);
+    status.className = 'status err';
+  }
 }
 
 // in_page_path is "<headingId>/p[N]" (section chunk) or "p[N]" (page-top
@@ -1557,11 +1628,114 @@ if (askQ) {
   });
 }
 
+const fbUp = $('ask-fb-up');
+const fbDown = $('ask-fb-down');
+if (fbUp) fbUp.addEventListener('click', () => sendFeedback(1, fbUp));
+if (fbDown) fbDown.addEventListener('click', () => sendFeedback(-1, fbDown));
+
 // Re-ask handler — Traffic tab fills #ask-q and switches to Ask tab.
 window.addEventListener('console:reask', (e) => {
   if (askQ && e.detail && e.detail.query) askQ.value = e.detail.query;
   setProjectTab('ask');
 });
+
+// ---------------------------------------------------------------------
+// Editable anydocs.ask.json in the Config drawer.
+// View mode shows the SSR-rendered formatted JSON; "edit" reveals a raw
+// textarea + Save. Save POSTs full file content; server re-validates with
+// the same schema as loadConfig().
+// ---------------------------------------------------------------------
+(function wireAskConfigEditor() {
+  const section = $('ask-config-section');
+  const editBtn = $('ask-config-edit-btn');
+  const viewMode = $('ask-config-view');
+  const editForm = $('ask-config-edit');
+  const cancelBtn = $('ask-config-cancel');
+  const textarea = $('ask-config-textarea');
+  const status = $('ask-config-status');
+  const warnings = $('ask-config-warnings');
+  if (!section || !editBtn || !viewMode || !editForm || !cancelBtn || !textarea || !status) return;
+
+  const originalText = textarea.value;
+
+  function toEdit() {
+    viewMode.hidden = true;
+    editForm.hidden = false;
+    editBtn.hidden = true;
+    status.textContent = '';
+    status.className = 'status';
+    if (warnings) { warnings.hidden = true; warnings.innerHTML = ''; }
+  }
+  function toView() {
+    viewMode.hidden = false;
+    editForm.hidden = true;
+    editBtn.hidden = false;
+    // Restore textarea to last-saved (= SSR) content so cancel really cancels.
+    textarea.value = originalText;
+  }
+
+  function renderWarnings(list) {
+    if (!warnings) return;
+    if (!Array.isArray(list) || list.length === 0) {
+      warnings.hidden = true;
+      warnings.innerHTML = '';
+      return;
+    }
+    warnings.hidden = false;
+    let h = '<span class="b-ico"><svg><use href="#i-alert"/></svg></span><div class="b-bd">';
+    h += '<div class="b-ti">' + list.length + ' warning' + (list.length > 1 ? 's' : '') + '</div>';
+    h += '<ul style="margin: 6px 0 0 18px; padding: 0;">';
+    list.forEach((w) => { h += '<li>' + escapeHtml(String(w)) + '</li>'; });
+    h += '</ul></div>';
+    warnings.innerHTML = h;
+  }
+
+  editBtn.addEventListener('click', toEdit);
+  cancelBtn.addEventListener('click', toView);
+
+  editForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!cfg.name) {
+      status.textContent = '保存失败：no project context';
+      status.className = 'status err';
+      return;
+    }
+    const rawText = textarea.value;
+    const expectedMtimeISO = section.dataset.mtime || '';
+    status.textContent = '保存中…';
+    status.className = 'status';
+    renderWarnings(null);
+    try {
+      const payload = expectedMtimeISO ? { rawText, expectedMtimeISO } : { rawText };
+      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/ask-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || (body && body.ok === false)) {
+        const msg = (body && body.error) || ('http ' + res.status);
+        if (res.status === 409 && body && body.currentMtimeISO) {
+          section.dataset.mtime = body.currentMtimeISO;
+          status.textContent = '文件已被其它进程修改：' + msg + '（刷新页面后重试）';
+        } else {
+          status.textContent = '保存失败：' + msg;
+        }
+        status.className = 'status err';
+        return;
+      }
+      if (body && body.mtimeISO) section.dataset.mtime = body.mtimeISO;
+      renderWarnings(body && body.warnings);
+      const wCount = Array.isArray(body && body.warnings) ? body.warnings.length : 0;
+      const okText = wCount > 0 ? '已保存（' + wCount + ' 条警告）' : '已保存';
+      status.textContent = okText + ' · 重启项目生效';
+      status.className = 'status ok';
+    } catch (err) {
+      status.textContent = '网络错误：' + (err && err.message ? err.message : err);
+      status.className = 'status err';
+    }
+  });
+})();
 
 // Autostart
 if (cfg.valid && cfg.autostart && !cfg.live) {

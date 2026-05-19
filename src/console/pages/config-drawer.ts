@@ -1,10 +1,16 @@
 /**
- * Read-only Config drawer — ARCH §17.3.9.
+ * Config drawer — ARCH §17.3.9.
  *
  * Right-side slide-over (opened via the header gear). Shows the layered
  * config sources in precedence order: workspace .env · workspace
  * .console.json · per-project anydocs.ask.json. Secrets are partially
  * redacted to first 4 + last 4 chars.
+ *
+ * `.env` and `.console.json` are read-only (workspace-scoped — editing
+ * here would affect every project / require a console restart). The
+ * per-project `anydocs.ask.json` is editable (toggle via the "edit"
+ * button in its header) — save POSTs to /api/projects/:name/ask-config,
+ * which re-validates with the same schema as loadConfig().
  *
  * NOTE: the design handoff's "Runtime workspace" section (console runtime
  * path / registry size / cache size) is intentionally omitted — that's the
@@ -33,9 +39,9 @@ export function renderConfigDrawer(vm: ConfigViewModel): Html {
         <div class="banner info" style="margin: 0 0 var(--s-5);">
           <span class="b-ico"><svg><use href="#i-info"/></svg></span>
           <div class="b-bd">
-            <div class="b-ti">Read-only view</div>
-            <div class="b-de">Sources are merged top-to-bottom — later files override earlier ones.
-              Secrets show as <code class="inline">abcd…wxyz</code>. Edit the source files and refresh to apply.</div>
+            <div class="b-ti">Sources merged top-to-bottom</div>
+            <div class="b-de">Later files override earlier ones. <b>.env</b> / <b>.console.json</b> are workspace-scoped (read-only here — edit the file).
+              <b>anydocs.ask.json</b> is per-project and editable.</div>
           </div>
         </div>
 
@@ -53,15 +59,7 @@ export function renderConfigDrawer(vm: ConfigViewModel): Html {
           render: (data) => jsonBlock(data),
         })}
 
-        ${vm.projectAskJson
-          ? section({
-              title: 'anydocs.ask.json',
-              sub: '— project',
-              tag: 'override',
-              file: vm.projectAskJson,
-              render: (data) => jsonBlock(data),
-            })
-          : ''}
+        ${vm.projectAskJson ? editableProjectAskSection(vm.projectAskJson) : ''}
 
         <div style="font-size: var(--t-12); color: var(--fg-mute); padding-top: var(--s-3); border-top: 1px solid var(--bd-soft); line-height: 1.55;">
           <b>How redaction works:</b> values whose key matches
@@ -69,6 +67,55 @@ export function renderConfigDrawer(vm: ConfigViewModel): Html {
         </div>
       </div>
     </aside>
+  `;
+}
+
+function editableProjectAskSection(file: ConfigFile<unknown>): Html {
+  const mtime = file.mtimeISO ? file.mtimeISO.slice(0, 16).replace('T', ' ') : null;
+  const tagText = file.exists ? 'override' : 'override · not present';
+  const rawText = file.rawText ?? '';
+  // mtime sentinel for the optimistic-concurrency guard on POST.
+  const mtimeAttr = file.mtimeISO ?? '';
+  return html`
+    <section class="drawer-sec" id="ask-config-section" data-mtime="${mtimeAttr}">
+      <div class="drawer-sec-hd">
+        <h3>anydocs.ask.json <span class="sub" style="font-weight: 400; color: var(--fg-mute);">— project</span></h3>
+        <span class="tag">${tagText}</span>
+        <span class="path">${file.path}${mtime ? ` · mtime ${mtime}` : ''}</span>
+        <button id="ask-config-edit-btn" class="btn sm" type="button" style="margin-left: auto;">edit</button>
+      </div>
+
+      <div id="ask-config-view">
+        ${!file.exists
+          ? html`<p class="miss">No file present. Defaults apply. Click <b>edit</b> to create one.</p>`
+          : file.error
+            ? html`<p style="color: var(--err); font-size: var(--t-13);">${file.error}</p>${file.rawText ? html`<pre class="block">${file.rawText}</pre>` : ''}`
+            : file.content !== null
+              ? jsonBlock(file.content)
+              : html`<p class="miss">empty</p>`}
+      </div>
+
+      <form id="ask-config-edit" hidden style="display: flex; flex-direction: column; gap: var(--s-2);">
+        <textarea
+          id="ask-config-textarea"
+          class="textarea mono"
+          rows="16"
+          spellcheck="false"
+          style="font-size: var(--t-12); line-height: 1.5;"
+          placeholder='{\n  "llm": { "model": "claude-opus-4-7" }\n}'
+        >${rawText}</textarea>
+        <div id="ask-config-warnings" class="banner warn" hidden style="margin: 0;"></div>
+        <div style="display: flex; align-items: center; gap: var(--s-3);">
+          <button id="ask-config-save" class="btn sm primary" type="submit">save</button>
+          <button id="ask-config-cancel" class="btn sm" type="button">cancel</button>
+          <span id="ask-config-status" class="status"></span>
+        </div>
+        <p class="muted" style="font-size: 11.5px; margin: 0;">
+          Saving validates with the same schema as <code class="inline">loadConfig()</code>.
+          Restart a running project to apply.
+        </p>
+      </form>
+    </section>
   `;
 }
 

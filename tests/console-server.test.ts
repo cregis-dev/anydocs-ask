@@ -429,6 +429,272 @@ test('POST /api/projects/:name/prompt-config returns normalized prompt plus warn
   }
 });
 
+// ---------------------------------------------------------------------------
+// anydocs.ask.json full-file read/write (Config drawer editable mode)
+// ---------------------------------------------------------------------------
+
+test('GET /api/projects/:name/ask-config: returns rawText + mtimeISO when file exists', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const projectRoot = join(ws, 'projects', 'docs-zh');
+    const original = JSON.stringify({ llm: { model: 'claude-opus-4-7' } }, null, 2);
+    await fs.writeFile(join(projectRoot, 'anydocs.ask.json'), original);
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/ask-config');
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      exists: boolean;
+      rawText: string | null;
+      mtimeISO: string | null;
+      warnings: string[];
+      parseError: string | null;
+    };
+    assert.equal(body.ok, true);
+    assert.equal(body.exists, true);
+    assert.equal(body.rawText, original);
+    assert.equal(typeof body.mtimeISO, 'string');
+    assert.equal(body.parseError, null);
+    assert.deepEqual(body.warnings, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/ask-config: exists=false when file missing', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/ask-config');
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { exists: boolean; rawText: string | null };
+    assert.equal(body.exists, false);
+    assert.equal(body.rawText, null);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/ask-config: writes file + preserves trailing newline', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const projectRoot = join(ws, 'projects', 'docs-zh');
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const rawText = JSON.stringify(
+      { llm: { provider: 'anthropic', model: 'claude-opus-4-7' }, retrieval: { topK: 12 } },
+      null,
+      2,
+    );
+    const res = await app.request('/api/projects/docs-zh/ask-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rawText }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean; warnings: string[]; mtimeISO: string };
+    assert.equal(body.ok, true);
+    assert.deepEqual(body.warnings, []);
+    const onDisk = await fs.readFile(join(projectRoot, 'anydocs.ask.json'), 'utf8');
+    assert.equal(onDisk, rawText + '\n', 'file ends with a single newline');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/ask-config: 400 on malformed JSON', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/ask-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rawText: '{ "llm": ' }),
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    assert.equal(body.ok, false);
+    assert.match(body.error, /malformed JSON/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/ask-config: 409 when expectedMtimeISO is stale', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const projectRoot = join(ws, 'projects', 'docs-zh');
+    await fs.writeFile(join(projectRoot, 'anydocs.ask.json'), '{}\n');
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/ask-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rawText: '{}',
+        expectedMtimeISO: '1999-01-01T00:00:00.000Z',
+      }),
+    });
+    assert.equal(res.status, 409);
+    const body = (await res.json()) as { ok: boolean; error: string; currentMtimeISO: string };
+    assert.equal(body.ok, false);
+    assert.match(body.error, /changed on disk/);
+    assert.equal(typeof body.currentMtimeISO, 'string');
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Ask feedback proxy (β button → /v1/ask/feedback)
+// ---------------------------------------------------------------------------
+
+test('POST /api/projects/:name/feedback: 502 when child not running', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answer_id: 'ans_x', rating: 1 }),
+    });
+    assert.equal(res.status, 502);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    assert.equal(body.ok, false);
+    assert.match(body.error, /not running/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/feedback: forwards body verbatim to child /v1/ask/feedback', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const registry = makeRegistry();
+    await registry.start('docs-zh');
+    const calls: ProxyCall[] = [];
+    const fetchFn = makeStubFetch(calls, () => ({ status: 200, body: { ok: true } }));
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry,
+      fetchFn,
+    });
+    const payload = JSON.stringify({ answer_id: 'ans_x', rating: -1, tags: ['thumbs-down'] });
+    const res = await app.request('/api/projects/docs-zh/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean };
+    assert.equal(body.ok, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.url, 'http://127.0.0.1:4101/v1/ask/feedback');
+    assert.equal(calls[0]!.method, 'POST');
+    assert.equal(calls[0]!.body, payload);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/feedback: 404 unknown project', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/nope/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(res.status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Config drawer renders editable anydocs.ask.json section', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const projectRoot = join(ws, 'projects', 'docs-zh');
+    await fs.writeFile(
+      join(projectRoot, 'anydocs.ask.json'),
+      JSON.stringify({ llm: { model: 'claude-opus-4-7' } }, null, 2),
+    );
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    assert.match(body, /id="ask-config-section"/);
+    assert.match(body, /id="ask-config-edit-btn"/);
+    assert.match(body, /id="ask-config-textarea"/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: live project renders Ask feedback bar (👍/👎)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const registry = makeRegistry();
+    await registry.start('docs-zh');
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry,
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    assert.match(body, /id="ask-feedback"/);
+    assert.match(body, /id="ask-fb-up"/);
+    assert.match(body, /id="ask-fb-down"/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('GET /p/:name: bootstrap <script type=module> parses + carries citeSectionLabel helper', async () => {
   // The project page emits BOOTSTRAP_SCRIPT inside a TS template literal.
   // PR #16 shipped a syntax error there (a stray real newline from an
