@@ -181,6 +181,11 @@ const DOTTED_CONFIG_KEY_RE = /^[a-zA-Z][a-zA-Z0-9]+(\.[a-zA-Z][a-zA-Z0-9]+)+$/;
 // layouts without naming a specific file; refusing to whitelist them
 // produced ⚠ on legitimate directory references.
 const DIRECTORY_PATH_RE = /^[a-zA-Z0-9_-]+(\/[a-zA-Z0-9_-]+)*\/$/;
+// API / URL paths leading with a slash and carrying ≥2 segments
+// (`/v1/models`, `/api/v2/users`, `/health/ready`). These are URL paths
+// authored without a scheme — URL_SCHEME_RE only covers fully qualified
+// URLs. Codex round-9 surfaced this on Hermes API examples.
+const API_PATH_RE = /^\/[a-zA-Z0-9_-]+(\/[a-zA-Z0-9_.:~-]+)+\/?$/;
 
 /**
  * Identifiers that look "obviously technical" enough that we trust them
@@ -198,6 +203,7 @@ function isClearlyTechnicalIdentifier(body: string): boolean {
   if (WELL_KNOWN_FILE_NAMES.has(body.toLowerCase())) return true;
   if (DOTTED_CONFIG_KEY_RE.test(body)) return true;
   if (DIRECTORY_PATH_RE.test(body)) return true;
+  if (API_PATH_RE.test(body)) return true;
   return false;
 }
 

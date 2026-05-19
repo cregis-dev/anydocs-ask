@@ -85,6 +85,51 @@ test('langFromScopeId: unsupported lang prefix returns null', () => {
 });
 
 // ---------------------------------------------------------------------------
+// extractEntityTerms (answer.ts internal helper)
+// ---------------------------------------------------------------------------
+
+import { extractEntityTerms } from '../src/query/answer.ts';
+
+test('extractEntityTerms: comma-separated triple', () => {
+  assert.deepEqual(
+    extractEntityTerms('how do sessions, checkpoints, and memory work in Hermes?'),
+    ['sessions', 'checkpoints', 'memory'],
+  );
+});
+
+test('extractEntityTerms: Chinese ideographic comma is a separator', () => {
+  assert.deepEqual(
+    extractEntityTerms('sessions、checkpoints、memory 有什么区别？'),
+    ['sessions', 'checkpoints', 'memory'],
+  );
+});
+
+test('extractEntityTerms: `and`/`or` conjunctions also count as separators', () => {
+  assert.deepEqual(
+    extractEntityTerms('compare sessions and checkpoints and memory in Hermes'),
+    ['sessions', 'checkpoints', 'memory'],
+  );
+});
+
+test('extractEntityTerms: single comma is below the gate -> undefined', () => {
+  assert.equal(extractEntityTerms('what is the difference between X and Y?'), undefined);
+});
+
+test('extractEntityTerms: segment-leading stop words are walked past', () => {
+  // "how do sessions, ..." — `how`/`do` are stop / too short; we walk to `sessions`.
+  const out = extractEntityTerms('how do sessions, and checkpoints')!;
+  assert.ok(out.includes('sessions'));
+  assert.ok(out.includes('checkpoints'));
+});
+
+test('extractEntityTerms: question verbs (compare/show/list) are not entities', () => {
+  // Without the verb stop-words, the first segment of "compare X and Y..."
+  // would yield `compare` as the entity instead of `X`.
+  const out = extractEntityTerms('compare sessions and checkpoints and memory')!;
+  assert.ok(!out.includes('compare'));
+});
+
+// ---------------------------------------------------------------------------
 // sanitize.ts
 // ---------------------------------------------------------------------------
 
@@ -728,6 +773,22 @@ test('postprocess: 2-segment dotted config key passes when softened-match hits',
   const out = postprocess({
     answerLang: 'en',
     rawAnswer: 'Configure `build.outputDir` to change the destination [cit_1]',
+    chunkById,
+  });
+  assert.doesNotMatch(out.answer_md, /⚠/);
+});
+
+// API / URL paths without a scheme (`/v1/models`, `/api/v2/users`) are
+// direct-allow. Codex round-9 caught Hermes API docs ⚠'ing these because
+// the `://` URL_SCHEME_RE branch needed a full scheme.
+test('postprocess: leading-slash API paths are direct-allow', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'unrelated chunk' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer:
+      'Call `/v1/models`, `/api/v2/users`, and `/health/ready` to verify [cit_1]',
     chunkById,
   });
   assert.doesNotMatch(out.answer_md, /⚠/);

@@ -65,7 +65,7 @@ const RRF_K = 60;
  */
 const VECTOR_OVERFETCH = 4;
 /** Max BM25 hits per entity term for the per-entity injection pass. */
-const ENTITY_K = 3;
+const ENTITY_K = 5;
 /**
  * Synthetic rank assigned to entity-injected chunks that aren't in the main
  * path pool. Rank perPathK (20) gives them 1/(RRF_K+20) ≈ 0.0125, well below
@@ -120,11 +120,12 @@ export function retrieveWithTrace(
   });
 
   // Per-entity injection: for each concept term, run a narrow BM25 pass and
-  // add any new chunk_ids at ENTITY_INJECT_RANK. This ensures that a query
-  // like "sessions, checkpoints, and memory" always has chunks from each named
-  // concept in the pool, even if the combined OR query ranked them past
-  // perPathK. New IDs only — chunks already in the pool keep their existing
-  // (higher) score.
+  // either add new chunk_ids at ENTITY_INJECT_RANK score, or stack the
+  // injection score on top of the existing RRF score so that chunks present
+  // in the pool but ranked behind perPathK get pulled forward. This is the
+  // codex-round-8 follow-up — without the additive path, a `checkpoints`
+  // chunk that the combined OR query already retrieved (but ranked at #21+)
+  // stayed below the prompt-context cap and the LLM never saw it.
   const entityInjected = new Set<number>();
   if (opts.entityTerms?.length) {
     const entityInjectScore = 1 / (RRF_K + ENTITY_INJECT_RANK);
@@ -133,9 +134,12 @@ export function retrieveWithTrace(
       if (!sanitized) continue;
       const entityIds = bm25Path(db, sanitized, ENTITY_K, opts.scopeId);
       for (const id of entityIds) {
-        if (!rrfScores.has(id)) {
+        const cur = rrfScores.get(id);
+        if (cur === undefined) {
           rrfScores.set(id, entityInjectScore);
           entityInjected.add(id);
+        } else {
+          rrfScores.set(id, cur + entityInjectScore);
         }
       }
     }
