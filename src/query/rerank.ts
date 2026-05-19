@@ -45,12 +45,22 @@ export type RerankOptions = {
   currentSubtreeRoot: string | null;
   /** Raw user query — used for title_match_boost. */
   query: string;
+  /**
+   * Entity terms extracted from a multi-entity query (e.g.
+   * ["sessions", "checkpoints", "memory"]). When set, any chunk whose
+   * page_id or page_title contains an entity term gets an entity_match_boost
+   * — this rescues compare-style queries where a `compare` verb dominates
+   * vector ranking and entity-specific pages get pushed below the
+   * prompt-context cap. Codex round-9 follow-up.
+   */
+  entityTerms?: string[];
 };
 
 const LANG_BOOST = 0.3;
 const SAME_SUBTREE_BOOST = 0.2;
 const NAV_INDEX_BOOST = 0.1;
 const TITLE_MATCH_BOOST = 0.3;
+const ENTITY_MATCH_BOOST = 0.2;
 /** Page titles below this length don't get title-match boost — they're too
  *  short to discriminate ("TTS", "Skins", common 3-4 letter tokens). */
 const TITLE_MATCH_MIN_LEN = 5;
@@ -60,6 +70,7 @@ export function rerank(
   opts: RerankOptions,
 ): RerankedChunk[] {
   const titleMatchedPageIds = computeTitleMatches(chunks, opts.query);
+  const entityMatchedPageIds = computeEntityMatches(chunks, opts.entityTerms);
   return chunks
     .map((c) => {
       const langBoost = c.lang === opts.queryLang ? LANG_BOOST : 0;
@@ -69,11 +80,43 @@ export function rerank(
           : 0;
       const navIdxBoost = navIndexBoostFor(c.nav_index);
       const titleBoost = titleMatchedPageIds.has(c.page_id) ? TITLE_MATCH_BOOST : 0;
+      const entityBoost = entityMatchedPageIds.has(c.page_id) ? ENTITY_MATCH_BOOST : 0;
       const final_score =
-        c.rrf_score * (1 + langBoost + sameSubtreeBoost + navIdxBoost + titleBoost);
+        c.rrf_score * (1 + langBoost + sameSubtreeBoost + navIdxBoost + titleBoost + entityBoost);
       return { ...c, final_score };
     })
     .sort((a, b) => b.final_score - a.final_score);
+}
+
+/**
+ * Set of page_ids whose page_id or page_title contains any of the supplied
+ * entity terms. Used to rescue compare-style multi-entity queries where the
+ * verb (`compare`/`vs`) dominates vector ranking and entity-specific pages
+ * drop below the prompt cap. Page-id match is the strongest signal
+ * (anydocs page ids encode authoring intent), title match the next.
+ */
+function computeEntityMatches(
+  chunks: RetrievedChunk[],
+  entityTerms: string[] | undefined,
+): Set<string> {
+  if (!entityTerms || entityTerms.length === 0) return new Set();
+  const out = new Set<string>();
+  const termsLower = entityTerms.map((t) => t.toLowerCase());
+  const seen = new Set<string>();
+  for (const c of chunks) {
+    if (seen.has(c.page_id)) continue;
+    seen.add(c.page_id);
+    const idLower = c.page_id.toLowerCase();
+    const titleLower = (c.page_title ?? '').toLowerCase();
+    for (const term of termsLower) {
+      if (term.length < 3) continue;
+      if (idLower.includes(term) || titleLower.includes(term)) {
+        out.add(c.page_id);
+        break;
+      }
+    }
+  }
+  return out;
 }
 
 function navIndexBoostFor(navIndex: number | null): number {

@@ -31,6 +31,12 @@ const NON_WS = /\S/;
 const NAV_LANG_PREFIX = /^nav:([a-z]+)\.json:/i;
 
 const ZH_RATIO_THRESHOLD = 0.15;
+// Absolute CJK count threshold. Even when the ratio is under 15%, 3+ CJK
+// chars by themselves are enough signal that the query is Chinese — without
+// this, long queries with heavy English technical tokens like
+// `anydocs.config.json 如何配置 site.theme.id` (4 CJK / ~37 chars ≈ 11%)
+// got mis-detected as 'en'. Codex round-9 case.
+const ZH_MIN_CJK_CHARS = 3;
 
 /**
  * Pure text-only detector. Used directly when neither scope_id nor a known
@@ -45,6 +51,7 @@ export function detectLangFromText(text: string): DocsLang {
     if (CJK_UNIFIED.test(ch) || CJK_PUNCT.test(ch)) cjk++;
   }
   if (total === 0) return 'en'; // empty / whitespace-only → benign default
+  if (cjk >= ZH_MIN_CJK_CHARS) return 'zh';
   return cjk / total >= ZH_RATIO_THRESHOLD ? 'zh' : 'en';
 }
 

@@ -181,6 +181,19 @@ const DOTTED_CONFIG_KEY_RE = /^[a-zA-Z][a-zA-Z0-9]+(\.[a-zA-Z][a-zA-Z0-9]+)+$/;
 // layouts without naming a specific file; refusing to whitelist them
 // produced ⚠ on legitimate directory references.
 const DIRECTORY_PATH_RE = /^[a-zA-Z0-9_-]+(\/[a-zA-Z0-9_-]+)*\/$/;
+// API / URL paths leading with a slash and carrying ≥2 segments
+// (`/v1/models`, `/api/v2/users`, `/health/ready`). These are URL paths
+// authored without a scheme — URL_SCHEME_RE only covers fully qualified
+// URLs. Codex round-9 surfaced this on Hermes API examples.
+const API_PATH_RE = /^\/[a-zA-Z0-9_-]+(\/[a-zA-Z0-9_.:~-]+)+\/?$/;
+// Dash-connected compound names (≥2 segments, each ≥2 alphanumeric chars).
+// Theme names (`blueprint-review`, `classic-docs`, `atlas-docs`), npm
+// packages, docker image names, model identifiers (`bge-m3`) all fit this
+// shape. Codex round-10 caught these still ⚠'ing 1/8 times under softened
+// haystack match (the relevant chunk wasn't always retrieved). Promote to
+// direct-allow — fabricated dash-names are rare and readers can verify
+// against the docs anyway.
+const DASH_NAME_RE = /^[A-Za-z][A-Za-z0-9]+(-[A-Za-z0-9][A-Za-z0-9]*)+$/;
 
 /**
  * Identifiers that look "obviously technical" enough that we trust them
@@ -198,6 +211,8 @@ function isClearlyTechnicalIdentifier(body: string): boolean {
   if (WELL_KNOWN_FILE_NAMES.has(body.toLowerCase())) return true;
   if (DOTTED_CONFIG_KEY_RE.test(body)) return true;
   if (DIRECTORY_PATH_RE.test(body)) return true;
+  if (API_PATH_RE.test(body)) return true;
+  if (DASH_NAME_RE.test(body)) return true;
   return false;
 }
 
@@ -299,6 +314,10 @@ function filterHallucinations(answer: string, contextTexts: string[]): string {
   let haystackSoftened: string | null = null;
 
   const inHaystack = (body: string): boolean => {
+    // Citation marker itself wrapped in backticks (`[cit_3]`) — LLM
+    // formatting quirk, not a code identifier. Direct allow before any
+    // other check.
+    if (/^\[cit_\d+\]$/.test(body)) return true;
     // Prose sentences wrapped in backticks (e.g. table-cell descriptions
     // the LLM accidentally formatted as inline code). These aren't code-
     // identifier claims — running the hallucination check on them produces
