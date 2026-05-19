@@ -260,13 +260,38 @@ test('ask: no_citations on first call → retry → answer on second call', asyn
     const { result, trace } = await askWithTrace(ctx, { question: 'how to configure' });
     assert.equal(result.type, 'answer', 'retry should recover into a citable answer');
     assert.equal(call, 2, 'exactly one retry');
-    assert.equal(trace.citation_retry_attempted, true);
+    assert.equal(trace.citation_retry_count, 1);
   } finally {
     await ctx.cleanup();
   }
 });
 
-test('ask: retry also fails → still no_citations, trace flag set', async () => {
+// Codex round-11: bumped MAX_CITATION_RETRIES 1 → 2. When the first retry
+// also fails but the second one succeeds, the caller still sees a normal
+// answer; trace reflects both attempts.
+test('ask: first two calls fail → second retry recovers → answer', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'en', { id: 'a', title: 'Config', body: 'System configuration docs.' });
+    await writeNav(root, 'en', { version: 1, items: [{ type: 'page', pageId: 'a' }] });
+  });
+  try {
+    let call = 0;
+    ctx.llm.setResponder((input) => {
+      call += 1;
+      if (call <= 2) return 'No citation marker on this attempt.';
+      const markers = input.userPrompt.match(/\[cit_\d+\]/g) ?? [];
+      return `Configured ${markers[0] ?? ''}.`;
+    });
+    const { result, trace } = await askWithTrace(ctx, { question: 'how to configure' });
+    assert.equal(result.type, 'answer');
+    assert.equal(call, 3, 'one initial + two retries');
+    assert.equal(trace.citation_retry_count, 2);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: all retries fail → still no_citations, trace count = MAX', async () => {
   const ctx = await bootstrap(async (root) => {
     await writePage(root, 'en', { id: 'a', title: 'Config', body: 'System configuration docs.' });
     await writeNav(root, 'en', { version: 1, items: [{ type: 'page', pageId: 'a' }] });
@@ -275,14 +300,14 @@ test('ask: retry also fails → still no_citations, trace flag set', async () =>
     let call = 0;
     ctx.llm.setResponder(() => {
       call += 1;
-      return 'Still no citation marker on either attempt.';
+      return 'Still no citation marker on any attempt.';
     });
     const { result, trace } = await askWithTrace(ctx, { question: 'how to configure' });
     assert.equal(result.type, 'error');
     if (result.type !== 'error') return;
     assert.equal(result.code, 'no_citations');
-    assert.equal(call, 2, 'one initial + one retry');
-    assert.equal(trace.citation_retry_attempted, true);
+    assert.equal(call, 3, 'one initial + two retries');
+    assert.equal(trace.citation_retry_count, 2);
     // detail stays stable across the retry path (user-facing message is the
     // same, retry just adds a chance to recover before surfacing the error).
     assert.equal(result.detail, 'LLM response contained no valid citations');
@@ -291,7 +316,7 @@ test('ask: retry also fails → still no_citations, trace flag set', async () =>
   }
 });
 
-test('ask: first call succeeds → no retry, trace flag is false', async () => {
+test('ask: first call succeeds → no retry, trace count is 0', async () => {
   const ctx = await bootstrap(async (root) => {
     await writePage(root, 'en', { id: 'a', title: 'Config', body: 'System configuration docs.' });
     await writeNav(root, 'en', { version: 1, items: [{ type: 'page', pageId: 'a' }] });
@@ -306,7 +331,7 @@ test('ask: first call succeeds → no retry, trace flag is false', async () => {
     const { result, trace } = await askWithTrace(ctx, { question: 'how to configure' });
     assert.equal(result.type, 'answer');
     assert.equal(call, 1, 'no retry on first-call success');
-    assert.equal(trace.citation_retry_attempted, false);
+    assert.equal(trace.citation_retry_count, 0);
   } finally {
     await ctx.cleanup();
   }
