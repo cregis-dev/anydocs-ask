@@ -321,6 +321,43 @@ test('GET /p/:name: renders Settings tab with prompt + LLM + retrieval + feedbac
   }
 });
 
+test('GET /p/:name: Settings tab does NOT prefill fields absent from anydocs.ask.json', async () => {
+  // Regression: prefilling DEFAULTS made unset fields look like real values;
+  // a Save would then pin them into the file and shadow env overrides
+  // (e.g. ANTHROPIC_MODEL). Verify unset fields render with empty value
+  // attribute + the default as placeholder.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const projectRoot = join(ws, 'projects', 'docs-zh');
+    // File explicitly sets ONLY llm.model. Everything else absent.
+    await fs.writeFile(
+      join(projectRoot, 'anydocs.ask.json'),
+      JSON.stringify({ llm: { model: 'claude-opus-4-7' } }, null, 2),
+    );
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+
+    // Present field → prefilled as value
+    assert.match(body, /data-cfg-path="llm\.model"[^>]*value="claude-opus-4-7"/);
+    // Absent field (llm.apiKeyEnv) → empty value but placeholder shows default
+    assert.match(
+      body,
+      /data-cfg-path="llm\.apiKeyEnv"[^>]*value=""[^>]*placeholder="ANTHROPIC_API_KEY"/,
+    );
+    // Absent retrieval.topK → empty value with placeholder "20"
+    assert.match(body, /data-cfg-path="retrieval\.topK"[^>]*value=""[^>]*placeholder="20"/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('GET /p/:name: Settings tab surfaces validation warnings inline', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {

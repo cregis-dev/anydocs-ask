@@ -418,6 +418,31 @@ h1.page-title .sub { font-weight: 400; color: var(--fg-soft); font-size: var(--t
 }
 .check input { accent-color: var(--accent); }
 
+/* toggle switch — used for the Ask dry-run / persist switch */
+.toggle {
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  font-size: var(--t-13); color: var(--fg-soft); cursor: pointer; user-select: none;
+}
+.toggle > input { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
+.toggle-track {
+  position: relative; display: inline-block; flex-shrink: 0;
+  width: 30px; height: 18px; border-radius: 999px;
+  background: var(--bd-strong);
+  transition: background 0.15s ease;
+}
+.toggle-thumb {
+  position: absolute; top: 2px; left: 2px;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0,0,0,.2);
+  transition: left 0.15s ease;
+}
+.toggle > input:checked + .toggle-track { background: var(--accent); }
+.toggle > input:checked + .toggle-track .toggle-thumb { left: 14px; }
+.toggle > input:focus-visible + .toggle-track {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
 /* tabs ------------------------------------------------------------- */
 .tabs { display: flex; align-items: center; gap: var(--s-1); border-bottom: 1px solid var(--bd); margin-bottom: var(--s-5); }
 .tab {
@@ -546,11 +571,29 @@ pre code { background: transparent; padding: 0; border: 0; }
 .cite-item {
   display: grid; grid-template-columns: 28px 1fr; gap: var(--s-2);
   padding: var(--s-3) var(--s-3); border-top: 1px solid var(--bd-soft);
+  transition: background 0.6s ease;
 }
 .cite-item:first-child { border-top: 0; }
+.cite-item.flash { background: var(--accent-soft); transition: background 0s; }
 .cite-item .cite { align-self: start; }
 .cite-item .meta { font-size: var(--t-12); color: var(--fg-mute); margin-bottom: 4px; font-family: var(--font-mono); }
 .cite-item .snippet { font-size: var(--t-13); color: var(--fg-soft); margin-top: 4px; line-height: 1.55; word-break: break-word; }
+
+/* inline citation refs in answer body — replaces raw [cit_N] markers */
+.cite-refs { font-size: 0.78em; line-height: 0; white-space: nowrap; }
+.cite-refs .cite-ref + .cite-ref { margin-left: 2px; }
+.cite-ref {
+  display: inline-block; padding: 0 5px; border-radius: 4px;
+  background: var(--accent-soft); color: var(--accent);
+  font-weight: 600; font-family: var(--font-mono); font-size: 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  text-decoration: none; line-height: 1.5; vertical-align: 1px;
+  cursor: pointer;
+}
+.cite-ref:hover {
+  background: color-mix(in srgb, var(--accent) 18%, var(--accent-soft));
+  text-decoration: none;
+}
 
 /* citation list (eval-style) -------------------------------------- */
 .cit { display: flex; gap: var(--s-3); padding: var(--s-3) 0; border-top: 1px solid var(--bd-soft); }
