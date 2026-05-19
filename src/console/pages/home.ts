@@ -11,8 +11,6 @@ import type { ProjectListing } from '../../workspace.ts';
 import type { RegisteredProcess } from '../registry.ts';
 import { layout, type Html, type NavContext } from './layout.ts';
 import type { ProjectHomeStats, WorkspaceSummary } from '../home-state.ts';
-import { renderConfigDrawer } from './config-drawer.ts';
-import type { ConfigViewModel } from '../config-state.ts';
 
 export type HomeViewModel = {
   consolePort: number;
@@ -21,7 +19,6 @@ export type HomeViewModel = {
   running: Map<string, RegisteredProcess>;
   projectStats?: Map<string, ProjectHomeStats>;
   workspaceSummary?: WorkspaceSummary;
-  configView?: ConfigViewModel;
 };
 
 export function renderHome(vm: HomeViewModel): Html {
@@ -54,7 +51,6 @@ export function renderHome(vm: HomeViewModel): Html {
     title: 'projects',
     body,
     nav,
-    ...(vm.configView ? { configDrawer: renderConfigDrawer(vm.configView) } : {}),
   });
 }
 

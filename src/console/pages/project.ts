@@ -30,9 +30,8 @@ import type { TrafficWindow } from '../traffic-state.ts';
 import type { CandidateSnapshot } from '../golden-workshop-state.ts';
 import type { AnalyzeReportSummary } from '../eval-state.ts';
 import { computeNextAction, type NextAction } from '../next-action.ts';
-import { renderConfigDrawer } from './config-drawer.ts';
-import type { ConfigViewModel } from '../config-state.ts';
-import type { PromptConfigView } from '../prompt-config.ts';
+import type { AskConfigView } from '../ask-config-state.ts';
+import type { ResolvedConfig } from '../../config.ts';
 
 export type ProjectViewModel = {
   project: ProjectListing;
@@ -44,11 +43,10 @@ export type ProjectViewModel = {
   latestEvalReportBody?: string | null;
   indexSnapshot?: IndexSnapshot;
   trafficWindow?: TrafficWindow;
-  configView?: ConfigViewModel;
   candidates?: CandidateSnapshot;
   analyzeHistory?: AnalyzeReportSummary[];
   latestAnalyzeBody?: string | null;
-  promptConfig?: PromptConfigView;
+  askConfig?: AskConfigView;
 };
 
 export function renderProject(vm: ProjectViewModel): Html {
@@ -88,7 +86,6 @@ export function renderProject(vm: ProjectViewModel): Html {
     title: project.name,
     body,
     nav: vm.nav,
-    ...(vm.configView ? { configDrawer: renderConfigDrawer(vm.configView) } : {}),
   });
 }
 
@@ -277,6 +274,9 @@ function renderTabs(): Html {
       <a class="tab" role="tab" data-project-tab="traffic" href="#traffic" aria-selected="false">
         <svg style="width:14px;height:14px;opacity:.7;"><use href="#i-chart"/></svg> Traffic
       </a>
+      <a class="tab" role="tab" data-project-tab="settings" href="#settings" aria-selected="false">
+        <svg style="width:14px;height:14px;opacity:.7;"><use href="#i-gear"/></svg> Settings
+      </a>
     </nav>
   `;
 }
@@ -288,7 +288,6 @@ function tabPanels(
 ): Html {
   return html`
     <div id="ptab-ask" class="tab-panel" data-project-tab="ask">
-      ${promptConfigCard(vm.promptConfig)}
       ${askCard(live)}
     </div>
     <div id="ptab-index" class="tab-panel" data-project-tab="index" hidden>
@@ -316,67 +315,257 @@ function tabPanels(
           })
         : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">Traffic status unavailable.</p></div></div>`}
     </div>
+    <div id="ptab-settings" class="tab-panel" data-project-tab="settings" hidden>
+      ${vm.askConfig
+        ? renderSettingsTab(vm.askConfig)
+        : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">Settings unavailable (invalid project).</p></div></div>`}
+    </div>
   `;
 }
 
-function promptConfigCard(view: PromptConfigView | undefined): Html {
-  const prompt = view?.prompt ?? { assistantName: null, systemInstructions: [] };
-  const instructions = prompt.systemInstructions.join('\n');
-  const warnings = view?.warnings ?? [];
-  const status = view?.error
-    ? html`<span id="prompt-config-status" class="status err">${view.error}</span>`
-    : html`<span id="prompt-config-status" class="status">ready</span>`;
-  const warningBlock = warnings.length > 0
-    ? html`
-      <div id="prompt-config-warnings" class="banner warn" style="margin: 0 0 var(--s-4);">
-        <span class="b-ico"><svg><use href="#i-alert"/></svg></span>
-        <div class="b-bd">
-          <div class="b-ti">Prompt warnings</div>
-          <ul style="margin: var(--s-1) 0 0; padding-left: var(--s-5);">
-            ${warnings.map((w) => html`<li style="font-size: var(--t-12); color: var(--warn);">${w}</li>`)}
-          </ul>
-        </div>
-      </div>
-    `
-    : html`<div id="prompt-config-warnings" class="banner warn" hidden style="margin: 0 0 var(--s-4);"></div>`;
+// ---------------------------------------------------------------------------
+// Settings tab — structured form over the full anydocs.ask.json schema.
+// Every section in ResolvedConfig (prompt / llm / embedding / retrieval /
+// clarify / indexing / runs / analyze / feedback / server) gets a group of
+// fields; the bootstrap script reads `data-cfg-path` + `data-cfg-type` on
+// each control to reconstruct the JSON object on submit. Save POSTs the
+// full file to /api/projects/:name/ask-config — server re-validates.
+// ---------------------------------------------------------------------------
+
+function renderSettingsTab(view: AskConfigView): Html {
+  const c = view.config;
+  const mtimeAttr = view.mtimeISO ?? '';
+  const mtimeText = view.mtimeISO ? `mtime ${view.mtimeISO.slice(0, 16).replace('T', ' ')}` : 'new file';
+  const exists = view.exists;
+
   return html`
-    <section class="card" style="margin-bottom: var(--s-4);">
+    <section class="card">
       <div class="card-hd">
-        <h2><svg style="width: 14px; height: 14px;"><use href="#i-gear"/></svg> Prompt settings</h2>
-        <span class="meta">anydocs.ask.json</span>
+        <h2><svg style="width: 14px; height: 14px;"><use href="#i-gear"/></svg> Settings</h2>
+        <span class="meta">${view.path} · ${exists ? mtimeText : 'new file'}</span>
       </div>
-      <form id="prompt-config-form" class="card-bd">
+      <form id="settings-form" class="card-bd" data-mtime="${mtimeAttr}">
+        ${view.parseError
+          ? html`
+            <div class="banner err" style="margin: 0 0 var(--s-4);">
+              <span class="b-ico"><svg><use href="#i-err"/></svg></span>
+              <div class="b-bd">
+                <div class="b-ti">Config file failed to parse</div>
+                <div class="b-de">${view.parseError}. Saving will overwrite the file with the form values below (which start from defaults).</div>
+              </div>
+            </div>`
+          : ''}
+        <div id="settings-warnings" class="banner warn" ${view.warnings.length === 0 ? 'hidden' : ''} style="margin: 0 0 var(--s-4);">
+          ${view.warnings.length > 0
+            ? html`
+              <span class="b-ico"><svg><use href="#i-alert"/></svg></span>
+              <div class="b-bd">
+                <div class="b-ti">${view.warnings.length} validation warning${view.warnings.length > 1 ? 's' : ''}</div>
+                <ul style="margin: var(--s-1) 0 0; padding-left: var(--s-5);">
+                  ${view.warnings.map((w) => html`<li style="font-size: var(--t-12);">${w}</li>`)}
+                </ul>
+              </div>`
+            : ''}
+        </div>
+
         <p class="muted" style="font-size: var(--t-13); margin: 0 0 var(--s-4);">
-          Add project-specific assistant identity and domain guidance. Core grounding and citation rules still apply.
-          Restart a running project after saving.
+          Project-scoped configuration written to <code class="inline">anydocs.ask.json</code>. Restart the project after saving for runtime changes (LLM / embedding / retrieval) to take effect.
         </p>
-        ${warningBlock}
-        <label style="display: grid; gap: var(--s-2); margin-bottom: var(--s-3);">
-          <span style="font-size: var(--t-12); color: var(--fg-soft); font-weight: 600;">Assistant name</span>
-          <input
-            id="prompt-assistant-name"
-            class="input"
-            type="text"
-            value="${prompt.assistantName ?? ''}"
-            placeholder="e.g. Cregis AI Assistant"
-          />
-        </label>
-        <label style="display: grid; gap: var(--s-2);">
-          <span style="font-size: var(--t-12); color: var(--fg-soft); font-weight: 600;">System instructions</span>
-          <textarea
-            id="prompt-system-instructions"
-            class="textarea"
-            rows="5"
-            placeholder="One instruction per line. Example: Payment Engine is for orders, checkout, callbacks, and payment status."
-          >${instructions}</textarea>
-        </label>
-        <div style="display: flex; align-items: center; gap: var(--s-3); margin-top: var(--s-3);">
-          <button id="prompt-config-save" class="btn sm primary" type="submit">save prompt</button>
-          ${status}
+
+        ${promptSection(c)}
+        ${llmSection(c)}
+        ${embeddingSection(c)}
+        ${retrievalSection(c)}
+        ${clarifySection(c)}
+        ${feedbackSection(c)}
+        ${indexingSection(c)}
+        ${runsSection(c)}
+        ${analyzeSection(c)}
+        ${serverSection(c)}
+
+        <div style="position: sticky; bottom: 0; background: var(--bg-elev); padding: var(--s-3) 0; border-top: 1px solid var(--bd-soft); margin-top: var(--s-5); display: flex; align-items: center; gap: var(--s-3);">
+          <button id="settings-save" class="btn primary" type="submit">save</button>
+          <button id="settings-reset" class="btn" type="button">reset</button>
+          <span id="settings-status" class="status"></span>
         </div>
       </form>
     </section>
   `;
+}
+
+// ---- Section groups -----------------------------------------------------
+
+function fieldGroup(title: string, hint: string, fields: Html[]): Html {
+  return html`
+    <fieldset style="border: 1px solid var(--bd-soft); border-radius: 6px; padding: var(--s-3) var(--s-4) var(--s-4); margin: 0 0 var(--s-4);">
+      <legend style="padding: 0 var(--s-2); font-weight: 600; font-size: var(--t-13); color: var(--fg);">${title}</legend>
+      ${hint
+        ? html`<p class="muted" style="font-size: 11.5px; margin: 0 0 var(--s-3);">${hint}</p>`
+        : ''}
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-3) var(--s-4);">
+        ${fields}
+      </div>
+    </fieldset>
+  `;
+}
+
+function promptSection(c: ResolvedConfig): Html {
+  return fieldGroup('Prompt', 'Optional assistant identity + domain guidance layered onto the system prompt.', [
+    textField({ path: 'prompt.assistantName', label: 'Assistant name', value: c.prompt.assistantName, nullable: true, placeholder: 'e.g. Cregis AI Assistant', span: 2 }),
+    textareaField({ path: 'prompt.systemInstructions', label: 'System instructions (one per line)', value: c.prompt.systemInstructions, rows: 5, span: 2 }),
+  ]);
+}
+
+function llmSection(c: ResolvedConfig): Html {
+  return fieldGroup('LLM', 'Answer-generation model + API key env var.', [
+    selectField({ path: 'llm.provider', label: 'Provider', value: c.llm.provider, options: ['anthropic', 'openai', 'mock'] }),
+    textField({ path: 'llm.model', label: 'Model', value: c.llm.model }),
+    textField({ path: 'llm.apiKeyEnv', label: 'API key env var', value: c.llm.apiKeyEnv, hint: 'name of the env var holding the API key (the value never lives in the file)' }),
+  ]);
+}
+
+function embeddingSection(c: ResolvedConfig): Html {
+  return fieldGroup('Embedding', 'Local BGE-M3 for vector retrieval. Quantized = smaller / faster, full precision = slightly better recall.', [
+    selectField({ path: 'embedding.provider', label: 'Provider', value: c.embedding.provider, options: ['local'] }),
+    textField({ path: 'embedding.model', label: 'Model', value: c.embedding.model }),
+    textField({ path: 'embedding.cacheDir', label: 'Cache dir (absolute path)', value: c.embedding.cacheDir, nullable: true, placeholder: '(~/.cache/huggingface/anydocs-ask/transformers)', span: 2 }),
+    checkboxField({ path: 'embedding.preferQuantized', label: 'Prefer quantized weights', checked: c.embedding.preferQuantized }),
+    checkboxField({ path: 'embedding.allowSingleLangFallback', label: 'Allow single-lang fallback', checked: c.embedding.allowSingleLangFallback }),
+  ]);
+}
+
+function retrievalSection(c: ResolvedConfig): Html {
+  return fieldGroup('Retrieval', 'Vector + BM25 fusion / re-ranking knobs. Raise topK if the right page often misses the top-N.', [
+    intField({ path: 'retrieval.topK', label: 'topK', value: c.retrieval.topK, min: 1 }),
+    intField({ path: 'retrieval.rrfK', label: 'RRF k', value: c.retrieval.rrfK, min: 1 }),
+    floatField({ path: 'retrieval.rerankSameSubtreeBoost', label: 'Re-rank same-subtree boost', value: c.retrieval.rerankSameSubtreeBoost }),
+    floatField({ path: 'retrieval.navOrderBoost', label: 'Nav-order boost', value: c.retrieval.navOrderBoost }),
+    intField({ path: 'retrieval.maxChunksHardCap', label: 'Max chunks (hard cap)', value: c.retrieval.maxChunksHardCap, min: 1 }),
+  ]);
+}
+
+function clarifySection(c: ResolvedConfig): Html {
+  return fieldGroup('Clarify', 'Thresholds that decide when to ask a clarifying sub-tree question vs. answering directly.', [
+    floatField({ path: 'clarify.dominantThreshold', label: 'Dominant threshold', value: c.clarify.dominantThreshold }),
+    floatField({ path: 'clarify.ambiguousGap', label: 'Ambiguous gap', value: c.clarify.ambiguousGap }),
+  ]);
+}
+
+function feedbackSection(c: ResolvedConfig): Html {
+  return fieldGroup('Feedback', 'v1.5 feedback loop (PRD §11). Disabled by default; enable to start collecting β / γ signals.', [
+    checkboxField({ path: 'feedback.enabled', label: 'Enable feedback collection', checked: c.feedback.enabled, span: 2 }),
+    selectField({ path: 'feedback.implicitSignals', label: 'Implicit signals (γ)', value: c.feedback.implicitSignals, options: ['off', 'session-only', 'full'] }),
+    floatField({ path: 'feedback.rerankerWeight', label: 'Reranker weight (0.3 future)', value: c.feedback.rerankerWeight }),
+  ]);
+}
+
+function indexingSection(c: ResolvedConfig): Html {
+  return fieldGroup('Indexing', 'Chunk size + watch debounce for the local index.', [
+    intField({ path: 'indexing.chunkMaxTokens', label: 'Chunk max tokens', value: c.indexing.chunkMaxTokens, min: 1 }),
+    intField({ path: 'indexing.chunkHardCap', label: 'Chunk hard cap (tokens)', value: c.indexing.chunkHardCap, min: 1 }),
+    intField({ path: 'indexing.debounceMs', label: 'Watch debounce (ms)', value: c.indexing.debounceMs, min: 0 }),
+  ]);
+}
+
+function runsSection(c: ResolvedConfig): Html {
+  return fieldGroup('Runs', 'runs.jsonl ledger — rotated weekly. Truncate caps prevent huge prompts / answers from bloating the file.', [
+    checkboxField({ path: 'runs.enabled', label: 'Enable runs.jsonl', checked: c.runs.enabled, span: 2 }),
+    selectField({ path: 'runs.rotation', label: 'Rotation', value: c.runs.rotation, options: ['weekly'] }),
+    intField({ path: 'runs.truncateQueryChars', label: 'Truncate query (chars)', value: c.runs.truncateQueryChars, nullable: true, min: 1 }),
+    intField({ path: 'runs.truncateAnswerChars', label: 'Truncate answer (chars)', value: c.runs.truncateAnswerChars, nullable: true, min: 1 }),
+  ]);
+}
+
+function analyzeSection(c: ResolvedConfig): Html {
+  return fieldGroup('Analyze', 'Default knobs for the `analyze` CLI command.', [
+    intField({ path: 'analyze.lookbackDays', label: 'Lookback days', value: c.analyze.lookbackDays, min: 1 }),
+    intField({ path: 'analyze.latencyP95Threshold', label: 'Latency P95 threshold (ms)', value: c.analyze.latencyP95Threshold, min: 1 }),
+    floatField({ path: 'analyze.confidenceFloor', label: 'Confidence floor', value: c.analyze.confidenceFloor }),
+  ]);
+}
+
+function serverSection(c: ResolvedConfig): Html {
+  return fieldGroup('Server', 'HTTP server for /v1/ask. Edit cautiously — these affect how Reader clients reach the service.', [
+    textField({ path: 'server.host', label: 'Host', value: c.server.host }),
+    intField({ path: 'server.port', label: 'Port', value: c.server.port, min: 1 }),
+    textareaField({ path: 'server.cors.allowedOrigins', label: 'CORS allowed origins (one per line)', value: c.server.cors.allowedOrigins, rows: 3, span: 2 }),
+  ]);
+}
+
+// ---- Control helpers ---------------------------------------------------
+
+function fieldWrap(label: string, hint: string | undefined, span: number | undefined, control: Html): Html {
+  const styleAttr = span === 2 ? ' style="grid-column: 1 / -1;"' : '';
+  return html`
+    <label${raw(styleAttr)} style="${span === 2 ? 'grid-column: 1 / -1; ' : ''}display: grid; gap: var(--s-1);">
+      <span style="font-size: var(--t-12); color: var(--fg-soft); font-weight: 600;">${label}</span>
+      ${control}
+      ${hint ? html`<span class="muted" style="font-size: 11.5px;">${hint}</span>` : ''}
+    </label>
+  `;
+}
+
+function textField(args: { path: string; label: string; value: string | null; nullable?: boolean; placeholder?: string; hint?: string; span?: number }): Html {
+  const type = args.nullable ? 'stringOrNull' : 'string';
+  return fieldWrap(
+    args.label,
+    args.hint,
+    args.span,
+    html`<input class="input" type="text" data-cfg-path="${args.path}" data-cfg-type="${type}" value="${args.value ?? ''}" placeholder="${args.placeholder ?? ''}" />`,
+  );
+}
+
+function intField(args: { path: string; label: string; value: number | null; nullable?: boolean; min?: number; hint?: string; span?: number }): Html {
+  const type = args.nullable ? 'intOrNull' : 'int';
+  const minAttr = args.min !== undefined ? ` min="${args.min}"` : '';
+  return fieldWrap(
+    args.label,
+    args.hint,
+    args.span,
+    html`<input class="input" type="number" step="1"${raw(minAttr)} data-cfg-path="${args.path}" data-cfg-type="${type}" value="${args.value ?? ''}" />`,
+  );
+}
+
+function floatField(args: { path: string; label: string; value: number | null; nullable?: boolean; hint?: string; span?: number }): Html {
+  const type = args.nullable ? 'floatOrNull' : 'float';
+  return fieldWrap(
+    args.label,
+    args.hint,
+    args.span,
+    html`<input class="input" type="number" step="0.01" data-cfg-path="${args.path}" data-cfg-type="${type}" value="${args.value ?? ''}" />`,
+  );
+}
+
+function checkboxField(args: { path: string; label: string; checked: boolean; span?: number }): Html {
+  const styleAttr = args.span === 2 ? ' style="grid-column: 1 / -1;"' : '';
+  return html`
+    <label${raw(styleAttr)} class="check" style="${args.span === 2 ? 'grid-column: 1 / -1; ' : ''}display: flex; align-items: center; gap: var(--s-2); padding: var(--s-2) 0;">
+      <input type="checkbox" data-cfg-path="${args.path}" data-cfg-type="boolean" ${args.checked ? 'checked' : ''} />
+      <span style="font-size: var(--t-13);">${args.label}</span>
+    </label>
+  `;
+}
+
+function selectField(args: { path: string; label: string; value: string; options: string[]; hint?: string; span?: number }): Html {
+  return fieldWrap(
+    args.label,
+    args.hint,
+    args.span,
+    html`
+      <select class="input" data-cfg-path="${args.path}" data-cfg-type="string">
+        ${args.options.map((o) => html`<option value="${o}" ${o === args.value ? 'selected' : ''}>${o}</option>`)}
+      </select>
+    `,
+  );
+}
+
+function textareaField(args: { path: string; label: string; value: string[]; rows: number; hint?: string; span?: number }): Html {
+  return fieldWrap(
+    args.label,
+    args.hint,
+    args.span,
+    html`<textarea class="textarea" rows="${args.rows}" data-cfg-path="${args.path}" data-cfg-type="stringArray">${args.value.join('\n')}</textarea>`,
+  );
 }
 
 function askCard(live: boolean): Html {
@@ -1468,86 +1657,160 @@ function renderMeta(body, latencyMs, httpStatus) {
 const askBtn = $('btn-ask');
 const askQ = $('ask-q');
 const askStatus = $('ask-status');
-const promptForm = $('prompt-config-form');
-const promptAssistantName = $('prompt-assistant-name');
-const promptInstructions = $('prompt-system-instructions');
-const promptStatus = $('prompt-config-status');
-const promptWarnings = $('prompt-config-warnings');
 
-function renderPromptWarnings(warnings) {
-  if (!promptWarnings) return;
-  if (!Array.isArray(warnings) || warnings.length === 0) {
-    promptWarnings.hidden = true;
-    promptWarnings.textContent = '';
-    return;
+// ---------------------------------------------------------------------
+// Settings tab — structured form over anydocs.ask.json.
+// Each control carries data-cfg-path (dot path) + data-cfg-type
+// ('string' | 'stringOrNull' | 'int' | 'intOrNull' | 'float' |
+//  'floatOrNull' | 'boolean' | 'stringArray'); collectSettingsPayload
+// reads them all and rebuilds the nested JSON object, then POSTs to
+// /api/projects/:name/ask-config (which re-validates with the same
+// schema as loadConfig).
+// ---------------------------------------------------------------------
+function setPath(root, path, value) {
+  const parts = path.split('.');
+  let cur = root;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const k = parts[i];
+    if (cur[k] == null || typeof cur[k] !== 'object') cur[k] = {};
+    cur = cur[k];
   }
-  promptWarnings.hidden = false;
-  promptWarnings.textContent = '';
-  const icon = document.createElement('span');
-  icon.className = 'b-ico';
-  icon.textContent = '!';
-  const body = document.createElement('div');
-  body.className = 'b-bd';
-  const title = document.createElement('div');
-  title.className = 'b-ti';
-  title.textContent = 'Prompt warnings';
-  const list = document.createElement('ul');
-  list.style.margin = '4px 0 0';
-  list.style.paddingLeft = '20px';
-  for (const warning of warnings) {
-    const item = document.createElement('li');
-    item.style.fontSize = 'var(--t-12)';
-    item.style.color = 'var(--warn)';
-    item.textContent = String(warning);
-    list.appendChild(item);
-  }
-  body.appendChild(title);
-  body.appendChild(list);
-  promptWarnings.appendChild(icon);
-  promptWarnings.appendChild(body);
+  cur[parts[parts.length - 1]] = value;
 }
 
-if (promptForm && promptAssistantName && promptInstructions && promptStatus) {
-  promptForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const instructions = promptInstructions.value
+function readControlValue(el) {
+  const type = el.dataset.cfgType;
+  if (type === 'boolean') return !!el.checked;
+  if (type === 'stringArray') {
+    return el.value
       .split('\\n')
       .map((line) => line.trim())
-      .filter(Boolean);
-    promptStatus.textContent = 'saving...';
-    promptStatus.className = 'status';
+      .filter((line) => line.length > 0);
+  }
+  const raw = (el.value || '').trim();
+  if (type === 'stringOrNull') return raw.length === 0 ? null : raw;
+  if (type === 'string') return raw;
+  if (type === 'int' || type === 'intOrNull') {
+    if (raw.length === 0) {
+      if (type === 'intOrNull') return null;
+      // empty required int → reject; surface as NaN, save handler shows error
+      return NaN;
+    }
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) ? n : NaN;
+  }
+  if (type === 'float' || type === 'floatOrNull') {
+    if (raw.length === 0) {
+      if (type === 'floatOrNull') return null;
+      return NaN;
+    }
+    const n = parseFloat(raw);
+    return Number.isFinite(n) ? n : NaN;
+  }
+  return raw; // fallback
+}
+
+function collectSettingsPayload(form) {
+  const payload = {};
+  const errors = [];
+  const controls = form.querySelectorAll('[data-cfg-path]');
+  controls.forEach((el) => {
+    const path = el.dataset.cfgPath;
+    const v = readControlValue(el);
+    if (typeof v === 'number' && Number.isNaN(v)) {
+      errors.push(path + ' must be a valid number');
+      return;
+    }
+    setPath(payload, path, v);
+  });
+  return { payload, errors };
+}
+
+(function wireSettingsTab() {
+  const form = $('settings-form');
+  if (!form) return;
+  const saveBtn = $('settings-save');
+  const resetBtn = $('settings-reset');
+  const status = $('settings-status');
+  const warningsBox = $('settings-warnings');
+
+  function renderSettingsWarnings(list) {
+    if (!warningsBox) return;
+    if (!Array.isArray(list) || list.length === 0) {
+      warningsBox.hidden = true;
+      warningsBox.innerHTML = '';
+      return;
+    }
+    warningsBox.hidden = false;
+    let h = '<span class="b-ico"><svg><use href="#i-alert"/></svg></span><div class="b-bd">';
+    h += '<div class="b-ti">' + list.length + ' validation warning' + (list.length > 1 ? 's' : '') + '</div>';
+    h += '<ul style="margin: 4px 0 0; padding-left: 20px;">';
+    list.forEach((w) => { h += '<li style="font-size: var(--t-12);">' + escapeHtml(String(w)) + '</li>'; });
+    h += '</ul></div>';
+    warningsBox.innerHTML = h;
+  }
+
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      // Reload to get fresh SSR values (avoids per-field reset logic).
+      location.reload();
+    });
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!cfg.name) return;
+    const { payload, errors } = collectSettingsPayload(form);
+    if (errors.length > 0) {
+      if (status) {
+        status.textContent = errors[0] + (errors.length > 1 ? ' (+' + (errors.length - 1) + ' more)' : '');
+        status.className = 'status err';
+      }
+      return;
+    }
+    if (saveBtn) saveBtn.disabled = true;
+    if (status) { status.textContent = '保存中…'; status.className = 'status'; }
     try {
-      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/prompt-config', {
+      const rawText = JSON.stringify(payload, null, 2);
+      const expectedMtimeISO = form.dataset.mtime || '';
+      const body = expectedMtimeISO ? { rawText, expectedMtimeISO } : { rawText };
+      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/ask-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          assistantName: promptAssistantName.value.trim() || null,
-          systemInstructions: instructions,
-        }),
+        body: JSON.stringify(body),
       });
-      const body = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
-      if (!res.ok || !body.ok) {
-        throw new Error((body && body.error) || 'save failed');
+      const respBody = await res.json().catch(() => ({}));
+      if (!res.ok || (respBody && respBody.ok === false)) {
+        const msg = (respBody && respBody.error) || ('http ' + res.status);
+        if (status) {
+          if (res.status === 409 && respBody && respBody.currentMtimeISO) {
+            form.dataset.mtime = respBody.currentMtimeISO;
+            status.textContent = '文件已被其它进程修改：' + msg + '（请刷新后重试）';
+          } else {
+            status.textContent = '保存失败：' + msg;
+          }
+          status.className = 'status err';
+        }
+        return;
       }
-      if (body && body.prompt) {
-        promptAssistantName.value = body.prompt.assistantName || '';
-        promptInstructions.value = Array.isArray(body.prompt.systemInstructions)
-          ? body.prompt.systemInstructions.join('\\n')
-          : '';
+      if (respBody && respBody.mtimeISO) form.dataset.mtime = respBody.mtimeISO;
+      renderSettingsWarnings(respBody && respBody.warnings);
+      const wCount = Array.isArray(respBody && respBody.warnings) ? respBody.warnings.length : 0;
+      const okText = wCount > 0 ? '已保存（' + wCount + ' 条警告）' : '已保存';
+      if (status) {
+        status.textContent = cfg.live ? okText + ' · 重启项目生效' : okText + ' · 下次启动生效';
+        status.className = 'status ok';
       }
-      renderPromptWarnings(body && body.warnings);
-      const warningCount = Array.isArray(body && body.warnings) ? body.warnings.length : 0;
-      const savedPrefix = warningCount > 0 ? 'saved with warnings' : 'saved';
-      promptStatus.textContent = cfg.live
-        ? savedPrefix + ' · restart project to apply'
-        : savedPrefix + ' · applies on next start';
-      promptStatus.className = 'status ok';
     } catch (err) {
-      promptStatus.textContent = 'save failed: ' + (err && err.message ? err.message : err);
-      promptStatus.className = 'status err';
+      if (status) {
+        status.textContent = '网络错误：' + (err && err.message ? err.message : err);
+        status.className = 'status err';
+      }
+    } finally {
+      if (saveBtn) saveBtn.disabled = false;
     }
   });
-}
+})();
 
 async function submitAsk(opts) {
   opts = opts || {};
@@ -1638,104 +1901,6 @@ window.addEventListener('console:reask', (e) => {
   if (askQ && e.detail && e.detail.query) askQ.value = e.detail.query;
   setProjectTab('ask');
 });
-
-// ---------------------------------------------------------------------
-// Editable anydocs.ask.json in the Config drawer.
-// View mode shows the SSR-rendered formatted JSON; "edit" reveals a raw
-// textarea + Save. Save POSTs full file content; server re-validates with
-// the same schema as loadConfig().
-// ---------------------------------------------------------------------
-(function wireAskConfigEditor() {
-  const section = $('ask-config-section');
-  const editBtn = $('ask-config-edit-btn');
-  const viewMode = $('ask-config-view');
-  const editForm = $('ask-config-edit');
-  const cancelBtn = $('ask-config-cancel');
-  const textarea = $('ask-config-textarea');
-  const status = $('ask-config-status');
-  const warnings = $('ask-config-warnings');
-  if (!section || !editBtn || !viewMode || !editForm || !cancelBtn || !textarea || !status) return;
-
-  const originalText = textarea.value;
-
-  function toEdit() {
-    viewMode.hidden = true;
-    editForm.hidden = false;
-    editBtn.hidden = true;
-    status.textContent = '';
-    status.className = 'status';
-    if (warnings) { warnings.hidden = true; warnings.innerHTML = ''; }
-  }
-  function toView() {
-    viewMode.hidden = false;
-    editForm.hidden = true;
-    editBtn.hidden = false;
-    // Restore textarea to last-saved (= SSR) content so cancel really cancels.
-    textarea.value = originalText;
-  }
-
-  function renderWarnings(list) {
-    if (!warnings) return;
-    if (!Array.isArray(list) || list.length === 0) {
-      warnings.hidden = true;
-      warnings.innerHTML = '';
-      return;
-    }
-    warnings.hidden = false;
-    let h = '<span class="b-ico"><svg><use href="#i-alert"/></svg></span><div class="b-bd">';
-    h += '<div class="b-ti">' + list.length + ' warning' + (list.length > 1 ? 's' : '') + '</div>';
-    h += '<ul style="margin: 6px 0 0 18px; padding: 0;">';
-    list.forEach((w) => { h += '<li>' + escapeHtml(String(w)) + '</li>'; });
-    h += '</ul></div>';
-    warnings.innerHTML = h;
-  }
-
-  editBtn.addEventListener('click', toEdit);
-  cancelBtn.addEventListener('click', toView);
-
-  editForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    if (!cfg.name) {
-      status.textContent = '保存失败：no project context';
-      status.className = 'status err';
-      return;
-    }
-    const rawText = textarea.value;
-    const expectedMtimeISO = section.dataset.mtime || '';
-    status.textContent = '保存中…';
-    status.className = 'status';
-    renderWarnings(null);
-    try {
-      const payload = expectedMtimeISO ? { rawText, expectedMtimeISO } : { rawText };
-      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/ask-config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok || (body && body.ok === false)) {
-        const msg = (body && body.error) || ('http ' + res.status);
-        if (res.status === 409 && body && body.currentMtimeISO) {
-          section.dataset.mtime = body.currentMtimeISO;
-          status.textContent = '文件已被其它进程修改：' + msg + '（刷新页面后重试）';
-        } else {
-          status.textContent = '保存失败：' + msg;
-        }
-        status.className = 'status err';
-        return;
-      }
-      if (body && body.mtimeISO) section.dataset.mtime = body.mtimeISO;
-      renderWarnings(body && body.warnings);
-      const wCount = Array.isArray(body && body.warnings) ? body.warnings.length : 0;
-      const okText = wCount > 0 ? '已保存（' + wCount + ' 条警告）' : '已保存';
-      status.textContent = okText + ' · 重启项目生效';
-      status.className = 'status ok';
-    } catch (err) {
-      status.textContent = '网络错误：' + (err && err.message ? err.message : err);
-      status.className = 'status err';
-    }
-  });
-})();
 
 // Autostart
 if (cfg.valid && cfg.autostart && !cfg.live) {

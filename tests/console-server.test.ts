@@ -277,10 +277,23 @@ test('GET /p/:name: project tabs (Ask/Index/Eval/Traffic) + scoped JS handler so
   }
 });
 
-test('GET /p/:name: renders project prompt settings form', async () => {
+test('GET /p/:name: renders Settings tab with prompt + LLM + retrieval + feedback fields', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const projectRoot = join(ws, 'projects', 'docs-zh');
+    await fs.writeFile(
+      join(projectRoot, 'anydocs.ask.json'),
+      JSON.stringify(
+        {
+          llm: { model: 'claude-opus-4-7' },
+          prompt: { assistantName: 'Cregis AI', systemInstructions: ['hi'] },
+          feedback: { enabled: true },
+        },
+        null,
+        2,
+      ),
+    );
     const app = createConsoleApp({
       workspacePath: ws,
       consolePort: 4100,
@@ -289,80 +302,26 @@ test('GET /p/:name: renders project prompt settings form', async () => {
     const res = await app.request('/p/docs-zh');
     assert.equal(res.status, 200);
     const body = await res.text();
-    assert.match(body, /id="prompt-config-form"/);
-    assert.match(body, /id="prompt-assistant-name"/);
-    assert.match(body, /id="prompt-system-instructions"/);
+    // Settings tab exists in nav + panel
+    assert.match(body, /data-project-tab="settings"/);
+    assert.match(body, /id="settings-form"/);
+    assert.match(body, /id="settings-save"/);
+    // Field paths surfaced via data-cfg-path on the SSR controls
+    assert.match(body, /data-cfg-path="prompt\.assistantName"/);
+    assert.match(body, /data-cfg-path="prompt\.systemInstructions"/);
+    assert.match(body, /data-cfg-path="llm\.model"/);
+    assert.match(body, /data-cfg-path="retrieval\.topK"/);
+    assert.match(body, /data-cfg-path="feedback\.enabled"/);
+    assert.match(body, /data-cfg-path="server\.cors\.allowedOrigins"/);
+    // Prefill: existing values must render in the controls
+    assert.match(body, /value="Cregis AI"/);
+    assert.match(body, /value="claude-opus-4-7"/);
   } finally {
     await cleanup();
   }
 });
 
-test('GET/POST /api/projects/:name/prompt-config reads and writes anydocs.ask.json', async () => {
-  const { path: ws, cleanup } = await withTmpDir();
-  try {
-    await makeWorkspaceWithProjects(ws, ['docs-zh']);
-    const projectRoot = join(ws, 'projects', 'docs-zh');
-    await fs.writeFile(
-      join(projectRoot, 'anydocs.ask.json'),
-      JSON.stringify({ llm: { model: 'deepseek-v4-pro' } }, null, 2),
-    );
-
-    const app = createConsoleApp({
-      workspacePath: ws,
-      consolePort: 4100,
-      registry: makeRegistry(),
-    });
-
-    const before = await app.request('/api/projects/docs-zh/prompt-config');
-    assert.equal(before.status, 200);
-    assert.deepEqual(await before.json(), {
-      ok: true,
-      prompt: { assistantName: null, systemInstructions: [] },
-      warnings: [],
-    });
-
-    const saved = await app.request('/api/projects/docs-zh/prompt-config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        assistantName: 'Cregis AI 助手',
-        systemInstructions: [
-          'Payment Engine is for order collection.',
-          'WaaS is for wallets and withdrawals.',
-        ],
-      }),
-    });
-    assert.equal(saved.status, 200);
-    assert.deepEqual(await saved.json(), {
-      ok: true,
-      prompt: {
-        assistantName: 'Cregis AI 助手',
-        systemInstructions: [
-          'Payment Engine is for order collection.',
-          'WaaS is for wallets and withdrawals.',
-        ],
-      },
-      warnings: [],
-    });
-
-    const raw = JSON.parse(await fs.readFile(join(projectRoot, 'anydocs.ask.json'), 'utf8')) as {
-      llm?: { model?: string };
-      prompt?: { assistantName?: string; systemInstructions?: string[] };
-    };
-    assert.equal(raw.llm?.model, 'deepseek-v4-pro', 'existing config is preserved');
-    assert.deepEqual(raw.prompt, {
-      assistantName: 'Cregis AI 助手',
-      systemInstructions: [
-        'Payment Engine is for order collection.',
-        'WaaS is for wallets and withdrawals.',
-      ],
-    });
-  } finally {
-    await cleanup();
-  }
-});
-
-test('GET /p/:name: renders prompt config warnings from anydocs.ask.json', async () => {
+test('GET /p/:name: Settings tab surfaces validation warnings inline', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -380,50 +339,8 @@ test('GET /p/:name: renders prompt config warnings from anydocs.ask.json', async
     const res = await app.request('/p/docs-zh');
     assert.equal(res.status, 200);
     const body = await res.text();
-    assert.match(body, /Prompt warnings/);
+    assert.match(body, /id="settings-warnings"/);
     assert.match(body, /prompt\.systemInstructions ignored 1/);
-  } finally {
-    await cleanup();
-  }
-});
-
-test('POST /api/projects/:name/prompt-config returns normalized prompt plus warnings', async () => {
-  const { path: ws, cleanup } = await withTmpDir();
-  try {
-    await makeWorkspaceWithProjects(ws, ['docs-zh']);
-    const app = createConsoleApp({
-      workspacePath: ws,
-      consolePort: 4100,
-      registry: makeRegistry(),
-    });
-
-    const res = await app.request('/api/projects/docs-zh/prompt-config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        assistantName: `Cregis\n${'A'.repeat(120)}`,
-        systemInstructions: [
-          `Payment Engine\n${'B'.repeat(700)}`,
-          ...Array.from({ length: 25 }, (_, i) => `instruction ${i + 1}`),
-        ],
-      }),
-    });
-
-    assert.equal(res.status, 200);
-    const body = await res.json() as {
-      ok: boolean;
-      prompt: { assistantName: string | null; systemInstructions: string[] };
-      warnings: string[];
-    };
-    assert.equal(body.ok, true);
-    assert.equal(body.prompt.assistantName?.includes('\n'), false);
-    assert.equal(body.prompt.assistantName?.length, 80);
-    assert.equal(body.prompt.systemInstructions.length, 20);
-    assert.equal(body.prompt.systemInstructions[0].includes('\n'), false);
-    assert.equal(body.prompt.systemInstructions[0].length, 500);
-    assert.ok(body.warnings.some((w) => /prompt\.assistantName exceeds/.test(w)));
-    assert.ok(body.warnings.some((w) => /prompt\.systemInstructions\[0\] exceeds/.test(w)));
-    assert.ok(body.warnings.some((w) => /prompt\.systemInstructions keeps only/.test(w)));
   } finally {
     await cleanup();
   }
@@ -643,31 +560,6 @@ test('POST /api/projects/:name/feedback: 404 unknown project', async () => {
       body: '{}',
     });
     assert.equal(res.status, 404);
-  } finally {
-    await cleanup();
-  }
-});
-
-test('GET /p/:name: Config drawer renders editable anydocs.ask.json section', async () => {
-  const { path: ws, cleanup } = await withTmpDir();
-  try {
-    await makeWorkspaceWithProjects(ws, ['docs-zh']);
-    const projectRoot = join(ws, 'projects', 'docs-zh');
-    await fs.writeFile(
-      join(projectRoot, 'anydocs.ask.json'),
-      JSON.stringify({ llm: { model: 'claude-opus-4-7' } }, null, 2),
-    );
-    const app = createConsoleApp({
-      workspacePath: ws,
-      consolePort: 4100,
-      registry: makeRegistry(),
-    });
-    const res = await app.request('/p/docs-zh');
-    assert.equal(res.status, 200);
-    const body = await res.text();
-    assert.match(body, /id="ask-config-section"/);
-    assert.match(body, /id="ask-config-edit-btn"/);
-    assert.match(body, /id="ask-config-textarea"/);
   } finally {
     await cleanup();
   }

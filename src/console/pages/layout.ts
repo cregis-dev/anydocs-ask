@@ -29,9 +29,6 @@ export function layout(args: {
   title: string;
   body: Html | Html[];
   nav?: NavContext;
-  /** Pre-rendered config drawer fragment (with its own JS hooks). Optional;
-   *  pages can omit if they don't want gear. */
-  configDrawer?: Html;
   /** Override page <main> max-width (e.g. report viewer uses narrower). */
   pageMaxWidth?: string;
   /** When true, suppress the page <main> wrapper — page body provides its own. */
@@ -50,46 +47,15 @@ export function layout(args: {
   </head>
   <body>
     ${raw(ICON_SPRITE)}
-    ${header(args.nav, args.configDrawer !== undefined)}
+    ${header(args.nav)}
     ${args.bareBody
       ? args.body
       : html`<main class="page"${raw(styleAttr)}>${args.body}</main>`}
-    ${args.configDrawer ?? ''}
-    ${args.configDrawer ? drawerScript() : ''}
   </body>
 </html>`;
 }
 
-function drawerScript(): Html {
-  return html`<script>(function(){
-    var btn = document.getElementById('header-gear');
-    var drawer = document.getElementById('config-drawer');
-    var mask = document.getElementById('config-mask');
-    var close = document.getElementById('config-close');
-    if (!btn || !drawer) return;
-    function open(){
-      drawer.hidden = false;
-      if (mask) mask.hidden = false;
-      document.body.style.overflow = 'hidden';
-    }
-    function shut(){
-      drawer.hidden = true;
-      if (mask) mask.hidden = true;
-      document.body.style.overflow = '';
-    }
-    btn.addEventListener('click', function(e){
-      e.stopPropagation();
-      if (drawer.hidden) open(); else shut();
-    });
-    if (close) close.addEventListener('click', shut);
-    if (mask) mask.addEventListener('click', shut);
-    document.addEventListener('keydown', function(e){
-      if (e.key === 'Escape' && !drawer.hidden) shut();
-    });
-  })();</script>`;
-}
-
-function header(nav?: NavContext, withGear = false): Html {
+function header(nav?: NavContext): Html {
   return html`
     <header class="app-hdr">
       <div class="app-hdr-inner">
@@ -100,9 +66,6 @@ function header(nav?: NavContext, withGear = false): Html {
         ${nav ? projectSwitcher(nav) : ''}
         <div class="hdr-spacer"></div>
         ${nav ? html`<span class="hdr-host">127.0.0.1:${nav.consolePort}</span>` : ''}
-        ${withGear
-          ? html`<button id="header-gear" class="icon-btn" aria-label="config (esc to close)" title="config (esc to close)"><svg><use href="#i-gear"/></svg></button>`
-          : ''}
       </div>
     </header>
   `;
