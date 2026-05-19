@@ -23,6 +23,7 @@ import { randomBytes } from 'node:crypto';
 import type { DbHandle } from '../db/index.ts';
 import type { Embedder } from '../embedding/types.ts';
 import type { LLM } from '../llm/types.ts';
+import type { PromptConfig } from '../config.ts';
 import type { DocsLang } from '../anydocs/types.ts';
 import type { BreadcrumbNode } from '../db/schema.ts';
 import { detectLangFromText, langFromScopeId } from './lang.ts';
@@ -43,6 +44,7 @@ export type AskDeps = {
   db: DbHandle;
   embedder: Embedder;
   llm: LLM;
+  promptConfig?: PromptConfig;
 };
 
 export type AskStatusStage = 'retrieving' | 'generating';
@@ -243,6 +245,7 @@ async function askWithTraceInternal(
     answerLang: queryLang,
     isCrossLang,
     formatHint,
+    ...(deps.promptConfig ? { promptConfig: deps.promptConfig } : {}),
   });
 
   let llmOutput;

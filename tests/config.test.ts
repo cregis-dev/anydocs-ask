@@ -57,6 +57,101 @@ test('loadConfig: user fields merge over defaults', async () => {
   }
 });
 
+test('loadConfig: prompt customization merges over defaults', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        prompt: {
+          assistantName: 'Cregis AI Assistant',
+          systemInstructions: [
+            'Payment Engine is for orders, checkout, callbacks, and payment status.',
+            'WaaS is for wallets, addresses, deposits, collection, and withdrawals.',
+          ],
+        },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.prompt.assistantName, 'Cregis AI Assistant');
+    assert.deepEqual(r.config.prompt.systemInstructions, [
+      'Payment Engine is for orders, checkout, callbacks, and payment status.',
+      'WaaS is for wallets, addresses, deposits, collection, and withdrawals.',
+    ]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: prompt rejects invalid fields with warnings', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        prompt: {
+          assistantName: '',
+          systemInstructions: ['valid instruction', 123, ''],
+        },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.prompt.assistantName, null);
+    assert.deepEqual(r.config.prompt.systemInstructions, ['valid instruction']);
+    assert.ok(
+      r.warnings.some((w) => /prompt\.assistantName/.test(w)),
+      `expected assistantName warning; got ${JSON.stringify(r.warnings)}`,
+    );
+    assert.ok(
+      r.warnings.some((w) => /prompt\.systemInstructions/.test(w)),
+      `expected systemInstructions warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: prompt normalizes whitespace and caps prompt size with warnings', async () => {
+  const longName = `Cregis\n${'A'.repeat(120)}`;
+  const longInstruction = `Line one\n${'B'.repeat(700)}`;
+  const manyInstructions = Array.from({ length: 25 }, (_, i) => `instruction ${i + 1}`);
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        prompt: {
+          assistantName: longName,
+          systemInstructions: [longInstruction, ...manyInstructions],
+        },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.prompt.assistantName?.includes('\n'), false);
+    assert.equal(r.config.prompt.assistantName?.length, 80);
+    assert.equal(r.config.prompt.systemInstructions.length, 20);
+    assert.equal(r.config.prompt.systemInstructions[0].includes('\n'), false);
+    assert.equal(r.config.prompt.systemInstructions[0].length, 500);
+    assert.ok(
+      r.warnings.some((w) => /prompt\.assistantName exceeds/.test(w)),
+      `expected assistantName length warning; got ${JSON.stringify(r.warnings)}`,
+    );
+    assert.ok(
+      r.warnings.some((w) => /prompt\.systemInstructions\[0\] exceeds/.test(w)),
+      `expected instruction length warning; got ${JSON.stringify(r.warnings)}`,
+    );
+    assert.ok(
+      r.warnings.some((w) => /prompt\.systemInstructions keeps only/.test(w)),
+      `expected instruction count warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test('loadConfig: malformed JSON throws with a clear message', async () => {
   const { root, cleanup } = await withTmpProject(async (r) => {
     await fs.writeFile(join(r, 'anydocs.ask.json'), '{ this is not json ');

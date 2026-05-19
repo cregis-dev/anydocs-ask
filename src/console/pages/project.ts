@@ -32,6 +32,7 @@ import type { AnalyzeReportSummary } from '../eval-state.ts';
 import { computeNextAction, type NextAction } from '../next-action.ts';
 import { renderConfigDrawer } from './config-drawer.ts';
 import type { ConfigViewModel } from '../config-state.ts';
+import type { PromptConfigView } from '../prompt-config.ts';
 
 export type ProjectViewModel = {
   project: ProjectListing;
@@ -47,6 +48,7 @@ export type ProjectViewModel = {
   candidates?: CandidateSnapshot;
   analyzeHistory?: AnalyzeReportSummary[];
   latestAnalyzeBody?: string | null;
+  promptConfig?: PromptConfigView;
 };
 
 export function renderProject(vm: ProjectViewModel): Html {
@@ -286,6 +288,7 @@ function tabPanels(
 ): Html {
   return html`
     <div id="ptab-ask" class="tab-panel" data-project-tab="ask">
+      ${promptConfigCard(vm.promptConfig)}
       ${askCard(live)}
     </div>
     <div id="ptab-index" class="tab-panel" data-project-tab="index" hidden>
@@ -313,6 +316,66 @@ function tabPanels(
           })
         : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">Traffic status unavailable.</p></div></div>`}
     </div>
+  `;
+}
+
+function promptConfigCard(view: PromptConfigView | undefined): Html {
+  const prompt = view?.prompt ?? { assistantName: null, systemInstructions: [] };
+  const instructions = prompt.systemInstructions.join('\n');
+  const warnings = view?.warnings ?? [];
+  const status = view?.error
+    ? html`<span id="prompt-config-status" class="status err">${view.error}</span>`
+    : html`<span id="prompt-config-status" class="status">ready</span>`;
+  const warningBlock = warnings.length > 0
+    ? html`
+      <div id="prompt-config-warnings" class="banner warn" style="margin: 0 0 var(--s-4);">
+        <span class="b-ico"><svg><use href="#i-alert"/></svg></span>
+        <div class="b-bd">
+          <div class="b-ti">Prompt warnings</div>
+          <ul style="margin: var(--s-1) 0 0; padding-left: var(--s-5);">
+            ${warnings.map((w) => html`<li style="font-size: var(--t-12); color: var(--warn);">${w}</li>`)}
+          </ul>
+        </div>
+      </div>
+    `
+    : html`<div id="prompt-config-warnings" class="banner warn" hidden style="margin: 0 0 var(--s-4);"></div>`;
+  return html`
+    <section class="card" style="margin-bottom: var(--s-4);">
+      <div class="card-hd">
+        <h2><svg style="width: 14px; height: 14px;"><use href="#i-gear"/></svg> Prompt settings</h2>
+        <span class="meta">anydocs.ask.json</span>
+      </div>
+      <form id="prompt-config-form" class="card-bd">
+        <p class="muted" style="font-size: var(--t-13); margin: 0 0 var(--s-4);">
+          Add project-specific assistant identity and domain guidance. Core grounding and citation rules still apply.
+          Restart a running project after saving.
+        </p>
+        ${warningBlock}
+        <label style="display: grid; gap: var(--s-2); margin-bottom: var(--s-3);">
+          <span style="font-size: var(--t-12); color: var(--fg-soft); font-weight: 600;">Assistant name</span>
+          <input
+            id="prompt-assistant-name"
+            class="input"
+            type="text"
+            value="${prompt.assistantName ?? ''}"
+            placeholder="e.g. Cregis AI Assistant"
+          />
+        </label>
+        <label style="display: grid; gap: var(--s-2);">
+          <span style="font-size: var(--t-12); color: var(--fg-soft); font-weight: 600;">System instructions</span>
+          <textarea
+            id="prompt-system-instructions"
+            class="textarea"
+            rows="5"
+            placeholder="One instruction per line. Example: Payment Engine is for orders, checkout, callbacks, and payment status."
+          >${instructions}</textarea>
+        </label>
+        <div style="display: flex; align-items: center; gap: var(--s-3); margin-top: var(--s-3);">
+          <button id="prompt-config-save" class="btn sm primary" type="submit">save prompt</button>
+          ${status}
+        </div>
+      </form>
+    </section>
   `;
 }
 
@@ -1334,6 +1397,86 @@ function renderMeta(body, latencyMs, httpStatus) {
 const askBtn = $('btn-ask');
 const askQ = $('ask-q');
 const askStatus = $('ask-status');
+const promptForm = $('prompt-config-form');
+const promptAssistantName = $('prompt-assistant-name');
+const promptInstructions = $('prompt-system-instructions');
+const promptStatus = $('prompt-config-status');
+const promptWarnings = $('prompt-config-warnings');
+
+function renderPromptWarnings(warnings) {
+  if (!promptWarnings) return;
+  if (!Array.isArray(warnings) || warnings.length === 0) {
+    promptWarnings.hidden = true;
+    promptWarnings.textContent = '';
+    return;
+  }
+  promptWarnings.hidden = false;
+  promptWarnings.textContent = '';
+  const icon = document.createElement('span');
+  icon.className = 'b-ico';
+  icon.textContent = '!';
+  const body = document.createElement('div');
+  body.className = 'b-bd';
+  const title = document.createElement('div');
+  title.className = 'b-ti';
+  title.textContent = 'Prompt warnings';
+  const list = document.createElement('ul');
+  list.style.margin = '4px 0 0';
+  list.style.paddingLeft = '20px';
+  for (const warning of warnings) {
+    const item = document.createElement('li');
+    item.style.fontSize = 'var(--t-12)';
+    item.style.color = 'var(--warn)';
+    item.textContent = String(warning);
+    list.appendChild(item);
+  }
+  body.appendChild(title);
+  body.appendChild(list);
+  promptWarnings.appendChild(icon);
+  promptWarnings.appendChild(body);
+}
+
+if (promptForm && promptAssistantName && promptInstructions && promptStatus) {
+  promptForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const instructions = promptInstructions.value
+      .split('\\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    promptStatus.textContent = 'saving...';
+    promptStatus.className = 'status';
+    try {
+      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/prompt-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          assistantName: promptAssistantName.value.trim() || null,
+          systemInstructions: instructions,
+        }),
+      });
+      const body = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
+      if (!res.ok || !body.ok) {
+        throw new Error((body && body.error) || 'save failed');
+      }
+      if (body && body.prompt) {
+        promptAssistantName.value = body.prompt.assistantName || '';
+        promptInstructions.value = Array.isArray(body.prompt.systemInstructions)
+          ? body.prompt.systemInstructions.join('\\n')
+          : '';
+      }
+      renderPromptWarnings(body && body.warnings);
+      const warningCount = Array.isArray(body && body.warnings) ? body.warnings.length : 0;
+      const savedPrefix = warningCount > 0 ? 'saved with warnings' : 'saved';
+      promptStatus.textContent = cfg.live
+        ? savedPrefix + ' · restart project to apply'
+        : savedPrefix + ' · applies on next start';
+      promptStatus.className = 'status ok';
+    } catch (err) {
+      promptStatus.textContent = 'save failed: ' + (err && err.message ? err.message : err);
+      promptStatus.className = 'status err';
+    }
+  });
+}
 
 async function submitAsk(opts) {
   opts = opts || {};

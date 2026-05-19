@@ -110,6 +110,23 @@ export type FeedbackConfig = {
   rerankerWeight: number;
 };
 
+export type PromptConfig = {
+  /**
+   * Optional project-specific assistant identity. This replaces only the
+   * friendly "you are ..." label; safety/citation rules remain hard-coded.
+   */
+  assistantName: string | null;
+  /**
+   * Project-specific business/domain instructions appended after the core
+   * answer rules. They are additive and cannot disable citation grounding.
+   */
+  systemInstructions: string[];
+};
+
+export const PROMPT_ASSISTANT_NAME_MAX_CHARS = 80;
+export const PROMPT_SYSTEM_INSTRUCTION_MAX_ITEMS = 20;
+export const PROMPT_SYSTEM_INSTRUCTION_MAX_CHARS = 500;
+
 export type ResolvedConfig = {
   embedding: EmbeddingConfig;
   llm: LLMConfig;
@@ -120,6 +137,7 @@ export type ResolvedConfig = {
   runs: RunsConfig;
   analyze: AnalyzeConfig;
   feedback: FeedbackConfig;
+  prompt: PromptConfig;
 };
 
 export type LoadConfigResult = {
@@ -179,6 +197,10 @@ const DEFAULTS: ResolvedConfig = {
     enabled: false,
     implicitSignals: 'session-only',
     rerankerWeight: 0.15,
+  },
+  prompt: {
+    assistantName: null,
+    systemInstructions: [],
   },
 };
 
@@ -262,7 +284,95 @@ function mergeWithDefaults(
   applyRuns(user.runs, out.runs, warnings);
   applyAnalyze(user.analyze, out.analyze, warnings);
   applyFeedback(user.feedback, out.feedback, warnings);
+  applyPrompt(user.prompt, out.prompt, warnings);
   return out;
+}
+
+export function normalizePromptConfig(
+  value: unknown,
+  warnings: string[] = [],
+): PromptConfig {
+  const out = structuredClone(DEFAULTS.prompt);
+  applyPrompt(value, out, warnings);
+  return out;
+}
+
+function applyPrompt(value: unknown, target: PromptConfig, warnings: string[]): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'prompt' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.assistantName !== undefined) {
+    if (obj.assistantName === null) {
+      target.assistantName = null;
+    } else if (typeof obj.assistantName === 'string' && obj.assistantName.trim().length > 0) {
+      target.assistantName = capPromptString(
+        compactPromptWhitespace(obj.assistantName),
+        PROMPT_ASSISTANT_NAME_MAX_CHARS,
+        'prompt.assistantName',
+        warnings,
+      );
+    } else {
+      warnings.push(`anydocs.ask.json: prompt.assistantName must be a non-empty string or null; using default`);
+    }
+  }
+  if (obj.systemInstructions !== undefined) {
+    if (!Array.isArray(obj.systemInstructions)) {
+      warnings.push(`anydocs.ask.json: prompt.systemInstructions must be an array of strings; using default`);
+      return;
+    }
+    const instructions: string[] = [];
+    let rejected = 0;
+    for (const [index, item] of obj.systemInstructions.entries()) {
+      if (typeof item !== 'string') {
+        rejected++;
+        continue;
+      }
+      const trimmed = compactPromptWhitespace(item);
+      if (trimmed.length === 0) {
+        rejected++;
+        continue;
+      }
+      instructions.push(
+        capPromptString(
+          trimmed,
+          PROMPT_SYSTEM_INSTRUCTION_MAX_CHARS,
+          `prompt.systemInstructions[${index}]`,
+          warnings,
+        ),
+      );
+      if (instructions.length === PROMPT_SYSTEM_INSTRUCTION_MAX_ITEMS) {
+        const remaining = obj.systemInstructions.length - index - 1;
+        if (remaining > 0) {
+          warnings.push(
+            `anydocs.ask.json: prompt.systemInstructions keeps only first ${PROMPT_SYSTEM_INSTRUCTION_MAX_ITEMS} item(s); ignored ${remaining} extra item(s)`,
+          );
+        }
+        break;
+      }
+    }
+    target.systemInstructions = instructions;
+    if (rejected > 0) {
+      warnings.push(`anydocs.ask.json: prompt.systemInstructions ignored ${rejected} non-string/empty item(s)`);
+    }
+  }
+}
+
+function compactPromptWhitespace(value: string): string {
+  return value.trim().replace(/\s+/g, ' ');
+}
+
+function capPromptString(
+  value: string,
+  maxChars: number,
+  label: string,
+  warnings: string[],
+): string {
+  if (value.length <= maxChars) return value;
+  warnings.push(`anydocs.ask.json: ${label} exceeds ${maxChars} characters; truncated`);
+  return value.slice(0, maxChars).trim();
 }
 
 function applyFeedback(value: unknown, target: FeedbackConfig, warnings: string[]): void {
