@@ -25,6 +25,14 @@ export type BuildPromptOptions = {
   isCrossLang: boolean;
   formatHint: FormatHint;
   promptConfig?: PromptConfig;
+  /**
+   * Entity terms extracted from a multi-entity query. When present, the
+   * system prompt adds an explicit coverage instruction telling the model
+   * to give each named entity its own cited description — otherwise the
+   * model frequently relegates the least-supported entity to a "related
+   * topic" mention even though its chunks are in context. Codex round-9.
+   */
+  entityTerms?: string[];
 };
 
 export type BuiltPrompt = {
@@ -35,7 +43,7 @@ export type BuiltPrompt = {
 };
 
 export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
-  const { question, chunks, answerLang, isCrossLang, formatHint, promptConfig } = opts;
+  const { question, chunks, answerLang, isCrossLang, formatHint, promptConfig, entityTerms } = opts;
 
   const chunkById = new Map<string, RerankedChunk>();
   const chunkBlocks: string[] = [];
@@ -48,7 +56,7 @@ export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
     );
   });
 
-  const system = systemPromptFor(answerLang, isCrossLang, formatHint, promptConfig);
+  const system = systemPromptFor(answerLang, isCrossLang, formatHint, promptConfig, entityTerms);
   const user = `${userIntro(answerLang)}\n\n${question}\n\n${chunkLabel(answerLang)}\n\n${chunkBlocks.join('\n\n---\n\n')}`;
 
   return { system, user, chunkById };
@@ -63,8 +71,10 @@ function systemPromptFor(
   isCrossLang: boolean,
   hint: FormatHint,
   promptConfig: PromptConfig | undefined,
+  entityTerms: string[] | undefined,
 ): string {
   const formatLine = formatLineFor(lang, hint);
+  const entityLine = entityCoverageLine(lang, entityTerms);
   if (lang === 'zh') {
     const identity = promptConfig?.assistantName
       ? `你是 ${promptConfig.assistantName}。严格遵守以下规则：`
@@ -80,6 +90,7 @@ function systemPromptFor(
       '- Shell 路径、文件路径、命令参数必须与参考片段完全一致，禁止修改或省略任何字符（含 ~、/ 等前缀）。',
       '- 答案语种必须为中文。',
       formatLine,
+      entityLine,
       crossLangLine,
     ].filter(Boolean);
     appendProjectInstructions(lines, promptConfig, 'zh');
@@ -100,10 +111,27 @@ function systemPromptFor(
     '- Shell paths, file paths, and command arguments must be copied character-for-character from the context — never drop or modify characters such as ~ or /.',
     '- Answer in English.',
     formatLine,
+    entityLine,
     crossLangLine,
   ].filter(Boolean);
   appendProjectInstructions(lines, promptConfig, 'en');
   return lines.join('\n');
+}
+
+/**
+ * Entity-coverage instruction added to the system prompt when the query
+ * names multiple distinct entities. Without this, on compare-style queries
+ * the LLM frequently relegates the entity with the fewest supporting
+ * chunks to a "related topic" footnote even though dedicated chunks were
+ * in context.
+ */
+function entityCoverageLine(lang: DocsLang, terms: string[] | undefined): string {
+  if (!terms || terms.length < 2) return '';
+  const list = terms.map((t) => `\`${t}\``).join(', ');
+  if (lang === 'zh') {
+    return `- 用户问题涉及多个实体（${list}）。答案必须为每个实体提供独立、对等的说明，并配 [cit_N] 引用；不要将任何实体仅以"相关主题"或"see related"一笔带过。`;
+  }
+  return `- The query names multiple distinct entities (${list}). Give EACH entity its own description with [cit_N] citations — do not relegate any of them to a "related topic" or one-line mention.`;
 }
 
 function appendProjectInstructions(

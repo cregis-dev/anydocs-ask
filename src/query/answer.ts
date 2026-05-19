@@ -202,7 +202,12 @@ async function askWithTraceInternal(
   const currentSubtreeRoot = req.context?.current_page_id
     ? lookupSubtreeRoot(deps.db, req.context.current_page_id, queryLang)
     : null;
-  const reranked = rerank(retrieved, { queryLang, currentSubtreeRoot, query: question });
+  const reranked = rerank(retrieved, {
+    queryLang,
+    currentSubtreeRoot,
+    query: question,
+    entityTerms,
+  });
 
   const fusedTrace = buildFusedTrace(reranked, retrievalTrace);
   const top_final_score = reranked[0]?.final_score ?? 0;
@@ -246,6 +251,7 @@ async function askWithTraceInternal(
     isCrossLang,
     formatHint,
     ...(deps.promptConfig ? { promptConfig: deps.promptConfig } : {}),
+    ...(entityTerms ? { entityTerms } : {}),
   });
 
   let llmOutput;
@@ -497,17 +503,47 @@ function pickContextChunks(
   // not just the candidate pool. Without this widening, entity injection
   // got the right chunks into rerank top-15 but the default 8-chunk cap
   // still left e.g. `checkpoints` outside the prompt. The lift is
-  // proportional to the entity count (3 entities → 12 chunks) and capped
+  // proportional to the entity count (3 entities → 15 chunks) and capped
   // by HARD_MAX_CHUNKS so an unreasonable enumeration can't blow up cost.
   const defaultCap =
     entityTerms && entityTerms.length >= 2
       ? Math.min(HARD_MAX_CHUNKS, Math.max(DEFAULT_MAX_CHUNKS, entityTerms.length * 5))
       : DEFAULT_MAX_CHUNKS;
   const cap = Math.min(clientMax ?? defaultCap, HARD_MAX_CHUNKS);
-  if (outcome.kind === 'translate-fallback') return outcome.pick.slice(0, cap);
-  if (outcome.kind === 'answer-same-lang') return outcome.pick.slice(0, cap);
-  // 'clarify' is handled before this function; defensive return.
-  return [];
+  if (outcome.kind === 'clarify') return [];
+  let picked =
+    outcome.kind === 'translate-fallback'
+      ? outcome.pick.slice(0, cap)
+      : outcome.pick.slice(0, cap);
+
+  if (entityTerms && entityTerms.length >= 2) {
+    // Entity-coverage reorder: hoist the highest-ranked chunk matching each
+    // entity to the front of the picked list. LLMs disproportionately
+    // attend to early citation slots when assembling comparison-style
+    // answers — without this, `checkpoints` chunks ranked at cit_12 got
+    // ignored in favor of cit_1..cit_3 even when the entity-coverage
+    // prompt rule asked for full coverage. Codex round-9 follow-up.
+    const seen = new Set<number>();
+    const lead: RerankedChunk[] = [];
+    for (const term of entityTerms) {
+      const termLower = term.toLowerCase();
+      const candidate = picked.find(
+        (c) =>
+          !seen.has(c.chunk_id) &&
+          (c.page_id.toLowerCase().includes(termLower) ||
+            (c.page_title ?? '').toLowerCase().includes(termLower)),
+      );
+      if (candidate) {
+        lead.push(candidate);
+        seen.add(candidate.chunk_id);
+      }
+    }
+    if (lead.length > 0) {
+      const remaining = picked.filter((c) => !seen.has(c.chunk_id));
+      picked = [...lead, ...remaining];
+    }
+  }
+  return picked;
 }
 
 function translationNoticeFor(lang: DocsLang): string {
@@ -591,8 +627,14 @@ function clarifyMessageFor(lang: DocsLang): string {
  *   - "sessions, checkpoints and memory" — only one `,`, so the previous
  *     ≥2-comma gate rejected it.
  */
-const ENTITY_SEGMENT_STRIP = /^\s*(and|or|nor)\s+/i;
-const ENTITY_SPLIT_RE = /,|、|\s+(?:and|or|nor)\s+/gi;
+const ENTITY_SEGMENT_STRIP = /^\s*(and|or|nor|vs\.?|versus)\s+/i;
+const ENTITY_SPLIT_RE = /,|、|\s+(?:and|or|nor|vs\.?|versus)\s+/gi;
+// Comparative-intent hint: any of these words anywhere in the query means
+// the user is explicitly comparing entities, so a single separator is enough
+// to trigger entity injection. Without this gate relaxation, 2-entity
+// compare queries ("Compare sessions and checkpoints") had only 1 separator
+// and skipped injection entirely (codex round-9 finding).
+const ENTITY_COMPARE_HINT_RE = /\b(compare|compares|comparison|vs\.?|versus)\b/i;
 const ENTITY_STOP_WORDS = new Set([
   'the', 'and', 'for', 'with', 'from', 'into', 'your', 'this', 'that',
   'are', 'how', 'what', 'when', 'where', 'which', 'who', 'work', 'does',
@@ -605,15 +647,19 @@ const ENTITY_STOP_WORDS = new Set([
 ]);
 
 export function extractEntityTerms(question: string): string[] | undefined {
-  // Gate: need at least 2 enumeration separators (any of comma `,`, ideographic
-  // comma `、`, or English conjunction `and`/`or`/`nor`) to indicate a list.
+  // Gate: need ≥2 enumeration separators (any of `,`, `、`, `and`/`or`/`nor`,
+  // `vs`/`versus`) to indicate a list — UNLESS the query carries a comparative
+  // hint word (`compare`/`comparison`/`vs`/`versus`), in which case a single
+  // separator is enough. `Compare sessions and checkpoints` has only one
+  // `and`-separator but is unambiguously a 2-entity comparison.
   const sepMatches = question.match(ENTITY_SPLIT_RE) ?? [];
-  if (sepMatches.length < 2) return undefined;
+  const minSeps = ENTITY_COMPARE_HINT_RE.test(question) ? 1 : 2;
+  if (sepMatches.length < minSeps) return undefined;
 
   // Split on any recognized separator and take the leading significant word
   // of each segment. We use a fresh regex (the global flag mutates lastIndex
   // between match/split, so reuse is unsafe here).
-  const splitRe = /,|、|\s+(?:and|or|nor)\s+/gi;
+  const splitRe = /,|、|\s+(?:and|or|nor|vs\.?|versus)\s+/gi;
   const terms: string[] = [];
   for (const segment of question.split(splitRe)) {
     const cleaned = segment.replace(ENTITY_SEGMENT_STRIP, '').trim().toLowerCase();

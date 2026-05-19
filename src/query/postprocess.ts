@@ -270,10 +270,17 @@ function isJsonLikeSnippet(body: string): boolean {
   return false;
 }
 
+// Dash-connected compound identifier (≥2 segments, each ≥2 alphanumeric
+// chars). Catches theme / package / image names like `blueprint-review`,
+// `atlas-docs`, `classic-docs`, `bge-m3`. Permitted via softened-haystack
+// match so the filter still has teeth if the LLM invents a bogus name.
+const DASH_NAME_RE = /^[A-Za-z][A-Za-z0-9]+(-[A-Za-z0-9][A-Za-z0-9]*)+$/;
+
 function isStructuralCandidate(body: string): boolean {
   if (!PATH_OR_KEY_SHAPE.test(body)) return false;
   if (body.includes('/')) return true; // any slash-bearing token
   if (DOTTED_KEY_RE.test(body)) return true; // foo.bar / foo.bar.baz
+  if (DASH_NAME_RE.test(body)) return true; // theme-name / package-name
   return false;
 }
 

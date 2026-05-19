@@ -63,6 +63,25 @@ test('detectLangFromText: zh-only short query stays zh', () => {
   assert.equal(detectLangFromText('什么是 codeGroup？'), 'zh');
 });
 
+// Regression for codex round-9 zh-lang case. Long queries with heavy English
+// technical tokens at the front can have <15% CJK ratio but are clearly
+// Chinese to a human reader. ≥3 CJK characters by themselves is enough
+// signal regardless of ratio.
+test('detectLangFromText: ≥3 CJK chars detect zh even at low ratio (11%)', () => {
+  // 4 CJK chars (如何配置) / 36 non-WS ≈ 11% — under the 15% ratio gate, but
+  // 4 CJK chars passes the absolute-count gate.
+  assert.equal(
+    detectLangFromText('anydocs.config.json 如何配置 site.theme.id'),
+    'zh',
+  );
+});
+
+test('detectLangFromText: 1-2 incidental CJK chars do NOT count as zh', () => {
+  // Single zh token sprinkled in English shouldn't flip the lang.
+  assert.equal(detectLangFromText('check the 设置 endpoint'), 'en');
+  assert.equal(detectLangFromText('see config 设置 file'), 'en');
+});
+
 test('detectLangFromText: empty string -> en (benign default)', () => {
   assert.equal(detectLangFromText(''), 'en');
   assert.equal(detectLangFromText('   '), 'en');
@@ -127,6 +146,29 @@ test('extractEntityTerms: question verbs (compare/show/list) are not entities', 
   // would yield `compare` as the entity instead of `X`.
   const out = extractEntityTerms('compare sessions and checkpoints and memory')!;
   assert.ok(!out.includes('compare'));
+});
+
+// 2-entity compare queries have only ONE separator (` and `), which falls
+// below the default ≥2 gate. The comparative-hint relaxation lets a single
+// separator be sufficient when the query carries `compare`/`vs`/`versus`.
+// Codex round-9 found these were the 1/3 → 400 cases on
+// `Compare sessions and checkpoints in Hermes.`.
+test('extractEntityTerms: 2-entity compare query triggers via comparative hint', () => {
+  assert.deepEqual(
+    extractEntityTerms('Compare sessions and checkpoints in Hermes.'),
+    ['sessions', 'checkpoints'],
+  );
+});
+
+test('extractEntityTerms: `vs` / `versus` count as separators and hints', () => {
+  assert.deepEqual(extractEntityTerms('sessions vs checkpoints'), ['sessions', 'checkpoints']);
+  assert.deepEqual(extractEntityTerms('memory versus sessions'), ['memory', 'sessions']);
+});
+
+test('extractEntityTerms: plain 2-entity question without compare hint still skipped', () => {
+  // Without `compare`/`vs`, a single `and` is not enough — too easy to
+  // accidentally trigger on generic phrases.
+  assert.equal(extractEntityTerms('how does sessions and memory work?'), undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -326,6 +368,37 @@ test('rerank: title_match_boost suppressed when longer matched title contains sh
   const generic = out.find((c) => c.chunk_id === 1)!;
   const specific = out.find((c) => c.chunk_id === 2)!;
   assert.ok(specific.final_score > generic.final_score, 'specific (longer) title wins, generic suppressed');
+});
+
+// entity_match_boost: chunks whose page_id or page_title contains a known
+// entity term get a +0.20 boost. This rescues compare-style queries where
+// the verb (`compare`/`vs`) dominates vector ranking and entity-specific
+// pages would otherwise drop below the prompt-context cap.
+test('rerank: entity_match_boost +0.20 when chunk.page_id matches entity term', () => {
+  const out = rerank(
+    [
+      fakeRetrieved({ chunk_id: 1, page_id: 'checkpoints', page_title: 'Filesystem Checkpoints', rrf_score: 0.05, nav_index: 1000 }),
+      fakeRetrieved({ chunk_id: 2, page_id: 'random-page', page_title: 'Other Topic', rrf_score: 0.05, nav_index: 1000 }),
+    ],
+    { queryLang: 'en', currentSubtreeRoot: null, query: 'compare sessions and checkpoints', entityTerms: ['sessions', 'checkpoints'] },
+  );
+  const ckpt = out.find((c) => c.chunk_id === 1)!;
+  const other = out.find((c) => c.chunk_id === 2)!;
+  assert.ok(ckpt.final_score > other.final_score, 'entity-matched page wins');
+});
+
+test('rerank: entity_match_boost off when entityTerms not provided', () => {
+  const out = rerank(
+    [
+      fakeRetrieved({ chunk_id: 1, page_id: 'checkpoints', page_title: 'Checkpoints', rrf_score: 0.05, nav_index: 1000 }),
+      fakeRetrieved({ chunk_id: 2, page_id: 'random', page_title: 'Random', rrf_score: 0.05, nav_index: 1000 }),
+    ],
+    { queryLang: 'en', currentSubtreeRoot: null, query: 'something unrelated' },
+  );
+  // No entity terms → no entity boost; final_scores equal modulo nav_index_boost.
+  const ckpt = out.find((c) => c.chunk_id === 1)!;
+  const random = out.find((c) => c.chunk_id === 2)!;
+  assert.equal(ckpt.final_score, random.final_score);
 });
 
 test('rerank: title_match_boost skipped for titles below min length', () => {
