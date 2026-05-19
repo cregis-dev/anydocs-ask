@@ -851,6 +851,37 @@ test('postprocess: 2-segment dotted config key passes when softened-match hits',
   assert.doesNotMatch(out.answer_md, /⚠/);
 });
 
+// Citation markers (`[cit_3]`) wrapped in backticks by the LLM as a
+// formatting quirk should not get ⚠'d. Direct allow.
+test('postprocess: backticked citation marker [cit_N] is not ⚠ flagged', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'unrelated chunk' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer: 'See `[cit_1]` for details [cit_1]',
+    chunkById,
+  });
+  assert.doesNotMatch(out.answer_md, /⚠/);
+});
+
+// Dash-connected compound names (theme names, npm packages, docker images,
+// model ids like `bge-m3`) are direct-allow. Codex round-10 caught
+// `blueprint-review` etc. still occasionally ⚠'ing under softened-haystack
+// match when the relevant chunk wasn't retrieved. Promote to direct-allow.
+test('postprocess: dash-connected compound names are direct-allow', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'unrelated chunk' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer:
+      'Themes include `blueprint-review`, `classic-docs`, `atlas-docs`, and the embedder is `bge-m3` [cit_1]',
+    chunkById,
+  });
+  assert.doesNotMatch(out.answer_md, /⚠/);
+});
+
 // API / URL paths without a scheme (`/v1/models`, `/api/v2/users`) are
 // direct-allow. Codex round-9 caught Hermes API docs ⚠'ing these because
 // the `://` URL_SCHEME_RE branch needed a full scheme.
