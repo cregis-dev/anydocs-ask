@@ -39,6 +39,14 @@ import type { AskRequest, AskResult, ClarifyOption } from './types.ts';
 const MAX_QUESTION_CHARS = 500;
 const HARD_MAX_CHUNKS = 20;
 const DEFAULT_MAX_CHUNKS = 8;
+/**
+ * Number of times we retry an LLM call when postprocess strips every
+ * citation. Bumped 1 → 2 after codex round-11 found ~10 % of the
+ * problematic queries still 400'd on the first retry; a second retry
+ * should bring residual flake rate below 1 %. Streaming requests don't
+ * retry — see the retry loop in askWithTraceInternal.
+ */
+const MAX_CITATION_RETRIES = 2;
 
 export type AskDeps = {
   db: DbHandle;
@@ -77,10 +85,11 @@ export type AskTrace = {
    *  later stages can set them when the LLM interface is widened. */
   tokens_in: number | null;
   tokens_out: number | null;
-  /** True when the first LLM response had no valid citations and a second
-   *  call with a reinforced citation prompt was issued. Visible in
-   *  runs.jsonl for analyze to track flake rate over time. */
-  citation_retry_attempted?: boolean;
+  /** Number of recovery retries issued after the first LLM response had
+   *  zero valid citations. Bounded by MAX_CITATION_RETRIES (currently 2);
+   *  0 on the success path. Persisted to runs.jsonl so analyze can track
+   *  flake rate over time. */
+  citation_retry_count?: number;
 };
 
 export type AskTraceFusedChunk = {
@@ -304,35 +313,41 @@ async function askWithTraceInternal(
 
   // Citation-validation retry. When the first response strips to zero
   // citations, the model produced text but forgot the `[cit_N]` markers
-  // — a documented flake mode (codex round-8). Issue one retry with a
-  // reinforced system prompt that explicitly calls out the prior failure
-  // and demands the marker. Streaming requests skip retry: the client
-  // already received the failed deltas and a second pass would scramble
-  // the user-visible stream. Non-streaming callers see a transparent
-  // retry — same JSON shape, slightly higher latency.
-  let citationRetryAttempted = false;
-  if (post.used_chunks === 0 && !isStreaming) {
-    citationRetryAttempted = true;
-    const retryInput = {
-      systemPrompt: prompt.system + '\n\n' + citationReinforcementFor(queryLang),
-      userPrompt: prompt.user,
-    };
-    try {
-      const retryOutput = await deps.llm.generate(retryInput);
-      const retryPost = postprocess({
-        answerLang: queryLang,
-        rawAnswer: retryOutput.text,
-        chunkById: prompt.chunkById,
-        question,
-      });
-      if (retryPost.used_chunks > 0) {
-        llmOutput = retryOutput;
-        post = retryPost;
+  // — a documented flake mode. Issue up to MAX_CITATION_RETRIES retries
+  // with a reinforced system prompt that explicitly calls out the prior
+  // failure and demands the marker. Streaming requests skip retry: the
+  // client already received the failed deltas and a second pass would
+  // scramble the user-visible stream. Non-streaming callers see a
+  // transparent retry — same JSON shape, slightly higher latency.
+  //
+  // Bumped 1 → 2 in codex round-11 (2/20 still 400 on the first retry;
+  // a second retry should bring flake rate below 1%).
+  let citationRetryCount = 0;
+  if (!isStreaming) {
+    while (post.used_chunks === 0 && citationRetryCount < MAX_CITATION_RETRIES) {
+      citationRetryCount += 1;
+      const retryInput = {
+        systemPrompt: prompt.system + '\n\n' + citationReinforcementFor(queryLang),
+        userPrompt: prompt.user,
+      };
+      try {
+        const retryOutput = await deps.llm.generate(retryInput);
+        const retryPost = postprocess({
+          answerLang: queryLang,
+          rawAnswer: retryOutput.text,
+          chunkById: prompt.chunkById,
+          question,
+        });
+        if (retryPost.used_chunks > 0) {
+          llmOutput = retryOutput;
+          post = retryPost;
+          break;
+        }
+      } catch {
+        // Retry itself threw — keep looping; the primary diagnostic is
+        // "first call had no citations" and the trace count records how
+        // many recovery attempts we made.
       }
-    } catch {
-      // Retry itself failed — fall through to the original no_citations
-      // path below. We don't surface the retry error to the caller; the
-      // primary diagnostic is "first call had no citations".
     }
   }
 
@@ -353,7 +368,7 @@ async function askWithTraceInternal(
         confidence,
         tokens_in: null,
         tokens_out: null,
-        citation_retry_attempted: citationRetryAttempted,
+        citation_retry_count: citationRetryCount,
       },
       queryVector,
     };
@@ -393,7 +408,7 @@ async function askWithTraceInternal(
       confidence,
       tokens_in: null,
       tokens_out: null,
-      citation_retry_attempted: citationRetryAttempted,
+      citation_retry_count: citationRetryCount,
     },
     queryVector,
   };
