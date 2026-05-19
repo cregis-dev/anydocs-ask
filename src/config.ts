@@ -241,6 +241,33 @@ export async function loadConfig(projectRoot: string): Promise<LoadConfigResult>
  * once at config-load time so /v1/index/status, /v1/health, and CLI status
  * all see the same resolved values.
  */
+/**
+ * Same shape as the file-side of `loadConfig`, but accepts the raw JSON text
+ * directly. Used by the console's editable Config drawer to validate edits
+ * before writing to disk. Does NOT apply env overrides — the caller wants
+ * to inspect / persist the file content as-is.
+ *
+ * Throws a clear Error on malformed JSON or non-object top-level; section
+ * issues are surfaced through `warnings` (matches `loadConfig` semantics).
+ */
+export function parseAndValidateAskConfig(rawText: string): {
+  config: ResolvedConfig;
+  warnings: string[];
+} {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch (err) {
+    throw new Error(`malformed JSON: ${(err as Error).message}`);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('top-level value must be a JSON object');
+  }
+  const warnings: string[] = [];
+  const config = mergeWithDefaults(parsed as Record<string, unknown>, warnings);
+  return { config, warnings };
+}
+
 export function applyEnvOverrides(config: ResolvedConfig): void {
   const envModel = process.env.ANTHROPIC_MODEL?.trim();
   if (envModel && envModel.length > 0 && config.llm.provider === 'anthropic') {

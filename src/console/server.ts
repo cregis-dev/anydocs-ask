@@ -12,7 +12,7 @@
  * eval/analyze/golden triggers, reports/runs viewers.
  */
 
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { Hono } from 'hono';
@@ -47,12 +47,8 @@ import {
 import { loadIndexSnapshot, type ChildIndexStatus } from './index-state.ts';
 import { loadTrafficWindow } from './traffic-state.ts';
 import { loadProjectHomeStats, summarizeWorkspace } from './home-state.ts';
-import { loadConsoleConfigView } from './config-state.ts';
-import {
-  parsePromptConfigBodyWithWarnings,
-  readProjectPromptConfig,
-  writeProjectPromptConfig,
-} from './prompt-config.ts';
+import { loadAskConfigForView } from './ask-config-state.ts';
+import { parseAndValidateAskConfig } from '../config.ts';
 import {
   decideCandidate,
   flushApproved,
@@ -136,7 +132,6 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         running,
         projectStats,
         workspaceSummary,
-        configView: loadConsoleConfigView(deps.workspacePath, null),
       }),
     );
   });
@@ -361,29 +356,62 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         ...(candidates ? { candidates } : {}),
         analyzeHistory,
         latestAnalyzeBody,
-        configView: loadConsoleConfigView(deps.workspacePath, project.valid ? project.path : null),
-        promptConfig: project.valid ? readProjectPromptConfig(project.path) : undefined,
+        askConfig: project.valid ? loadAskConfigForView(project.path) : undefined,
       }),
     );
   });
 
-  app.get('/api/projects/:name/prompt-config', (c) => {
+  // -----------------------------------------------------------------------
+  // Project-level anydocs.ask.json (full file) — read/write for the
+  // Settings tab. POST writes the whole file (the Settings form
+  // serializes every section), so there's no per-section endpoint.
+  // -----------------------------------------------------------------------
+  app.get('/api/projects/:name/ask-config', (c) => {
     const project = findProject(deps.workspacePath, c.req.param('name'));
-    if (!project) return c.json({ ok: false, error: `unknown project: ${c.req.param('name')}` }, 404);
+    if (!project) {
+      return c.json({ ok: false, error: `unknown project: ${c.req.param('name')}` }, 404);
+    }
     if (!project.valid) {
       return c.json(
         { ok: false, error: `project '${project.name}' invalid (missing: ${project.missing.join(', ')})` },
         400,
       );
     }
-    const view = readProjectPromptConfig(project.path);
-    if (view.error) return c.json({ ok: false, error: view.error, prompt: view.prompt, warnings: view.warnings }, 400);
-    return c.json({ ok: true, prompt: view.prompt, warnings: view.warnings });
+    const path = join(project.path, 'anydocs.ask.json');
+    if (!existsSync(path)) {
+      return c.json({
+        ok: true,
+        path,
+        exists: false,
+        rawText: null,
+        mtimeISO: null,
+        warnings: [],
+        parseError: null,
+      });
+    }
+    let rawText: string;
+    try {
+      rawText = readFileSync(path, 'utf8');
+    } catch (err) {
+      return c.json({ ok: false, error: `read failed: ${(err as Error).message}` }, 500);
+    }
+    const mtimeISO = new Date(statSync(path).mtimeMs).toISOString();
+    let warnings: string[] = [];
+    let parseError: string | null = null;
+    try {
+      const result = parseAndValidateAskConfig(rawText);
+      warnings = result.warnings;
+    } catch (err) {
+      parseError = (err as Error).message;
+    }
+    return c.json({ ok: true, path, exists: true, rawText, mtimeISO, warnings, parseError });
   });
 
-  app.post('/api/projects/:name/prompt-config', async (c) => {
+  app.post('/api/projects/:name/ask-config', async (c) => {
     const project = findProject(deps.workspacePath, c.req.param('name'));
-    if (!project) return c.json({ ok: false, error: `unknown project: ${c.req.param('name')}` }, 404);
+    if (!project) {
+      return c.json({ ok: false, error: `unknown project: ${c.req.param('name')}` }, 404);
+    }
     if (!project.valid) {
       return c.json(
         { ok: false, error: `project '${project.name}' invalid (missing: ${project.missing.join(', ')})` },
@@ -396,14 +424,45 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     } catch {
       return c.json({ ok: false, error: 'invalid JSON body' }, 400);
     }
-    let parsed;
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      return c.json({ ok: false, error: 'body must be a JSON object' }, 400);
+    }
+    const obj = body as Record<string, unknown>;
+    if (typeof obj.rawText !== 'string') {
+      return c.json({ ok: false, error: 'rawText (string) is required' }, 400);
+    }
+    const path = join(project.path, 'anydocs.ask.json');
+    // mtime guard — when the client passes the mtime it read, refuse to
+    // overwrite a file that changed on disk meanwhile (another tab, CLI
+    // edit, etc.). Clients can opt out by omitting the field.
+    if (typeof obj.expectedMtimeISO === 'string' && existsSync(path)) {
+      const currentMtime = new Date(statSync(path).mtimeMs).toISOString();
+      if (currentMtime !== obj.expectedMtimeISO) {
+        return c.json(
+          {
+            ok: false,
+            error: 'file changed on disk since last load — refresh and retry',
+            currentMtimeISO: currentMtime,
+          },
+          409,
+        );
+      }
+    }
+    let warnings: string[] = [];
     try {
-      parsed = parsePromptConfigBodyWithWarnings(body);
-      writeProjectPromptConfig(project.path, parsed.prompt);
+      const result = parseAndValidateAskConfig(obj.rawText);
+      warnings = result.warnings;
     } catch (err) {
       return c.json({ ok: false, error: (err as Error).message }, 400);
     }
-    return c.json({ ok: true, prompt: parsed.prompt, warnings: parsed.warnings });
+    const text = obj.rawText.endsWith('\n') ? obj.rawText : `${obj.rawText}\n`;
+    try {
+      writeFileSync(path, text, 'utf8');
+    } catch (err) {
+      return c.json({ ok: false, error: `write failed: ${(err as Error).message}` }, 500);
+    }
+    const mtimeISO = new Date(statSync(path).mtimeMs).toISOString();
+    return c.json({ ok: true, path, mtimeISO, warnings });
   });
 
   app.get('/p/:name/reports/:file', (c) => {
@@ -628,6 +687,53 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       }
     }
     return new Response(outBody, {
+      status: res.status,
+      headers: { 'Content-Type': res.headers.get('content-type') ?? 'application/json' },
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Ask feedback proxy — forwards 👍/👎 from the console Ask UI to the
+  // child's /v1/ask/feedback. Requires a running child (no auto-spawn —
+  // an answer_id only exists if an ask just happened, which means the
+  // child is already up).
+  // -----------------------------------------------------------------------
+  app.post('/api/projects/:name/feedback', async (c) => {
+    const name = c.req.param('name');
+    const project = findProject(deps.workspacePath, name);
+    if (!project) {
+      return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
+    }
+    if (!project.valid) {
+      return c.json(
+        { ok: false, error: `project '${name}' invalid (missing: ${project.missing.join(', ')})` },
+        400,
+      );
+    }
+    const port = deps.registry.getPort(name);
+    if (port === null) {
+      return c.json({ ok: false, error: 'project not running' }, 502);
+    }
+    deps.registry.touch(name);
+
+    let rawBody: string;
+    try {
+      rawBody = await c.req.text();
+    } catch (err) {
+      return c.json({ ok: false, error: `read body failed: ${(err as Error).message}` }, 400);
+    }
+    let res: Response;
+    try {
+      res = await fetchFn(`http://127.0.0.1:${port}/v1/ask/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: rawBody,
+      });
+    } catch (err) {
+      return c.json({ ok: false, error: `proxy failed: ${(err as Error).message}` }, 502);
+    }
+    const text = await res.text();
+    return new Response(text, {
       status: res.status,
       headers: { 'Content-Type': res.headers.get('content-type') ?? 'application/json' },
     });

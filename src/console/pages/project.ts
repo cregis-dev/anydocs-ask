@@ -30,9 +30,8 @@ import type { TrafficWindow } from '../traffic-state.ts';
 import type { CandidateSnapshot } from '../golden-workshop-state.ts';
 import type { AnalyzeReportSummary } from '../eval-state.ts';
 import { computeNextAction, type NextAction } from '../next-action.ts';
-import { renderConfigDrawer } from './config-drawer.ts';
-import type { ConfigViewModel } from '../config-state.ts';
-import type { PromptConfigView } from '../prompt-config.ts';
+import type { AskConfigView } from '../ask-config-state.ts';
+import type { ResolvedConfig } from '../../config.ts';
 
 export type ProjectViewModel = {
   project: ProjectListing;
@@ -44,11 +43,10 @@ export type ProjectViewModel = {
   latestEvalReportBody?: string | null;
   indexSnapshot?: IndexSnapshot;
   trafficWindow?: TrafficWindow;
-  configView?: ConfigViewModel;
   candidates?: CandidateSnapshot;
   analyzeHistory?: AnalyzeReportSummary[];
   latestAnalyzeBody?: string | null;
-  promptConfig?: PromptConfigView;
+  askConfig?: AskConfigView;
 };
 
 export function renderProject(vm: ProjectViewModel): Html {
@@ -88,7 +86,6 @@ export function renderProject(vm: ProjectViewModel): Html {
     title: project.name,
     body,
     nav: vm.nav,
-    ...(vm.configView ? { configDrawer: renderConfigDrawer(vm.configView) } : {}),
   });
 }
 
@@ -277,6 +274,9 @@ function renderTabs(): Html {
       <a class="tab" role="tab" data-project-tab="traffic" href="#traffic" aria-selected="false">
         <svg style="width:14px;height:14px;opacity:.7;"><use href="#i-chart"/></svg> Traffic
       </a>
+      <a class="tab" role="tab" data-project-tab="settings" href="#settings" aria-selected="false">
+        <svg style="width:14px;height:14px;opacity:.7;"><use href="#i-gear"/></svg> Settings
+      </a>
     </nav>
   `;
 }
@@ -288,7 +288,6 @@ function tabPanels(
 ): Html {
   return html`
     <div id="ptab-ask" class="tab-panel" data-project-tab="ask">
-      ${promptConfigCard(vm.promptConfig)}
       ${askCard(live)}
     </div>
     <div id="ptab-index" class="tab-panel" data-project-tab="index" hidden>
@@ -316,67 +315,327 @@ function tabPanels(
           })
         : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">Traffic status unavailable.</p></div></div>`}
     </div>
+    <div id="ptab-settings" class="tab-panel" data-project-tab="settings" hidden>
+      ${vm.askConfig
+        ? renderSettingsTab(vm.askConfig)
+        : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">Settings unavailable (invalid project).</p></div></div>`}
+    </div>
   `;
 }
 
-function promptConfigCard(view: PromptConfigView | undefined): Html {
-  const prompt = view?.prompt ?? { assistantName: null, systemInstructions: [] };
-  const instructions = prompt.systemInstructions.join('\n');
-  const warnings = view?.warnings ?? [];
-  const status = view?.error
-    ? html`<span id="prompt-config-status" class="status err">${view.error}</span>`
-    : html`<span id="prompt-config-status" class="status">ready</span>`;
-  const warningBlock = warnings.length > 0
-    ? html`
-      <div id="prompt-config-warnings" class="banner warn" style="margin: 0 0 var(--s-4);">
-        <span class="b-ico"><svg><use href="#i-alert"/></svg></span>
-        <div class="b-bd">
-          <div class="b-ti">Prompt warnings</div>
-          <ul style="margin: var(--s-1) 0 0; padding-left: var(--s-5);">
-            ${warnings.map((w) => html`<li style="font-size: var(--t-12); color: var(--warn);">${w}</li>`)}
-          </ul>
-        </div>
-      </div>
-    `
-    : html`<div id="prompt-config-warnings" class="banner warn" hidden style="margin: 0 0 var(--s-4);"></div>`;
+// ---------------------------------------------------------------------------
+// Settings tab — structured form over the full anydocs.ask.json schema.
+// Every section in ResolvedConfig (prompt / llm / embedding / retrieval /
+// clarify / indexing / runs / analyze / feedback / server) gets a group of
+// fields; the bootstrap script reads `data-cfg-path` + `data-cfg-type` on
+// each control to reconstruct the JSON object on submit. Save POSTs the
+// full file to /api/projects/:name/ask-config — server re-validates.
+//
+// Prefill rule: a field is only prefilled when it's *actually present*
+// in the file (looked up in `raw`). Otherwise the input is left empty
+// and the default value is shown as placeholder. The client save
+// skips empty non-nullable inputs so unset fields stay unset — the
+// server-side schema fills in defaults at runtime. This preserves env
+// overrides (e.g. ANTHROPIC_MODEL) and keeps the file lean.
+// ---------------------------------------------------------------------------
+
+type SettingsCtx = {
+  raw: Record<string, unknown> | null;
+  defaults: ResolvedConfig;
+};
+
+function renderSettingsTab(view: AskConfigView): Html {
+  const ctx: SettingsCtx = { raw: view.raw, defaults: view.defaults };
+  const mtimeAttr = view.mtimeISO ?? '';
+  const mtimeText = view.mtimeISO ? `mtime ${view.mtimeISO.slice(0, 16).replace('T', ' ')}` : 'new file';
+  const exists = view.exists;
+
   return html`
-    <section class="card" style="margin-bottom: var(--s-4);">
+    <section class="card">
       <div class="card-hd">
-        <h2><svg style="width: 14px; height: 14px;"><use href="#i-gear"/></svg> Prompt settings</h2>
-        <span class="meta">anydocs.ask.json</span>
+        <h2><svg style="width: 14px; height: 14px;"><use href="#i-gear"/></svg> Settings</h2>
+        <span class="meta">${view.path} · ${exists ? mtimeText : 'new file'}</span>
       </div>
-      <form id="prompt-config-form" class="card-bd">
+      <form id="settings-form" class="card-bd" data-mtime="${mtimeAttr}">
+        ${view.parseError
+          ? html`
+            <div class="banner err" style="margin: 0 0 var(--s-4);">
+              <span class="b-ico"><svg><use href="#i-err"/></svg></span>
+              <div class="b-bd">
+                <div class="b-ti">Config file failed to parse</div>
+                <div class="b-de">${view.parseError}. The form starts blank; saving will write a fresh file.</div>
+              </div>
+            </div>`
+          : ''}
+        <div id="settings-warnings" class="banner warn" ${view.warnings.length === 0 ? 'hidden' : ''} style="margin: 0 0 var(--s-4);">
+          ${view.warnings.length > 0
+            ? html`
+              <span class="b-ico"><svg><use href="#i-alert"/></svg></span>
+              <div class="b-bd">
+                <div class="b-ti">${view.warnings.length} validation warning${view.warnings.length > 1 ? 's' : ''}</div>
+                <ul style="margin: var(--s-1) 0 0; padding-left: var(--s-5);">
+                  ${view.warnings.map((w) => html`<li style="font-size: var(--t-12);">${w}</li>`)}
+                </ul>
+              </div>`
+            : ''}
+        </div>
+
         <p class="muted" style="font-size: var(--t-13); margin: 0 0 var(--s-4);">
-          Add project-specific assistant identity and domain guidance. Core grounding and citation rules still apply.
-          Restart a running project after saving.
+          Project-scoped configuration written to <code class="inline">anydocs.ask.json</code>.
+          Leave a field blank to use the default (shown as placeholder) — empty inputs are NOT written to the file, so env overrides (e.g. <code class="inline">ANTHROPIC_MODEL</code>) keep working.
+          Restart the project after saving for runtime changes to take effect.
         </p>
-        ${warningBlock}
-        <label style="display: grid; gap: var(--s-2); margin-bottom: var(--s-3);">
-          <span style="font-size: var(--t-12); color: var(--fg-soft); font-weight: 600;">Assistant name</span>
-          <input
-            id="prompt-assistant-name"
-            class="input"
-            type="text"
-            value="${prompt.assistantName ?? ''}"
-            placeholder="e.g. Cregis AI Assistant"
-          />
-        </label>
-        <label style="display: grid; gap: var(--s-2);">
-          <span style="font-size: var(--t-12); color: var(--fg-soft); font-weight: 600;">System instructions</span>
-          <textarea
-            id="prompt-system-instructions"
-            class="textarea"
-            rows="5"
-            placeholder="One instruction per line. Example: Payment Engine is for orders, checkout, callbacks, and payment status."
-          >${instructions}</textarea>
-        </label>
-        <div style="display: flex; align-items: center; gap: var(--s-3); margin-top: var(--s-3);">
-          <button id="prompt-config-save" class="btn sm primary" type="submit">save prompt</button>
-          ${status}
+
+        ${promptSection(ctx)}
+        ${llmSection(ctx)}
+        ${embeddingSection(ctx)}
+        ${retrievalSection(ctx)}
+        ${clarifySection(ctx)}
+        ${feedbackSection(ctx)}
+        ${indexingSection(ctx)}
+        ${runsSection(ctx)}
+        ${analyzeSection(ctx)}
+        ${serverSection(ctx)}
+
+        <div style="position: sticky; bottom: 0; background: var(--bg-elev); padding: var(--s-3) 0; border-top: 1px solid var(--bd-soft); margin-top: var(--s-5); display: flex; align-items: center; gap: var(--s-3);">
+          <button id="settings-save" class="btn primary" type="submit">save</button>
+          <button id="settings-reset" class="btn" type="button">reset</button>
+          <span id="settings-status" class="status"></span>
         </div>
       </form>
     </section>
   `;
+}
+
+// ---- raw-lookup helpers -------------------------------------------------
+
+/** Walk a dot-path through `raw`. Returns `{ present: true, value }` only
+ *  when every segment exists. Used to decide prefill vs. placeholder. */
+function pathLookup(raw: Record<string, unknown> | null, path: string): { present: boolean; value: unknown } {
+  if (raw === null) return { present: false, value: undefined };
+  const parts = path.split('.');
+  let cur: unknown = raw;
+  for (const p of parts) {
+    if (cur === null || typeof cur !== 'object') return { present: false, value: undefined };
+    const rec = cur as Record<string, unknown>;
+    if (!Object.prototype.hasOwnProperty.call(rec, p)) return { present: false, value: undefined };
+    cur = rec[p];
+  }
+  return { present: true, value: cur };
+}
+
+// ---- Section groups -----------------------------------------------------
+
+function fieldGroup(title: string, hint: string, fields: Html[]): Html {
+  return html`
+    <fieldset style="border: 1px solid var(--bd-soft); border-radius: 6px; padding: var(--s-3) var(--s-4) var(--s-4); margin: 0 0 var(--s-4);">
+      <legend style="padding: 0 var(--s-2); font-weight: 600; font-size: var(--t-13); color: var(--fg);">${title}</legend>
+      ${hint
+        ? html`<p class="muted" style="font-size: 11.5px; margin: 0 0 var(--s-3);">${hint}</p>`
+        : ''}
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-3) var(--s-4);">
+        ${fields}
+      </div>
+    </fieldset>
+  `;
+}
+
+function promptSection(ctx: SettingsCtx): Html {
+  return fieldGroup('Prompt', 'Optional assistant identity + domain guidance layered onto the system prompt.', [
+    textField(ctx, { path: 'prompt.assistantName', label: 'Assistant name', nullable: true, placeholder: 'e.g. Cregis AI Assistant', span: 2 }),
+    textareaField(ctx, { path: 'prompt.systemInstructions', label: 'System instructions (one per line)', rows: 5, span: 2 }),
+  ]);
+}
+
+function llmSection(ctx: SettingsCtx): Html {
+  return fieldGroup('LLM', 'Answer-generation model + API key env var.', [
+    selectField(ctx, { path: 'llm.provider', label: 'Provider', options: ['anthropic', 'openai', 'mock'] }),
+    textField(ctx, { path: 'llm.model', label: 'Model' }),
+    textField(ctx, { path: 'llm.apiKeyEnv', label: 'API key env var', hint: 'env var name holding the API key (value never lives in the file)' }),
+  ]);
+}
+
+function embeddingSection(ctx: SettingsCtx): Html {
+  return fieldGroup('Embedding', 'Local BGE-M3 for vector retrieval. Quantized = smaller / faster, full precision = slightly better recall.', [
+    selectField(ctx, { path: 'embedding.provider', label: 'Provider', options: ['local'] }),
+    textField(ctx, { path: 'embedding.model', label: 'Model' }),
+    textField(ctx, { path: 'embedding.cacheDir', label: 'Cache dir (absolute path)', nullable: true, placeholder: '(~/.cache/huggingface/anydocs-ask/transformers)', span: 2 }),
+    checkboxField(ctx, { path: 'embedding.preferQuantized', label: 'Prefer quantized weights' }),
+    checkboxField(ctx, { path: 'embedding.allowSingleLangFallback', label: 'Allow single-lang fallback' }),
+  ]);
+}
+
+function retrievalSection(ctx: SettingsCtx): Html {
+  return fieldGroup('Retrieval', 'Vector + BM25 fusion / re-ranking knobs. Raise topK if the right page often misses the top-N.', [
+    intField(ctx, { path: 'retrieval.topK', label: 'topK', min: 1 }),
+    intField(ctx, { path: 'retrieval.rrfK', label: 'RRF k', min: 1 }),
+    floatField(ctx, { path: 'retrieval.rerankSameSubtreeBoost', label: 'Re-rank same-subtree boost' }),
+    floatField(ctx, { path: 'retrieval.navOrderBoost', label: 'Nav-order boost' }),
+    intField(ctx, { path: 'retrieval.maxChunksHardCap', label: 'Max chunks (hard cap)', min: 1 }),
+  ]);
+}
+
+function clarifySection(ctx: SettingsCtx): Html {
+  return fieldGroup('Clarify', 'Thresholds that decide when to ask a clarifying sub-tree question vs. answering directly.', [
+    floatField(ctx, { path: 'clarify.dominantThreshold', label: 'Dominant threshold' }),
+    floatField(ctx, { path: 'clarify.ambiguousGap', label: 'Ambiguous gap' }),
+  ]);
+}
+
+function feedbackSection(ctx: SettingsCtx): Html {
+  return fieldGroup('Feedback', 'v1.5 feedback loop (PRD §11). Disabled by default; enable to start collecting β / γ signals.', [
+    checkboxField(ctx, { path: 'feedback.enabled', label: 'Enable feedback collection', span: 2 }),
+    selectField(ctx, { path: 'feedback.implicitSignals', label: 'Implicit signals (γ)', options: ['off', 'session-only', 'full'] }),
+    floatField(ctx, { path: 'feedback.rerankerWeight', label: 'Reranker weight (0.3 future)' }),
+  ]);
+}
+
+function indexingSection(ctx: SettingsCtx): Html {
+  return fieldGroup('Indexing', 'Chunk size + watch debounce for the local index.', [
+    intField(ctx, { path: 'indexing.chunkMaxTokens', label: 'Chunk max tokens', min: 1 }),
+    intField(ctx, { path: 'indexing.chunkHardCap', label: 'Chunk hard cap (tokens)', min: 1 }),
+    intField(ctx, { path: 'indexing.debounceMs', label: 'Watch debounce (ms)', min: 0 }),
+  ]);
+}
+
+function runsSection(ctx: SettingsCtx): Html {
+  return fieldGroup('Runs', 'runs.jsonl ledger — rotated weekly. Truncate caps prevent huge prompts / answers from bloating the file.', [
+    checkboxField(ctx, { path: 'runs.enabled', label: 'Enable runs.jsonl', span: 2 }),
+    selectField(ctx, { path: 'runs.rotation', label: 'Rotation', options: ['weekly'] }),
+    intField(ctx, { path: 'runs.truncateQueryChars', label: 'Truncate query (chars)', nullable: true, min: 1 }),
+    intField(ctx, { path: 'runs.truncateAnswerChars', label: 'Truncate answer (chars)', nullable: true, min: 1 }),
+  ]);
+}
+
+function analyzeSection(ctx: SettingsCtx): Html {
+  return fieldGroup('Analyze', 'Default knobs for the `analyze` CLI command.', [
+    intField(ctx, { path: 'analyze.lookbackDays', label: 'Lookback days', min: 1 }),
+    intField(ctx, { path: 'analyze.latencyP95Threshold', label: 'Latency P95 threshold (ms)', min: 1 }),
+    floatField(ctx, { path: 'analyze.confidenceFloor', label: 'Confidence floor' }),
+  ]);
+}
+
+function serverSection(ctx: SettingsCtx): Html {
+  return fieldGroup('Server', 'HTTP server for /v1/ask. Edit cautiously — these affect how Reader clients reach the service.', [
+    textField(ctx, { path: 'server.host', label: 'Host' }),
+    intField(ctx, { path: 'server.port', label: 'Port', min: 1 }),
+    textareaField(ctx, { path: 'server.cors.allowedOrigins', label: 'CORS allowed origins (one per line)', rows: 3, span: 2 }),
+  ]);
+}
+
+// ---- Control helpers ---------------------------------------------------
+
+function fieldWrap(label: string, hint: string | undefined, span: number | undefined, control: Html): Html {
+  const styleAttr = span === 2 ? ' style="grid-column: 1 / -1;"' : '';
+  return html`
+    <label${raw(styleAttr)} style="${span === 2 ? 'grid-column: 1 / -1; ' : ''}display: grid; gap: var(--s-1);">
+      <span style="font-size: var(--t-12); color: var(--fg-soft); font-weight: 600;">${label}</span>
+      ${control}
+      ${hint ? html`<span class="muted" style="font-size: 11.5px;">${hint}</span>` : ''}
+    </label>
+  `;
+}
+
+function defaultPlaceholder(defaults: ResolvedConfig, path: string): string {
+  const lk = pathLookup(defaults as unknown as Record<string, unknown>, path);
+  if (!lk.present) return '';
+  const v = lk.value;
+  if (v === null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  return '';
+}
+
+function textField(ctx: SettingsCtx, args: { path: string; label: string; nullable?: boolean; placeholder?: string; hint?: string; span?: number }): Html {
+  const type = args.nullable ? 'stringOrNull' : 'string';
+  const lk = pathLookup(ctx.raw, args.path);
+  const valueAttr = lk.present && typeof lk.value === 'string' ? lk.value : '';
+  const placeholder = args.placeholder ?? defaultPlaceholder(ctx.defaults, args.path);
+  return fieldWrap(
+    args.label,
+    args.hint,
+    args.span,
+    html`<input class="input" type="text" data-cfg-path="${args.path}" data-cfg-type="${type}" value="${valueAttr}" placeholder="${placeholder}" />`,
+  );
+}
+
+function intField(ctx: SettingsCtx, args: { path: string; label: string; nullable?: boolean; min?: number; hint?: string; span?: number }): Html {
+  const type = args.nullable ? 'intOrNull' : 'int';
+  const minAttr = args.min !== undefined ? ` min="${args.min}"` : '';
+  const lk = pathLookup(ctx.raw, args.path);
+  const valueAttr = lk.present && typeof lk.value === 'number' ? String(lk.value) : '';
+  const placeholder = defaultPlaceholder(ctx.defaults, args.path);
+  return fieldWrap(
+    args.label,
+    args.hint,
+    args.span,
+    html`<input class="input" type="number" step="1"${raw(minAttr)} data-cfg-path="${args.path}" data-cfg-type="${type}" value="${valueAttr}" placeholder="${placeholder}" />`,
+  );
+}
+
+function floatField(ctx: SettingsCtx, args: { path: string; label: string; nullable?: boolean; hint?: string; span?: number }): Html {
+  const type = args.nullable ? 'floatOrNull' : 'float';
+  const lk = pathLookup(ctx.raw, args.path);
+  const valueAttr = lk.present && typeof lk.value === 'number' ? String(lk.value) : '';
+  const placeholder = defaultPlaceholder(ctx.defaults, args.path);
+  return fieldWrap(
+    args.label,
+    args.hint,
+    args.span,
+    html`<input class="input" type="number" step="0.01" data-cfg-path="${args.path}" data-cfg-type="${type}" value="${valueAttr}" placeholder="${placeholder}" />`,
+  );
+}
+
+function checkboxField(ctx: SettingsCtx, args: { path: string; label: string; span?: number }): Html {
+  // Booleans can't represent "unset", so we prefill from the merged value:
+  // if file has the field → its value; else → default. Save is suppressed
+  // when the checkbox state still matches the default (see client-side
+  // collectSettingsPayload), so unchanged defaults don't get pinned.
+  const styleAttr = args.span === 2 ? ' style="grid-column: 1 / -1;"' : '';
+  const lk = pathLookup(ctx.raw, args.path);
+  const defaultLk = pathLookup(ctx.defaults as unknown as Record<string, unknown>, args.path);
+  const checked = lk.present
+    ? lk.value === true
+    : defaultLk.value === true;
+  const defaultVal = defaultLk.value === true ? 'true' : 'false';
+  return html`
+    <label${raw(styleAttr)} class="check" style="${args.span === 2 ? 'grid-column: 1 / -1; ' : ''}display: flex; align-items: center; gap: var(--s-2); padding: var(--s-2) 0;">
+      <input type="checkbox" data-cfg-path="${args.path}" data-cfg-type="boolean" data-cfg-default="${defaultVal}" ${checked ? 'checked' : ''} />
+      <span style="font-size: var(--t-13);">${args.label}${lk.present ? '' : html` <span class="muted" style="font-size: 11px;">(default)</span>`}</span>
+    </label>
+  `;
+}
+
+function selectField(ctx: SettingsCtx, args: { path: string; label: string; options: string[]; hint?: string; span?: number }): Html {
+  // Selects can't represent "unset" cleanly, but we can label the default
+  // option and suppress save when the user hasn't moved off it.
+  const lk = pathLookup(ctx.raw, args.path);
+  const defaultLk = pathLookup(ctx.defaults as unknown as Record<string, unknown>, args.path);
+  const defaultStr = typeof defaultLk.value === 'string' ? defaultLk.value : '';
+  const selected = lk.present && typeof lk.value === 'string' ? lk.value : defaultStr;
+  return fieldWrap(
+    args.label,
+    args.hint,
+    args.span,
+    html`
+      <select class="input" data-cfg-path="${args.path}" data-cfg-type="string" data-cfg-default="${defaultStr}">
+        ${args.options.map((o) => html`<option value="${o}" ${o === selected ? 'selected' : ''}>${o}${o === defaultStr ? ' (default)' : ''}</option>`)}
+      </select>
+    `,
+  );
+}
+
+function textareaField(ctx: SettingsCtx, args: { path: string; label: string; rows: number; hint?: string; span?: number }): Html {
+  const lk = pathLookup(ctx.raw, args.path);
+  const value = lk.present && Array.isArray(lk.value)
+    ? (lk.value as unknown[]).filter((x): x is string => typeof x === 'string').join('\n')
+    : '';
+  return fieldWrap(
+    args.label,
+    args.hint,
+    args.span,
+    html`<textarea class="textarea" rows="${args.rows}" data-cfg-path="${args.path}" data-cfg-type="stringArray">${value}</textarea>`,
+  );
 }
 
 function askCard(live: boolean): Html {
@@ -385,9 +644,10 @@ function askCard(live: boolean): Html {
     <section class="card primary">
       <div class="card-hd">
         <h2><svg style="width: 14px; height: 14px;"><use href="#i-chat"/></svg> Ask</h2>
-        <label id="persist-toggle-wrap" class="check">
-          <input type="checkbox" id="persist-toggle" />
-          <span id="persist-toggle-label" class="muted">dry-run · don't write to runs</span>
+        <label id="dryrun-toggle-wrap" class="toggle" title="when on, this question doesn't write to runs.jsonl">
+          <input type="checkbox" id="dryrun-toggle" checked />
+          <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+          <span id="dryrun-toggle-label" class="muted">dry-run · 不写入 runs</span>
         </label>
       </div>
       <div class="card-bd">
@@ -423,6 +683,14 @@ function askCard(live: boolean): Html {
             <div id="ask-clarify" class="banner warn" hidden style="margin: 0 0 var(--s-3);"></div>
             <div id="ask-answer-md" class="md"></div>
             <div id="ask-error" class="banner err" hidden style="margin: 0;"></div>
+            <div id="ask-feedback" hidden style="margin-top: var(--s-4); padding-top: var(--s-3); border-top: 1px solid var(--bd-soft); display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap;">
+              <span style="font-size: var(--t-12); color: var(--fg-soft);">这个回答怎么样？</span>
+              <div style="display: flex; gap: var(--s-2);">
+                <button id="ask-fb-up" class="btn sm" type="button" aria-label="答得好" title="答得好">👍 答得好</button>
+                <button id="ask-fb-down" class="btn sm" type="button" aria-label="答得差" title="答得差">👎 答得差</button>
+              </div>
+              <span id="ask-fb-status" class="status" style="margin-left: auto;"></span>
+            </div>
           </div>
           <div id="tab-citations" class="tab-panel" data-tab="citations" hidden>
             <div id="ask-cite-list" class="cite-list"></div>
@@ -1226,28 +1494,29 @@ if (askResultEl) {
   });
 }
 
-// persist toggle — defaults OFF every page load.
-function setPersistUI(on) {
-  const label = $('persist-toggle-label');
+// Dry-run toggle — defaults ON every page load (don't write to runs.jsonl).
+// Checkbox semantics: checked = dry-run on, unchecked = persist on.
+function setDryRunUI(dryRun) {
+  const label = $('dryrun-toggle-label');
   const warn = $('persist-warning');
   const btn = $('btn-ask');
-  if (on) {
-    if (label) { label.textContent = '⚠ persist · writes to runs (source=console)'; label.className = ''; label.style.color = 'var(--err)'; label.style.fontWeight = '600'; }
-    if (warn) warn.hidden = false;
-    if (btn) btn.classList.add('danger');
-  } else {
-    if (label) { label.textContent = 'dry-run · don\\u2019t write to runs'; label.className = 'muted'; label.style.color = ''; label.style.fontWeight = ''; }
+  if (dryRun) {
+    if (label) { label.textContent = 'dry-run · 不写入 runs'; label.className = 'muted'; label.style.color = ''; label.style.fontWeight = ''; }
     if (warn) warn.hidden = true;
     if (btn) btn.classList.remove('danger');
+  } else {
+    if (label) { label.textContent = '⚠ persist · 写入 runs (source=console)'; label.className = ''; label.style.color = 'var(--err)'; label.style.fontWeight = '600'; }
+    if (warn) warn.hidden = false;
+    if (btn) btn.classList.add('danger');
   }
 }
-const persistToggle = $('persist-toggle');
-if (persistToggle) {
-  persistToggle.checked = false;
-  persistToggle.addEventListener('change', () => setPersistUI(persistToggle.checked));
-  setPersistUI(false);
+const dryrunToggle = $('dryrun-toggle');
+if (dryrunToggle) {
+  dryrunToggle.checked = true;
+  dryrunToggle.addEventListener('change', () => setDryRunUI(dryrunToggle.checked));
+  setDryRunUI(true);
 }
-function isPersist() { return !!(persistToggle && persistToggle.checked); }
+function isPersist() { return !!(dryrunToggle && !dryrunToggle.checked); }
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1269,7 +1538,7 @@ function renderAnswer(body) {
     if (body.translation_notice) {
       md = '> _translation notice:_ ' + body.translation_notice + '\\n\\n' + md;
     }
-    ansEl.innerHTML = marked.parse(md);
+    ansEl.innerHTML = renderCitationMarkers(marked.parse(md));
   } else if (body && body.type === 'clarify') {
     clarEl.hidden = false;
     let h = '<span class="b-ico"><svg><use href="#i-alert"/></svg></span>';
@@ -1315,6 +1584,87 @@ function renderAnswer(body) {
     errEl.hidden = false;
     errEl.innerHTML = '<span class="b-ico"><svg><use href="#i-err"/></svg></span><div class="b-bd"><div class="b-ti">unexpected response shape</div></div>';
   }
+
+  // Only an answer with an answer_id can be rated. clarify/error responses
+  // have no answer_id; dry_run answers do (the child mints one even when it
+  // doesn't write to the answers table — POST /v1/ask/feedback is permissive
+  // about missing FK, just loses the retrieved snapshot).
+  setFeedbackBar(body && body.type === 'answer' && typeof body.answer_id === 'string' ? body.answer_id : null);
+}
+
+// Collapse runs of [cit_N][cit_M]... into a single compact <sup> group of
+// clickable refs ([1][2][3]…). Replaces all matches in the marked-rendered
+// HTML — bare [cit_N] tokens in <code>/<pre> are not protected, but the
+// LLM rarely puts citation markers inside code blocks (and the server-side
+// hallucination guard already exempts code fences).
+function renderCitationMarkers(html) {
+  return html.replace(/(?:\\[cit_\\d+\\])+/g, (run) => {
+    const matches = run.match(/cit_\\d+/g) || [];
+    const links = matches
+      .map((id) => {
+        const num = id.replace(/^cit_/, '');
+        return '<a class="cite-ref" href="#cit-anchor-' + num + '" data-cite-num="' + num + '">' + num + '</a>';
+      })
+      .join('');
+    return '<sup class="cite-refs">' + links + '</sup>';
+  });
+}
+
+// ---------------------------------------------------------------------
+// Ask feedback bar — 👍 / 👎 buttons under the answer.
+// ---------------------------------------------------------------------
+let lastAnswerId = null;
+
+function setFeedbackBar(answerId) {
+  const bar = $('ask-feedback');
+  const up = $('ask-fb-up');
+  const down = $('ask-fb-down');
+  const status = $('ask-fb-status');
+  if (!bar || !up || !down || !status) return;
+  lastAnswerId = answerId;
+  if (!answerId) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  up.disabled = false;
+  down.disabled = false;
+  up.classList.remove('primary');
+  down.classList.remove('danger');
+  status.textContent = '';
+  status.className = 'status';
+}
+
+async function sendFeedback(rating, btn) {
+  if (!lastAnswerId) return;
+  const up = $('ask-fb-up');
+  const down = $('ask-fb-down');
+  const status = $('ask-fb-status');
+  if (!up || !down || !status) return;
+  up.disabled = true;
+  down.disabled = true;
+  status.textContent = '提交中…';
+  status.className = 'status';
+  try {
+    const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answer_id: lastAnswerId, rating }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || (body && body.ok === false)) {
+      throw new Error((body && body.error) || ('http ' + res.status));
+    }
+    if (rating > 0) btn.classList.add('primary');
+    else btn.classList.add('danger');
+    status.textContent = '已提交 · 感谢反馈';
+    status.className = 'status ok';
+  } catch (err) {
+    up.disabled = false;
+    down.disabled = false;
+    status.textContent = '提交失败：' + (err && err.message ? err.message : err);
+    status.className = 'status err';
+  }
 }
 
 // in_page_path is "<headingId>/p[N]" (section chunk) or "p[N]" (page-top
@@ -1345,6 +1695,8 @@ function renderCitations(body) {
   for (const c of body.citations) {
     const div = document.createElement('div');
     div.className = 'cite-item';
+    const citNum = String(c.citation_id || '').replace(/^cit_/, '');
+    if (citNum) div.id = 'cit-anchor-' + citNum;
     const crumb = Array.isArray(c.breadcrumb) ? c.breadcrumb.map((b) => b.title).join(' › ') : '';
     const inPath = c.in_page_path || '';
     const section = citeSectionLabel(inPath);
@@ -1361,6 +1713,31 @@ function renderCitations(body) {
     list.appendChild(div);
   }
 }
+
+// Click-to-jump: clicking a cite-ref inside the answer switches to the
+// citations tab and scrolls / flashes the matching citation item.
+function wireCitationJumps() {
+  const ansEl = $('ask-answer-md');
+  if (!ansEl) return;
+  ansEl.addEventListener('click', (e) => {
+    const ref = e.target && e.target.closest ? e.target.closest('.cite-ref') : null;
+    if (!ref) return;
+    e.preventDefault();
+    const num = ref.dataset.citeNum;
+    if (!num) return;
+    setActiveAskTab('citations');
+    const anchor = document.getElementById('cit-anchor-' + num);
+    if (anchor) {
+      anchor.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      anchor.classList.remove('flash');
+      // Force reflow so the animation re-runs on repeat clicks.
+      void anchor.offsetWidth;
+      anchor.classList.add('flash');
+      setTimeout(() => anchor.classList.remove('flash'), 1500);
+    }
+  });
+}
+wireCitationJumps();
 
 function renderMeta(body, latencyMs, httpStatus) {
   const meta = $('ask-meta');
@@ -1397,86 +1774,177 @@ function renderMeta(body, latencyMs, httpStatus) {
 const askBtn = $('btn-ask');
 const askQ = $('ask-q');
 const askStatus = $('ask-status');
-const promptForm = $('prompt-config-form');
-const promptAssistantName = $('prompt-assistant-name');
-const promptInstructions = $('prompt-system-instructions');
-const promptStatus = $('prompt-config-status');
-const promptWarnings = $('prompt-config-warnings');
 
-function renderPromptWarnings(warnings) {
-  if (!promptWarnings) return;
-  if (!Array.isArray(warnings) || warnings.length === 0) {
-    promptWarnings.hidden = true;
-    promptWarnings.textContent = '';
-    return;
+// ---------------------------------------------------------------------
+// Settings tab — structured form over anydocs.ask.json.
+// Each control carries data-cfg-path (dot path) + data-cfg-type
+// ('string' | 'stringOrNull' | 'int' | 'intOrNull' | 'float' |
+//  'floatOrNull' | 'boolean' | 'stringArray'); collectSettingsPayload
+// reads them all and rebuilds the nested JSON object, then POSTs to
+// /api/projects/:name/ask-config.
+//
+// Empty/default suppression: empty inputs (non-nullable text/int/float)
+// don't end up in the payload — the server-side schema fills in defaults
+// at runtime. Likewise, checkboxes/selects unchanged from their default
+// (data-cfg-default attr) are suppressed. This prevents a Settings save
+// from pinning default values into the file and shadowing env overrides
+// (e.g. ANTHROPIC_MODEL).
+// ---------------------------------------------------------------------
+const SKIP = Symbol('skip');
+
+function setPath(root, path, value) {
+  const parts = path.split('.');
+  let cur = root;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const k = parts[i];
+    if (cur[k] == null || typeof cur[k] !== 'object') cur[k] = {};
+    cur = cur[k];
   }
-  promptWarnings.hidden = false;
-  promptWarnings.textContent = '';
-  const icon = document.createElement('span');
-  icon.className = 'b-ico';
-  icon.textContent = '!';
-  const body = document.createElement('div');
-  body.className = 'b-bd';
-  const title = document.createElement('div');
-  title.className = 'b-ti';
-  title.textContent = 'Prompt warnings';
-  const list = document.createElement('ul');
-  list.style.margin = '4px 0 0';
-  list.style.paddingLeft = '20px';
-  for (const warning of warnings) {
-    const item = document.createElement('li');
-    item.style.fontSize = 'var(--t-12)';
-    item.style.color = 'var(--warn)';
-    item.textContent = String(warning);
-    list.appendChild(item);
-  }
-  body.appendChild(title);
-  body.appendChild(list);
-  promptWarnings.appendChild(icon);
-  promptWarnings.appendChild(body);
+  cur[parts[parts.length - 1]] = value;
 }
 
-if (promptForm && promptAssistantName && promptInstructions && promptStatus) {
-  promptForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const instructions = promptInstructions.value
+function readControlValue(el) {
+  const type = el.dataset.cfgType;
+  if (type === 'boolean') {
+    const v = !!el.checked;
+    const dflt = el.dataset.cfgDefault === 'true';
+    return v === dflt ? SKIP : v;
+  }
+  if (type === 'stringArray') {
+    const arr = el.value
       .split('\\n')
       .map((line) => line.trim())
-      .filter(Boolean);
-    promptStatus.textContent = 'saving...';
-    promptStatus.className = 'status';
+      .filter((line) => line.length > 0);
+    return arr.length === 0 ? SKIP : arr;
+  }
+  const raw = (el.value || '').trim();
+  if (raw.length === 0) {
+    // Empty input — nullable fields explicitly write null; everything
+    // else is omitted entirely (server uses its schema default).
+    if (type === 'stringOrNull' || type === 'intOrNull' || type === 'floatOrNull') {
+      return null;
+    }
+    return SKIP;
+  }
+  if (type === 'stringOrNull' || type === 'string') {
+    // Select fields are 'string' too; if value matches default → skip.
+    const dflt = el.dataset.cfgDefault;
+    if (typeof dflt === 'string' && dflt.length > 0 && raw === dflt) return SKIP;
+    return raw;
+  }
+  if (type === 'int' || type === 'intOrNull') {
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) ? n : NaN;
+  }
+  if (type === 'float' || type === 'floatOrNull') {
+    const n = parseFloat(raw);
+    return Number.isFinite(n) ? n : NaN;
+  }
+  return raw;
+}
+
+function collectSettingsPayload(form) {
+  const payload = {};
+  const errors = [];
+  const controls = form.querySelectorAll('[data-cfg-path]');
+  controls.forEach((el) => {
+    const path = el.dataset.cfgPath;
+    const v = readControlValue(el);
+    if (v === SKIP) return;
+    if (typeof v === 'number' && Number.isNaN(v)) {
+      errors.push(path + ' must be a valid number');
+      return;
+    }
+    setPath(payload, path, v);
+  });
+  return { payload, errors };
+}
+
+(function wireSettingsTab() {
+  const form = $('settings-form');
+  if (!form) return;
+  const saveBtn = $('settings-save');
+  const resetBtn = $('settings-reset');
+  const status = $('settings-status');
+  const warningsBox = $('settings-warnings');
+
+  function renderSettingsWarnings(list) {
+    if (!warningsBox) return;
+    if (!Array.isArray(list) || list.length === 0) {
+      warningsBox.hidden = true;
+      warningsBox.innerHTML = '';
+      return;
+    }
+    warningsBox.hidden = false;
+    let h = '<span class="b-ico"><svg><use href="#i-alert"/></svg></span><div class="b-bd">';
+    h += '<div class="b-ti">' + list.length + ' validation warning' + (list.length > 1 ? 's' : '') + '</div>';
+    h += '<ul style="margin: 4px 0 0; padding-left: 20px;">';
+    list.forEach((w) => { h += '<li style="font-size: var(--t-12);">' + escapeHtml(String(w)) + '</li>'; });
+    h += '</ul></div>';
+    warningsBox.innerHTML = h;
+  }
+
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      // Reload to get fresh SSR values (avoids per-field reset logic).
+      location.reload();
+    });
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!cfg.name) return;
+    const { payload, errors } = collectSettingsPayload(form);
+    if (errors.length > 0) {
+      if (status) {
+        status.textContent = errors[0] + (errors.length > 1 ? ' (+' + (errors.length - 1) + ' more)' : '');
+        status.className = 'status err';
+      }
+      return;
+    }
+    if (saveBtn) saveBtn.disabled = true;
+    if (status) { status.textContent = '保存中…'; status.className = 'status'; }
     try {
-      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/prompt-config', {
+      const rawText = JSON.stringify(payload, null, 2);
+      const expectedMtimeISO = form.dataset.mtime || '';
+      const body = expectedMtimeISO ? { rawText, expectedMtimeISO } : { rawText };
+      const res = await fetch('/api/projects/' + encodeURIComponent(cfg.name) + '/ask-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          assistantName: promptAssistantName.value.trim() || null,
-          systemInstructions: instructions,
-        }),
+        body: JSON.stringify(body),
       });
-      const body = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
-      if (!res.ok || !body.ok) {
-        throw new Error((body && body.error) || 'save failed');
+      const respBody = await res.json().catch(() => ({}));
+      if (!res.ok || (respBody && respBody.ok === false)) {
+        const msg = (respBody && respBody.error) || ('http ' + res.status);
+        if (status) {
+          if (res.status === 409 && respBody && respBody.currentMtimeISO) {
+            form.dataset.mtime = respBody.currentMtimeISO;
+            status.textContent = '文件已被其它进程修改：' + msg + '（请刷新后重试）';
+          } else {
+            status.textContent = '保存失败：' + msg;
+          }
+          status.className = 'status err';
+        }
+        return;
       }
-      if (body && body.prompt) {
-        promptAssistantName.value = body.prompt.assistantName || '';
-        promptInstructions.value = Array.isArray(body.prompt.systemInstructions)
-          ? body.prompt.systemInstructions.join('\\n')
-          : '';
+      if (respBody && respBody.mtimeISO) form.dataset.mtime = respBody.mtimeISO;
+      renderSettingsWarnings(respBody && respBody.warnings);
+      const wCount = Array.isArray(respBody && respBody.warnings) ? respBody.warnings.length : 0;
+      const okText = wCount > 0 ? '已保存（' + wCount + ' 条警告）' : '已保存';
+      if (status) {
+        status.textContent = cfg.live ? okText + ' · 重启项目生效' : okText + ' · 下次启动生效';
+        status.className = 'status ok';
       }
-      renderPromptWarnings(body && body.warnings);
-      const warningCount = Array.isArray(body && body.warnings) ? body.warnings.length : 0;
-      const savedPrefix = warningCount > 0 ? 'saved with warnings' : 'saved';
-      promptStatus.textContent = cfg.live
-        ? savedPrefix + ' · restart project to apply'
-        : savedPrefix + ' · applies on next start';
-      promptStatus.className = 'status ok';
     } catch (err) {
-      promptStatus.textContent = 'save failed: ' + (err && err.message ? err.message : err);
-      promptStatus.className = 'status err';
+      if (status) {
+        status.textContent = '网络错误：' + (err && err.message ? err.message : err);
+        status.className = 'status err';
+      }
+    } finally {
+      if (saveBtn) saveBtn.disabled = false;
     }
   });
-}
+})();
 
 async function submitAsk(opts) {
   opts = opts || {};
@@ -1556,6 +2024,11 @@ if (askQ) {
     }
   });
 }
+
+const fbUp = $('ask-fb-up');
+const fbDown = $('ask-fb-down');
+if (fbUp) fbUp.addEventListener('click', () => sendFeedback(1, fbUp));
+if (fbDown) fbDown.addEventListener('click', () => sendFeedback(-1, fbDown));
 
 // Re-ask handler — Traffic tab fills #ask-q and switches to Ask tab.
 window.addEventListener('console:reask', (e) => {

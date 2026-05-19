@@ -29,9 +29,6 @@ export function layout(args: {
   title: string;
   body: Html | Html[];
   nav?: NavContext;
-  /** Pre-rendered config drawer fragment (with its own JS hooks). Optional;
-   *  pages can omit if they don't want gear. */
-  configDrawer?: Html;
   /** Override page <main> max-width (e.g. report viewer uses narrower). */
   pageMaxWidth?: string;
   /** When true, suppress the page <main> wrapper — page body provides its own. */
@@ -50,46 +47,15 @@ export function layout(args: {
   </head>
   <body>
     ${raw(ICON_SPRITE)}
-    ${header(args.nav, args.configDrawer !== undefined)}
+    ${header(args.nav)}
     ${args.bareBody
       ? args.body
       : html`<main class="page"${raw(styleAttr)}>${args.body}</main>`}
-    ${args.configDrawer ?? ''}
-    ${args.configDrawer ? drawerScript() : ''}
   </body>
 </html>`;
 }
 
-function drawerScript(): Html {
-  return html`<script>(function(){
-    var btn = document.getElementById('header-gear');
-    var drawer = document.getElementById('config-drawer');
-    var mask = document.getElementById('config-mask');
-    var close = document.getElementById('config-close');
-    if (!btn || !drawer) return;
-    function open(){
-      drawer.hidden = false;
-      if (mask) mask.hidden = false;
-      document.body.style.overflow = 'hidden';
-    }
-    function shut(){
-      drawer.hidden = true;
-      if (mask) mask.hidden = true;
-      document.body.style.overflow = '';
-    }
-    btn.addEventListener('click', function(e){
-      e.stopPropagation();
-      if (drawer.hidden) open(); else shut();
-    });
-    if (close) close.addEventListener('click', shut);
-    if (mask) mask.addEventListener('click', shut);
-    document.addEventListener('keydown', function(e){
-      if (e.key === 'Escape' && !drawer.hidden) shut();
-    });
-  })();</script>`;
-}
-
-function header(nav?: NavContext, withGear = false): Html {
+function header(nav?: NavContext): Html {
   return html`
     <header class="app-hdr">
       <div class="app-hdr-inner">
@@ -100,9 +66,6 @@ function header(nav?: NavContext, withGear = false): Html {
         ${nav ? projectSwitcher(nav) : ''}
         <div class="hdr-spacer"></div>
         ${nav ? html`<span class="hdr-host">127.0.0.1:${nav.consolePort}</span>` : ''}
-        ${withGear
-          ? html`<button id="header-gear" class="icon-btn" aria-label="config (esc to close)" title="config (esc to close)"><svg><use href="#i-gear"/></svg></button>`
-          : ''}
       </div>
     </header>
   `;
@@ -455,6 +418,31 @@ h1.page-title .sub { font-weight: 400; color: var(--fg-soft); font-size: var(--t
 }
 .check input { accent-color: var(--accent); }
 
+/* toggle switch — used for the Ask dry-run / persist switch */
+.toggle {
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  font-size: var(--t-13); color: var(--fg-soft); cursor: pointer; user-select: none;
+}
+.toggle > input { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
+.toggle-track {
+  position: relative; display: inline-block; flex-shrink: 0;
+  width: 30px; height: 18px; border-radius: 999px;
+  background: var(--bd-strong);
+  transition: background 0.15s ease;
+}
+.toggle-thumb {
+  position: absolute; top: 2px; left: 2px;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0,0,0,.2);
+  transition: left 0.15s ease;
+}
+.toggle > input:checked + .toggle-track { background: var(--accent); }
+.toggle > input:checked + .toggle-track .toggle-thumb { left: 14px; }
+.toggle > input:focus-visible + .toggle-track {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
 /* tabs ------------------------------------------------------------- */
 .tabs { display: flex; align-items: center; gap: var(--s-1); border-bottom: 1px solid var(--bd); margin-bottom: var(--s-5); }
 .tab {
@@ -583,11 +571,29 @@ pre code { background: transparent; padding: 0; border: 0; }
 .cite-item {
   display: grid; grid-template-columns: 28px 1fr; gap: var(--s-2);
   padding: var(--s-3) var(--s-3); border-top: 1px solid var(--bd-soft);
+  transition: background 0.6s ease;
 }
 .cite-item:first-child { border-top: 0; }
+.cite-item.flash { background: var(--accent-soft); transition: background 0s; }
 .cite-item .cite { align-self: start; }
 .cite-item .meta { font-size: var(--t-12); color: var(--fg-mute); margin-bottom: 4px; font-family: var(--font-mono); }
 .cite-item .snippet { font-size: var(--t-13); color: var(--fg-soft); margin-top: 4px; line-height: 1.55; word-break: break-word; }
+
+/* inline citation refs in answer body — replaces raw [cit_N] markers */
+.cite-refs { font-size: 0.78em; line-height: 0; white-space: nowrap; }
+.cite-refs .cite-ref + .cite-ref { margin-left: 2px; }
+.cite-ref {
+  display: inline-block; padding: 0 5px; border-radius: 4px;
+  background: var(--accent-soft); color: var(--accent);
+  font-weight: 600; font-family: var(--font-mono); font-size: 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  text-decoration: none; line-height: 1.5; vertical-align: 1px;
+  cursor: pointer;
+}
+.cite-ref:hover {
+  background: color-mix(in srgb, var(--accent) 18%, var(--accent-soft));
+  text-decoration: none;
+}
 
 /* citation list (eval-style) -------------------------------------- */
 .cit { display: flex; gap: var(--s-3); padding: var(--s-3) 0; border-top: 1px solid var(--bd-soft); }
