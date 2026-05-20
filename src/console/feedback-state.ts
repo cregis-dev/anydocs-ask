@@ -1,62 +1,144 @@
 /**
- * Console-side Feedback tab state helpers — RFC 0002 T1-a.
+ * Console-side Feedback tab state helpers — RFC 0002 T1-a + T1-b.
  *
- * 0.2.0-alpha.1 T1-a is intentionally just a tab skeleton: only the two
- * empty-shaped states from console-redesign-brief §7.5.1 are wired:
- *   1. disabled  — `feedback.enabled = false` (the PRD §11.4 #6 default).
- *   2. enabled, no data — switch flipped on but the feedback table is empty.
+ * T1-a (skeleton) shipped the two empty-shaped states from
+ * console-redesign-brief §7.5.1 (disabled / enabled-no-rows).
  *
- * KPI calculation, list rendering, and detail drawer ship in T1-b. This
- * snapshot stays minimal on purpose; the page only needs to know which
- * empty state to render.
+ * T1-b adds the middle list + KPI numbers + filter chips. The detail
+ * drawer (state 5 / right side) is still T1-d.
+ *
+ * Data sources:
+ *   • feedback table        — row count, signal_source split, list rows
+ *                             (read-only via shared openDatabase helper)
+ *   • runs.jsonl (7d window)— JOIN on answer_id to recover confidence +
+ *                             non-answer rate per rated run
+ *
+ * The runs JOIN is read-on-render — the console is a local dev tool and
+ * the 7-day jsonl scan is the same cost Traffic already pays. We do NOT
+ * cache the JOIN; the page handler computes it fresh per request.
  */
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDatabase } from '../db/index.ts';
+import type { FeedbackRow } from '../db/schema.ts';
+import { iterateRunsSince } from '../runs/writer.ts';
+import type { RunRecord, RunsLine } from '../runs/types.ts';
 
-export type FeedbackTabSnapshot = {
-  /** `feedback.enabled` from anydocs.ask.json (PRD §11.4 #6 — defaults false). */
-  enabled: boolean;
-  /** COUNT(*) from feedback table; 0 when DB or table absent. */
-  totalCount: number;
+const DAY_MS = 86_400_000;
+const DEFAULT_DAYS = 7;
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
+
+/** Pre-0.2.0-alpha.2 rows persisted an empty question (see the spawned
+ *  "Backfill question" task). T1-b surfaces a stable placeholder so the
+ *  list doesn't look broken until that fix lands. */
+const QUESTION_FALLBACK = '(question unavailable — pre-0.2.0-alpha.2 row)';
+
+/** UI filter chips — §7.5.1 list. `no_citations` / `semantic_check_failed`
+ *  are deferred (see RFC 0002 §2.1 T1 + RFC 0005). */
+export type FeedbackFilter = 'all' | 'thumbs_up' | 'thumbs_down' | 'implicit';
+export const FEEDBACK_FILTERS: readonly FeedbackFilter[] = [
+  'all',
+  'thumbs_up',
+  'thumbs_down',
+  'implicit',
+] as const;
+
+export type FeedbackKpi = {
+  /** Total feedback rows in the window (β + γ + curated). */
+  count: number;
+  explicitCount: number;
+  implicitCount: number;
+  /** explicit / (explicit + implicit). null when both are 0. */
+  explicitShare: number | null;
+  /** Mean answer.confidence across runs that have ≥1 feedback row. */
+  meanConfidence: number | null;
+  /** (error + clarify) / runs-with-feedback. 0 when no runs-with-feedback. */
+  nonAnswerRate: number;
+  /** Reserved for 0.3 A+ clustering (PRD §10.3, ≥50 threshold). */
+  aplusCandidates: null;
 };
 
-/**
- * Minimal slice of `ResolvedConfig` we need so callers can pass either the
- * full config or a stub in tests.
- */
+export type FeedbackRowVM = {
+  feedback_id: number;
+  /** ISO 8601 from `created_at` ms. */
+  ts: string;
+  rating: number | null;
+  signal_source: 'explicit' | 'implicit' | 'curated';
+  question: string;
+  answerId: string;
+  currentPageId: string | null;
+  /** From runs.jsonl JOIN on answer_id. null if no matching run line in
+   *  the window (rare — rows can pre-date runs.enabled or the runs file
+   *  rolled out of the window). */
+  confidence: number | null;
+};
+
+export type FilterCounts = Record<FeedbackFilter, number>;
+
+export type FeedbackTabSnapshot = {
+  enabled: boolean;
+  /** Total rows across all signal_sources in the window. Drives the
+   *  T1-a "signals collected" banner + the KPI feedback·7d tile. */
+  totalCount: number;
+  /** ISO date marking the start of the rolling window. */
+  sinceISO: string;
+  days: number;
+  kpi: FeedbackKpi;
+  /** Filter chip badge counts (matched by the same predicates the list
+   *  uses, so chip counts and list contents stay in sync). */
+  filterCounts: FilterCounts;
+  /** Filter applied to `rows`. Default 'all'. */
+  filter: FeedbackFilter;
+  /** First page of rows for `filter`, newest first. */
+  rows: FeedbackRowVM[];
+  /** True when `filterCounts[filter] > rows.length`. */
+  hasMore: boolean;
+};
+
 export type FeedbackConfigSlice = {
   feedback: { enabled: boolean };
+};
+
+export type LoadFeedbackOpts = {
+  filter?: FeedbackFilter;
+  /** Cap rows in the returned page. Clamped to [1, MAX_LIMIT]. */
+  limit?: number;
+  days?: number;
 };
 
 export function loadFeedbackTabSnapshot(
   stateRoot: string | null,
   projectConfig: FeedbackConfigSlice,
+  opts: LoadFeedbackOpts = {},
 ): FeedbackTabSnapshot {
-  return {
-    enabled: projectConfig.feedback.enabled === true,
-    totalCount: stateRoot ? readFeedbackCount(stateRoot) : 0,
-  };
-}
+  const filter = opts.filter ?? 'all';
+  const limit = clamp(opts.limit ?? DEFAULT_LIMIT, 1, MAX_LIMIT);
+  const days = Math.max(1, opts.days ?? DEFAULT_DAYS);
+  const enabled = projectConfig.feedback.enabled === true;
 
-function readFeedbackCount(stateRoot: string): number {
-  if (!existsSync(join(stateRoot, 'index.db'))) return 0;
+  const empty = emptySnapshot(enabled, filter, days);
+  if (!enabled || !stateRoot) return empty;
+
+  const dbPath = join(stateRoot, 'index.db');
+  if (!existsSync(dbPath)) return empty;
+
+  const sinceMs = Date.now() - days * DAY_MS;
+
   let db: ReturnType<typeof openDatabase>;
   try {
     db = openDatabase({ stateRoot, skipMigrations: true });
   } catch {
-    return 0;
+    return empty;
   }
+
   try {
-    const row = db
-      .prepare(`SELECT COUNT(*) AS n FROM feedback`)
-      .get() as { n: number } | undefined;
-    return row?.n ?? 0;
+    return computeSnapshot(db, stateRoot, sinceMs, days, filter, limit);
   } catch {
-    // Migration 001 creates `feedback`; a DB without it is malformed but we
-    // surface 0 rather than crash the project page.
-    return 0;
+    // Malformed DB / missing table → degrade to empty-enabled rather than
+    // 500 the project page.
+    return empty;
   } finally {
     try {
       db.close();
@@ -64,4 +146,240 @@ function readFeedbackCount(stateRoot: string): number {
       /* ignore */
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// SQL + JOIN
+// ---------------------------------------------------------------------------
+
+function computeSnapshot(
+  db: ReturnType<typeof openDatabase>,
+  stateRoot: string,
+  sinceMs: number,
+  days: number,
+  filter: FeedbackFilter,
+  limit: number,
+): FeedbackTabSnapshot {
+  const sinceISO = new Date(sinceMs).toISOString().slice(0, 10);
+
+  // One pass for window-scoped counts. We deliberately compute totalCount
+  // across ALL time (drives the banner on the disabled→empty transition
+  // even when the window is empty), then bucket counts within the window.
+  const totalRow = db
+    .prepare(`SELECT COUNT(*) AS n FROM feedback`)
+    .get() as { n: number } | undefined;
+  const totalCount = totalRow?.n ?? 0;
+
+  const inWindow = db
+    .prepare(
+      `SELECT signal_source, rating
+         FROM feedback
+        WHERE created_at >= ?`,
+    )
+    .all(sinceMs) as Array<Pick<FeedbackRow, 'signal_source' | 'rating'>>;
+
+  // `all` is the union of the four chips, NOT a raw row count — curated
+  // rows are deliberately outside the chip taxonomy (post-review, surfaced
+  // via inbox/approved files), and the `all` SQL filter excludes them too,
+  // so the badge and the list must agree.
+  const filterCounts: FilterCounts = {
+    all: 0,
+    thumbs_up: 0,
+    thumbs_down: 0,
+    implicit: 0,
+  };
+  let explicitCount = 0;
+  let implicitCount = 0;
+  for (const r of inWindow) {
+    if (r.signal_source === 'explicit') {
+      explicitCount++;
+      filterCounts.all++;
+      if (r.rating !== null && r.rating > 0) filterCounts.thumbs_up++;
+      else if (r.rating !== null && r.rating < 0) filterCounts.thumbs_down++;
+    } else if (r.signal_source === 'implicit') {
+      implicitCount++;
+      filterCounts.all++;
+      filterCounts.implicit++;
+    }
+    // 'curated' rows skip every counter; see chip-taxonomy comment above.
+  }
+
+  const rowsRaw = selectRows(db, sinceMs, filter, limit);
+  const answerIds = rowsRaw.map((r) => r.answer_id);
+  const runIndex = buildRunIndex(stateRoot, sinceMs, new Set(answerIds));
+
+  const rows: FeedbackRowVM[] = rowsRaw.map((r) => ({
+    feedback_id: r.feedback_id,
+    ts: new Date(r.created_at).toISOString(),
+    rating: r.rating,
+    signal_source: r.signal_source,
+    question: r.question.length > 0 ? r.question : QUESTION_FALLBACK,
+    answerId: r.answer_id,
+    currentPageId: r.current_page_id,
+    confidence: runIndex.get(r.answer_id)?.confidence ?? null,
+  }));
+
+  // KPI mean confidence + non-answer rate: build from the runs side over
+  // the union of answer_ids that have feedback in the window. This is the
+  // "across rated runs" semantics — same denominator both metrics.
+  const allFeedbackAnswerIds = db
+    .prepare(
+      `SELECT DISTINCT answer_id
+         FROM feedback
+        WHERE created_at >= ?`,
+    )
+    .all(sinceMs) as Array<{ answer_id: string }>;
+  const ratedRunIndex = buildRunIndex(
+    stateRoot,
+    sinceMs,
+    new Set(allFeedbackAnswerIds.map((r) => r.answer_id)),
+  );
+
+  let confSum = 0;
+  let confN = 0;
+  let nonAnswer = 0;
+  let ratedN = 0;
+  for (const v of ratedRunIndex.values()) {
+    ratedN++;
+    if (typeof v.confidence === 'number') {
+      confSum += v.confidence;
+      confN++;
+    }
+    if (v.kind === 'error' || v.kind === 'clarify') nonAnswer++;
+  }
+
+  const explicitShare =
+    explicitCount + implicitCount > 0
+      ? explicitCount / (explicitCount + implicitCount)
+      : null;
+
+  return {
+    enabled: true,
+    totalCount,
+    sinceISO,
+    days,
+    kpi: {
+      // Same denominator as filterCounts.all — KPI footer reads "β + γ
+      // combined" so curated rows must not be folded in.
+      count: explicitCount + implicitCount,
+      explicitCount,
+      implicitCount,
+      explicitShare,
+      meanConfidence: confN > 0 ? confSum / confN : null,
+      nonAnswerRate: ratedN > 0 ? nonAnswer / ratedN : 0,
+      aplusCandidates: null,
+    },
+    filterCounts,
+    filter,
+    rows,
+    hasMore: filterCounts[filter] > rows.length,
+  };
+}
+
+function selectRows(
+  db: ReturnType<typeof openDatabase>,
+  sinceMs: number,
+  filter: FeedbackFilter,
+  limit: number,
+): FeedbackRow[] {
+  const where = filterToWhere(filter);
+  return db
+    .prepare(
+      `SELECT * FROM feedback
+        WHERE created_at >= ? ${where ? 'AND ' + where : ''}
+        ORDER BY created_at DESC
+        LIMIT ?`,
+    )
+    .all(sinceMs, limit) as FeedbackRow[];
+}
+
+function filterToWhere(filter: FeedbackFilter): string {
+  switch (filter) {
+    case 'all':
+      // exclude curated — see chip taxonomy note above.
+      return `signal_source IN ('explicit', 'implicit')`;
+    case 'thumbs_up':
+      return `signal_source = 'explicit' AND rating > 0`;
+    case 'thumbs_down':
+      return `signal_source = 'explicit' AND rating < 0`;
+    case 'implicit':
+      return `signal_source = 'implicit'`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// runs.jsonl JOIN helper
+// ---------------------------------------------------------------------------
+
+type RunIndexEntry = {
+  confidence: number | null;
+  kind: 'answer' | 'clarify' | 'error';
+};
+
+/**
+ * Walk runs.jsonl in [sinceMs, now) and bucket each answer_id → {confidence,
+ * kind}. When `restrictTo` is non-empty we early-skip non-matching rows to
+ * keep the scan cheap on busy projects.
+ */
+function buildRunIndex(
+  stateRoot: string,
+  sinceMs: number,
+  restrictTo: Set<string>,
+): Map<string, RunIndexEntry> {
+  const out: Map<string, RunIndexEntry> = new Map();
+  if (restrictTo.size === 0) return out;
+  for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
+    if ('type' in line && line.type === 'feedback-update') continue;
+    const rec = line as RunRecord;
+    const aid = rec.answer.answer_id;
+    if (aid === null) continue;
+    if (!restrictTo.has(aid)) continue;
+    // Last-write-wins (a re-asked answer_id is rare; the latest line is
+    // usually the relevant one).
+    out.set(aid, {
+      confidence: rec.answer.confidence ?? null,
+      kind: rec.answer.kind,
+    });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function emptySnapshot(
+  enabled: boolean,
+  filter: FeedbackFilter,
+  days: number,
+): FeedbackTabSnapshot {
+  return {
+    enabled,
+    totalCount: 0,
+    sinceISO: new Date(Date.now() - days * DAY_MS).toISOString().slice(0, 10),
+    days,
+    kpi: {
+      count: 0,
+      explicitCount: 0,
+      implicitCount: 0,
+      explicitShare: null,
+      meanConfidence: null,
+      nonAnswerRate: 0,
+      aplusCandidates: null,
+    },
+    filterCounts: { all: 0, thumbs_up: 0, thumbs_down: 0, implicit: 0 },
+    filter,
+    rows: [],
+    hasMore: false,
+  };
+}
+
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, n));
+}
+
+export function parseFeedbackFilter(raw: unknown): FeedbackFilter {
+  return typeof raw === 'string' && (FEEDBACK_FILTERS as readonly string[]).includes(raw)
+    ? (raw as FeedbackFilter)
+    : 'all';
 }
