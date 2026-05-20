@@ -254,6 +254,68 @@ test('POST /v1/ask/feedback inserts a feedback row keyed by answer_id', async ()
   }
 });
 
+test('POST /v1/ask/feedback persists the question text from the answers table', async () => {
+  // Regression for 0.1.0–0.2.0-alpha.1: the feedback writer never copied
+  // `question` off the answers row, so every feedback row landed with
+  // `question = ''` even though the answers table had it. RFC 0002 T1-b's
+  // list needs a non-empty question per row — pin the contract here.
+  const { runtime, cleanup } = await makeRuntime();
+  try {
+    await runtime.start();
+    const app = createApp({ runtime });
+    const question = '如何配置 Lark 集成';
+    const askRes = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question }),
+    });
+    const askBody = (await askRes.json()) as { answer_id: string };
+
+    await app.request('/v1/ask/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answer_id: askBody.answer_id, rating: 1 }),
+    });
+
+    const row = runtime.db
+      .prepare(`SELECT question FROM feedback WHERE answer_id = ?`)
+      .get(askBody.answer_id) as { question: string } | undefined;
+    assert.ok(row, 'feedback row must be inserted');
+    assert.equal(row!.question, question, 'feedback.question must come from answers.question');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /v1/ask/feedback falls back to body.question when answers row expired', async () => {
+  // 24h TTL guard: if the answers row aged out before the user clicked
+  // 👍/👎, Reader MAY include the original question in the request body.
+  // The writer prefers answers.question; body.question only kicks in
+  // when the answers lookup misses.
+  const { runtime, cleanup } = await makeRuntime();
+  try {
+    await runtime.start();
+    const app = createApp({ runtime });
+    const fakeAnswerId = 'ans_expired_or_never_existed';
+    await app.request('/v1/ask/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        answer_id: fakeAnswerId,
+        rating: -1,
+        question: 'what is X',
+      }),
+    });
+    const row = runtime.db
+      .prepare(`SELECT question FROM feedback WHERE answer_id = ?`)
+      .get(fakeAnswerId) as { question: string } | undefined;
+    assert.ok(row, 'feedback row must be inserted even when answers row missing');
+    assert.equal(row!.question, 'what is X');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('POST /v1/ask/feedback without answer_id returns 400', async () => {
   const { runtime, cleanup } = await makeRuntime();
   try {

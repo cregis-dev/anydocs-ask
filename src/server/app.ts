@@ -262,16 +262,24 @@ export function createApp(deps: AppDeps): Hono {
       );
     }
 
-    // Look up the original answer for current_page_id / retrieved snapshot,
+    // Look up the original answer for question / retrieved / model snapshot,
     // then write a feedback row. We don't fail-hard when answer_id isn't
     // found in answers table (might have aged out past 24h TTL).
+    //
+    // Bug history: 0.1.0–0.2.0-alpha.1 selected only `payload` here and let
+    // `question` stay at its `''` init value, so the column was always
+    // empty in production even though the answers table has it. The
+    // Feedback tab list (RFC 0002 T1-b) needs question text per row, so
+    // we now read the `question` column directly and only fall back to
+    // request body or empty string when the answers row is gone.
     const original = runtime.db
-      .prepare(`SELECT payload FROM answers WHERE answer_id = ?`)
-      .get(answer_id) as { payload: string } | undefined;
+      .prepare(`SELECT question, payload FROM answers WHERE answer_id = ?`)
+      .get(answer_id) as { question: string; payload: string } | undefined;
     let question = '';
     let model = '';
     let retrieved: unknown = null;
     if (original) {
+      question = original.question;
       try {
         const parsed = JSON.parse(original.payload) as {
           answer_md?: string;
@@ -283,6 +291,14 @@ export function createApp(deps: AppDeps): Hono {
       } catch {
         // ignore — partial feedback is still useful.
       }
+    } else if (typeof obj.question === 'string' && obj.question.length > 0) {
+      // Forward-compat: Reader MAY include `question` in the request body
+      // to guard against the 24h TTL race (answer aged out before user
+      // clicked 👍/👎). v0.1.0–0.2.0-alpha.1 didn't read this — adding
+      // it now is safe because feedback.question is non-NULL with default
+      // empty string, and callers that don't send it keep their existing
+      // behaviour.
+      question = obj.question;
     }
 
     runtime.db
