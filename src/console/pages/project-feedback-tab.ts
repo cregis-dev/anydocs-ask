@@ -29,6 +29,7 @@ const FILTER_LABELS: Record<FeedbackFilter, string> = {
   thumbs_up: '👍',
   thumbs_down: '👎',
   implicit: 'implicit',
+  no_citations: 'no citations',
 };
 
 export function renderFeedbackTab(vm: FeedbackTabViewModel): Html {
@@ -199,7 +200,13 @@ function listCard(projectName: string, snap: FeedbackTabSnapshot): Html {
 }
 
 function chipBar(counts: FilterCounts, active: FeedbackFilter): Html {
-  const chips: FeedbackFilter[] = ['all', 'thumbs_up', 'thumbs_down', 'implicit'];
+  const chips: FeedbackFilter[] = [
+    'all',
+    'thumbs_up',
+    'thumbs_down',
+    'implicit',
+    'no_citations',
+  ];
   return html`
     <nav class="feedback-chips"
          role="tablist"
@@ -243,7 +250,7 @@ function rowItem(r: FeedbackRowVM): Html {
       class="feedback-row"
       data-feedback-row="${r.feedback_id}"
       data-feedback-answer-id="${r.answerId}"
-      style="display: grid; grid-template-columns: 90px 80px 90px minmax(0, 1fr) auto;
+      style="display: grid; grid-template-columns: 90px 80px 90px minmax(0, 1fr) minmax(0, 1fr);
              gap: var(--s-3); padding: var(--s-3) var(--s-5);
              border-top: 1px solid var(--bd-soft); align-items: center;"
     >
@@ -255,11 +262,31 @@ function rowItem(r: FeedbackRowVM): Html {
       <span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
         ${r.question}
       </span>
-      <span class="mono" style="font-size: var(--t-12); color: var(--fg-mute);">
-        ${r.currentPageId ?? '—'}
-      </span>
+      ${breadcrumbCell(r)}
     </li>
   `;
+}
+
+function breadcrumbCell(r: FeedbackRowVM): Html {
+  // 3 branches:
+  //   • breadcrumb present → render title chain with ` › ` separators
+  //   • page_id present but no breadcrumb (unpublished / deleted page) → raw id, dimmed
+  //   • no page_id at all → em-dash
+  if (r.breadcrumb && r.breadcrumb.length > 0) {
+    const title = r.breadcrumb.map((n) => n.title).join(' › ');
+    return html`<span
+      title="${title}"
+      style="min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--t-12); color: var(--fg-soft);"
+    >${title}</span>`;
+  }
+  if (r.currentPageId) {
+    return html`<span
+      class="mono"
+      title="page row missing (unpublished or deleted since feedback was written)"
+      style="font-size: var(--t-12); color: var(--fg-mute);"
+    >${r.currentPageId}</span>`;
+  }
+  return html`<span class="mono" style="font-size: var(--t-12); color: var(--fg-mute);">—</span>`;
 }
 
 function ratingBadgeFor(r: FeedbackRowVM): Html {
@@ -303,6 +330,7 @@ const CHIP_LABELS = {
   thumbs_up: '👍',
   thumbs_down: '👎',
   implicit: 'implicit',
+  no_citations: 'no citations',
 };
 const FILTER_FALLBACK_HINT = 'Try another chip or widen the window with <code class="inline">?days=30</code>.';
 
@@ -326,18 +354,33 @@ function renderRow(r) {
   const confTag = r.confidence === null
     ? '<span class="tag" style="color: var(--fg-mute);">conf —</span>'
     : '<span class="tag' + (r.confidence < 0.5 ? ' warn' : '') + '">conf ' + r.confidence.toFixed(2) + '</span>';
+  let breadcrumbCell;
+  if (Array.isArray(r.breadcrumb) && r.breadcrumb.length > 0) {
+    const chain = r.breadcrumb.map((n) => n.title).join(' › ');
+    breadcrumbCell =
+      '<span title="' + escapeHtml(chain) + '"' +
+      ' style="min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--t-12); color: var(--fg-soft);">' +
+      escapeHtml(chain) + '</span>';
+  } else if (r.currentPageId) {
+    breadcrumbCell =
+      '<span class="mono" title="page row missing (unpublished or deleted since feedback was written)"' +
+      ' style="font-size: var(--t-12); color: var(--fg-mute);">' +
+      escapeHtml(r.currentPageId) + '</span>';
+  } else {
+    breadcrumbCell = '<span class="mono" style="font-size: var(--t-12); color: var(--fg-mute);">—</span>';
+  }
   return (
     '<li class="feedback-row"' +
     ' data-feedback-row="' + r.feedback_id + '"' +
     ' data-feedback-answer-id="' + escapeHtml(r.answerId) + '"' +
-    ' style="display: grid; grid-template-columns: 90px 80px 90px minmax(0, 1fr) auto;' +
+    ' style="display: grid; grid-template-columns: 90px 80px 90px minmax(0, 1fr) minmax(0, 1fr);' +
     ' gap: var(--s-3); padding: var(--s-3) var(--s-5);' +
     ' border-top: 1px solid var(--bd-soft); align-items: center;">' +
     '<span class="mono" style="font-size: var(--t-12); color: var(--fg-mute);">' + escapeHtml(r.ts.slice(11, 19)) + '</span>' +
     badge +
     confTag +
     '<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">' + escapeHtml(r.question) + '</span>' +
-    '<span class="mono" style="font-size: var(--t-12); color: var(--fg-mute);">' + escapeHtml(r.currentPageId ?? '—') + '</span>' +
+    breadcrumbCell +
     '</li>'
   );
 }

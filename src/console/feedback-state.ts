@@ -21,7 +21,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDatabase } from '../db/index.ts';
-import type { FeedbackRow } from '../db/schema.ts';
+import type { BreadcrumbNode, FeedbackRow } from '../db/schema.ts';
 import { iterateRunsSince } from '../runs/writer.ts';
 import type { RunRecord, RunsLine } from '../runs/types.ts';
 
@@ -35,14 +35,21 @@ const MAX_LIMIT = 200;
  *  list doesn't look broken until that fix lands. */
 const QUESTION_FALLBACK = '(question unavailable — pre-0.2.0-alpha.2 row)';
 
-/** UI filter chips — §7.5.1 list. `no_citations` / `semantic_check_failed`
- *  are deferred (see RFC 0002 §2.1 T1 + RFC 0005). */
-export type FeedbackFilter = 'all' | 'thumbs_up' | 'thumbs_down' | 'implicit';
+/** UI filter chips — §7.5.1 list. `semantic_check_failed` still defers
+ *  to RFC 0005 (0.3+). `no_citations` is data-driven from the runs.jsonl
+ *  JOIN (no schema change). */
+export type FeedbackFilter =
+  | 'all'
+  | 'thumbs_up'
+  | 'thumbs_down'
+  | 'implicit'
+  | 'no_citations';
 export const FEEDBACK_FILTERS: readonly FeedbackFilter[] = [
   'all',
   'thumbs_up',
   'thumbs_down',
   'implicit',
+  'no_citations',
 ] as const;
 
 export type FeedbackKpi = {
@@ -69,10 +76,19 @@ export type FeedbackRowVM = {
   question: string;
   answerId: string;
   currentPageId: string | null;
+  /** Title chain leading to `currentPageId`, looked up from `pages.breadcrumb`.
+   *  null when `currentPageId` is null, OR when no page row matches (page
+   *  unpublished / deleted since the feedback row was written). */
+  breadcrumb: BreadcrumbNode[] | null;
   /** From runs.jsonl JOIN on answer_id. null if no matching run line in
    *  the window (rare — rows can pre-date runs.enabled or the runs file
    *  rolled out of the window). */
   confidence: number | null;
+  /** From runs.jsonl JOIN on answer_id. true when the linked run produced
+   *  an answer with zero citations (or kind='error'). null when no
+   *  matching run line. Drives the `no_citations` chip badge + per-row
+   *  warn affordance. */
+  hadNoCitations: boolean | null;
 };
 
 export type FilterCounts = Record<FeedbackFilter, number>;
@@ -172,56 +188,104 @@ function computeSnapshot(
 
   const inWindow = db
     .prepare(
-      `SELECT signal_source, rating
+      `SELECT signal_source, rating, answer_id
          FROM feedback
         WHERE created_at >= ?`,
     )
-    .all(sinceMs) as Array<Pick<FeedbackRow, 'signal_source' | 'rating'>>;
+    .all(sinceMs) as Array<Pick<FeedbackRow, 'signal_source' | 'rating' | 'answer_id'>>;
 
   // `all` is the union of the four chips, NOT a raw row count — curated
   // rows are deliberately outside the chip taxonomy (post-review, surfaced
   // via inbox/approved files), and the `all` SQL filter excludes them too,
   // so the badge and the list must agree.
+  // Build the runs.jsonl JOIN once for the full window, restricted to the
+  // answer_ids that have feedback (signal_source IN explicit/implicit) in
+  // the window. The result drives chip counts, KPI math, AND per-row
+  // confidence/no_citations — keeping a single scan instead of two like
+  // T1-b had.
+  const inWindowFeedbackIds = new Set<string>();
+  for (const r of inWindow) {
+    if (r.signal_source === 'explicit' || r.signal_source === 'implicit') {
+      inWindowFeedbackIds.add(r.answer_id);
+    }
+  }
+  const runIndex = buildRunIndex(stateRoot, sinceMs, inWindowFeedbackIds);
+
   const filterCounts: FilterCounts = {
     all: 0,
     thumbs_up: 0,
     thumbs_down: 0,
     implicit: 0,
+    no_citations: 0,
   };
   let explicitCount = 0;
   let implicitCount = 0;
+  // `no_citations` is cross-cutting: it counts the rows in `all` whose
+  // linked run had zero citations (or kind='error'). Tracked alongside
+  // the other buckets so chip badges + list contents agree.
   for (const r of inWindow) {
+    if (r.signal_source !== 'explicit' && r.signal_source !== 'implicit') continue;
     if (r.signal_source === 'explicit') {
       explicitCount++;
       filterCounts.all++;
       if (r.rating !== null && r.rating > 0) filterCounts.thumbs_up++;
       else if (r.rating !== null && r.rating < 0) filterCounts.thumbs_down++;
-    } else if (r.signal_source === 'implicit') {
+    } else {
       implicitCount++;
       filterCounts.all++;
       filterCounts.implicit++;
     }
+    if (runIndex.get(r.answer_id)?.citationsEmpty === true) {
+      filterCounts.no_citations++;
+    }
     // 'curated' rows skip every counter; see chip-taxonomy comment above.
   }
 
-  const rowsRaw = selectRows(db, sinceMs, filter, limit);
-  const answerIds = rowsRaw.map((r) => r.answer_id);
-  const runIndex = buildRunIndex(stateRoot, sinceMs, new Set(answerIds));
+  // For the `no_citations` filter, narrow the SQL selection to answer_ids
+  // we already know match. Other filters use the same SQL predicates as
+  // T1-b.
+  const noCitationAnswerIds =
+    filter === 'no_citations'
+      ? new Set<string>(
+          [...inWindowFeedbackIds].filter(
+            (aid) => runIndex.get(aid)?.citationsEmpty === true,
+          ),
+        )
+      : null;
+  const rowsRaw = selectRows(db, sinceMs, filter, limit, noCitationAnswerIds);
 
-  const rows: FeedbackRowVM[] = rowsRaw.map((r) => ({
-    feedback_id: r.feedback_id,
-    ts: new Date(r.created_at).toISOString(),
-    rating: r.rating,
-    signal_source: r.signal_source,
-    question: r.question.length > 0 ? r.question : QUESTION_FALLBACK,
-    answerId: r.answer_id,
-    currentPageId: r.current_page_id,
-    confidence: runIndex.get(r.answer_id)?.confidence ?? null,
-  }));
+  // Breadcrumb JOIN: pages.breadcrumb is JSON-encoded and already lives in
+  // the same DB, so a single `WHERE page_id IN (...)` keeps the lookup
+  // cheap. Pages may be unpublished/deleted since the feedback row was
+  // written — those resolve to `null` (rendered as the raw page_id).
+  const breadcrumbs = loadBreadcrumbs(
+    db,
+    rowsRaw.map((r) => r.current_page_id).filter((id): id is string => id !== null),
+  );
 
-  // KPI mean confidence + non-answer rate: build from the runs side over
-  // the union of answer_ids that have feedback in the window. This is the
-  // "across rated runs" semantics — same denominator both metrics.
+  const rows: FeedbackRowVM[] = rowsRaw.map((r) => {
+    const runMeta = runIndex.get(r.answer_id);
+    return {
+      feedback_id: r.feedback_id,
+      ts: new Date(r.created_at).toISOString(),
+      rating: r.rating,
+      signal_source: r.signal_source,
+      question: r.question.length > 0 ? r.question : QUESTION_FALLBACK,
+      answerId: r.answer_id,
+      currentPageId: r.current_page_id,
+      breadcrumb: r.current_page_id ? breadcrumbs.get(r.current_page_id) ?? null : null,
+      confidence: runMeta?.confidence ?? null,
+      hadNoCitations: runMeta?.citationsEmpty ?? null,
+    };
+  });
+
+  // KPI mean confidence + non-answer rate use the same runIndex —
+  // semantics: "across rated runs" = runs in the window that have ≥1
+  // feedback row (curated included since they're rated post-hoc).
+  let confSum = 0;
+  let confN = 0;
+  let nonAnswer = 0;
+  let ratedN = 0;
   const allFeedbackAnswerIds = db
     .prepare(
       `SELECT DISTINCT answer_id
@@ -229,16 +293,15 @@ function computeSnapshot(
         WHERE created_at >= ?`,
     )
     .all(sinceMs) as Array<{ answer_id: string }>;
-  const ratedRunIndex = buildRunIndex(
-    stateRoot,
-    sinceMs,
-    new Set(allFeedbackAnswerIds.map((r) => r.answer_id)),
-  );
-
-  let confSum = 0;
-  let confN = 0;
-  let nonAnswer = 0;
-  let ratedN = 0;
+  // Re-use runIndex when possible; fill gaps for curated-only answer_ids.
+  const ratedRunIndex =
+    allFeedbackAnswerIds.length === inWindowFeedbackIds.size
+      ? runIndex
+      : buildRunIndex(
+          stateRoot,
+          sinceMs,
+          new Set(allFeedbackAnswerIds.map((r) => r.answer_id)),
+        );
   for (const v of ratedRunIndex.values()) {
     ratedN++;
     if (typeof v.confidence === 'number') {
@@ -281,7 +344,26 @@ function selectRows(
   sinceMs: number,
   filter: FeedbackFilter,
   limit: number,
+  /** Required when filter='no_citations' — the precomputed set of
+   *  answer_ids known to have zero citations in their linked run. Empty
+   *  set short-circuits to an empty result. */
+  noCitationAnswerIds: Set<string> | null,
 ): FeedbackRow[] {
+  if (filter === 'no_citations') {
+    const ids = noCitationAnswerIds ?? new Set<string>();
+    if (ids.size === 0) return [];
+    const placeholders = Array(ids.size).fill('?').join(',');
+    return db
+      .prepare(
+        `SELECT * FROM feedback
+          WHERE created_at >= ?
+            AND signal_source IN ('explicit', 'implicit')
+            AND answer_id IN (${placeholders})
+          ORDER BY created_at DESC
+          LIMIT ?`,
+      )
+      .all(sinceMs, ...ids, limit) as FeedbackRow[];
+  }
   const where = filterToWhere(filter);
   return db
     .prepare(
@@ -304,7 +386,53 @@ function filterToWhere(filter: FeedbackFilter): string {
       return `signal_source = 'explicit' AND rating < 0`;
     case 'implicit':
       return `signal_source = 'implicit'`;
+    case 'no_citations':
+      // Handled out-of-line by selectRows (needs runIndex JOIN); this
+      // branch keeps the switch exhaustive for TypeScript.
+      return `signal_source IN ('explicit', 'implicit')`;
   }
+}
+
+/**
+ * Look up breadcrumb chains for a set of page_ids via the pages table.
+ * Returns a map page_id → BreadcrumbNode[]; page_ids without a row
+ * (unpublished / deleted) are simply absent. The breadcrumb column is
+ * JSON-encoded by the indexer (ARCH §2.2.1).
+ *
+ * For multilingual projects a page may have one row per lang — we don't
+ * try to pick a "preferred" lang here; the first row wins (good enough
+ * for a UI hint, and the per-row drawer in T1-d can be smarter).
+ */
+function loadBreadcrumbs(
+  db: ReturnType<typeof openDatabase>,
+  pageIds: readonly string[],
+): Map<string, BreadcrumbNode[]> {
+  const out: Map<string, BreadcrumbNode[]> = new Map();
+  if (pageIds.length === 0) return out;
+  const unique = [...new Set(pageIds)];
+  const placeholders = Array(unique.length).fill('?').join(',');
+  let rows: Array<{ page_id: string; breadcrumb: string }>;
+  try {
+    rows = db
+      .prepare(
+        `SELECT page_id, breadcrumb FROM pages WHERE page_id IN (${placeholders})`,
+      )
+      .all(...unique) as Array<{ page_id: string; breadcrumb: string }>;
+  } catch {
+    return out;
+  }
+  for (const row of rows) {
+    if (out.has(row.page_id)) continue;
+    try {
+      const parsed = JSON.parse(row.breadcrumb) as unknown;
+      if (Array.isArray(parsed)) {
+        out.set(row.page_id, parsed as BreadcrumbNode[]);
+      }
+    } catch {
+      // malformed breadcrumb JSON → leave page unmapped
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -314,12 +442,15 @@ function filterToWhere(filter: FeedbackFilter): string {
 type RunIndexEntry = {
   confidence: number | null;
   kind: 'answer' | 'clarify' | 'error';
+  /** True when the run produced zero citations (error or empty list).
+   *  Drives the no_citations chip + per-row warn affordance. */
+  citationsEmpty: boolean;
 };
 
 /**
- * Walk runs.jsonl in [sinceMs, now) and bucket each answer_id → {confidence,
- * kind}. When `restrictTo` is non-empty we early-skip non-matching rows to
- * keep the scan cheap on busy projects.
+ * Walk runs.jsonl in [sinceMs, now) and bucket each answer_id → meta.
+ * When `restrictTo` is non-empty we early-skip non-matching rows to keep
+ * the scan cheap on busy projects.
  */
 function buildRunIndex(
   stateRoot: string,
@@ -336,9 +467,11 @@ function buildRunIndex(
     if (!restrictTo.has(aid)) continue;
     // Last-write-wins (a re-asked answer_id is rare; the latest line is
     // usually the relevant one).
+    const citations = rec.answer.citations ?? [];
     out.set(aid, {
       confidence: rec.answer.confidence ?? null,
       kind: rec.answer.kind,
+      citationsEmpty: citations.length === 0,
     });
   }
   return out;
@@ -367,7 +500,7 @@ function emptySnapshot(
       nonAnswerRate: 0,
       aplusCandidates: null,
     },
-    filterCounts: { all: 0, thumbs_up: 0, thumbs_down: 0, implicit: 0 },
+    filterCounts: { all: 0, thumbs_up: 0, thumbs_down: 0, implicit: 0, no_citations: 0 },
     filter,
     rows: [],
     hasMore: false,

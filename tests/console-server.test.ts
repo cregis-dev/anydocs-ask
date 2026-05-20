@@ -534,7 +534,7 @@ test('GET /api/projects/:name/feedback: returns rows + filterCounts; respects ?f
     };
     assert.equal(allBody.ok, true);
     assert.equal(allBody.rows.length, 4);
-    assert.deepEqual(allBody.filterCounts, { all: 4, thumbs_up: 2, thumbs_down: 1, implicit: 1 });
+    assert.deepEqual(allBody.filterCounts, { all: 4, thumbs_up: 2, thumbs_down: 1, implicit: 1, no_citations: 0 });
 
     // filter=thumbs_up — 2 rows.
     const upRes = await app.request('/api/projects/docs-zh/feedback?filter=thumbs_up');
@@ -588,7 +588,7 @@ test('GET /api/projects/:name/feedback: curated rows excluded from all chip + KP
       rows: Array<{ signal_source: string }>;
       filterCounts: Record<string, number>;
     };
-    assert.deepEqual(body.filterCounts, { all: 3, thumbs_up: 1, thumbs_down: 1, implicit: 1 });
+    assert.deepEqual(body.filterCounts, { all: 3, thumbs_up: 1, thumbs_down: 1, implicit: 1, no_citations: 0 });
     // List rows when filter='all' must also stay at 3 (curated suppressed
     // by the SQL filter; counts and list must agree).
     assert.equal(body.rows.length, 3);
@@ -649,7 +649,7 @@ test('GET /api/projects/:name/feedback: disabled project returns enabled=false, 
     assert.equal(body.ok, true);
     assert.equal(body.enabled, false);
     assert.equal(body.rows.length, 0);
-    assert.deepEqual(body.filterCounts, { all: 0, thumbs_up: 0, thumbs_down: 0, implicit: 0 });
+    assert.deepEqual(body.filterCounts, { all: 0, thumbs_up: 0, thumbs_down: 0, implicit: 0, no_citations: 0 });
   } finally {
     await cleanup();
   }
@@ -672,6 +672,216 @@ test('GET /api/projects/:name/feedback: 404 on unknown project, 400 on invalid p
     assert.equal(unknown.status, 404);
     const invalid = await app.request('/api/projects/broken/feedback');
     assert.equal(invalid.status, 400);
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// T1-c helpers
+// ---------------------------------------------------------------------------
+
+function seedPage(
+  db: ReturnType<typeof openDatabase>,
+  args: {
+    page_id: string;
+    breadcrumb: Array<{ id: string; title: string; type: 'section' | 'folder' | 'page' }>;
+    lang?: string;
+    title?: string;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO pages
+       (page_id, lang, status, title, slug, breadcrumb, nav_index, parent_id, subtree_root, url, updated_at)
+     VALUES (?, ?, 'published', ?, NULL, ?, NULL, NULL, NULL, NULL, ?)`,
+  ).run(
+    args.page_id,
+    args.lang ?? 'zh',
+    args.title ?? args.breadcrumb[args.breadcrumb.length - 1]?.title ?? args.page_id,
+    JSON.stringify(args.breadcrumb),
+    Date.now(),
+  );
+}
+
+async function seedRunsFile(stateRoot: string, lines: Array<Record<string, unknown>>): Promise<void> {
+  const runsDir = join(stateRoot, 'runs');
+  await fs.mkdir(runsDir, { recursive: true });
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const week = String(Math.floor(((now.getTime() - Date.UTC(year, 0, 1)) / 86_400_000 + 1) / 7) + 1).padStart(2, '0');
+  const content = lines.map((l) => JSON.stringify(l)).join('\n') + '\n';
+  await fs.writeFile(join(runsDir, `${year}-W${week}.jsonl`), content);
+}
+
+function makeRunRecord(args: {
+  answer_id: string;
+  ts?: string;
+  kind?: 'answer' | 'clarify' | 'error';
+  confidence?: number;
+  citations?: Array<{ chunk_id: number | null; page: string; quote: string }>;
+}): Record<string, unknown> {
+  return {
+    ts: args.ts ?? new Date().toISOString(),
+    request_id: 'req_' + args.answer_id,
+    session_id: null,
+    query: 'q',
+    filters: {},
+    context_pageId: null,
+    source: 'reader',
+    retrieval: { fused: [], subtree_ask_triggered: false },
+    answer: {
+      kind: args.kind ?? 'answer',
+      answer_id: args.answer_id,
+      md: 'a',
+      citations: args.citations ?? [{ chunk_id: 1, page: 'p', quote: 'q' }],
+      confidence: args.confidence ?? 0.7,
+      latency_ms: 100,
+      tokens_in: null,
+      tokens_out: null,
+      model: 'mock',
+      error_code: null,
+    },
+    feedback: { beta: null, gamma: null },
+  };
+}
+
+test('GET /p/:name: Feedback tab — breadcrumb chain rendered when pages row exists (RFC 0002 T1-c)', async () => {
+  // T1-c replaces the raw current_page_id cell with the title chain
+  // resolved via the pages.breadcrumb JOIN. Missing page rows
+  // (unpublished / deleted) fall back to the raw page_id, dimmed.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    seedPage(db, {
+      page_id: 'auth-jwt',
+      breadcrumb: [
+        { id: 'sec-quickstart', title: 'Quickstart', type: 'section' },
+        { id: 'fld-auth', title: 'Auth', type: 'folder' },
+        { id: 'page-jwt', title: 'JWT', type: 'page' },
+      ],
+    });
+    insertFeedback(db, { answer_id: 'a1', rating: 1, current_page_id: 'auth-jwt' });
+    insertFeedback(db, { answer_id: 'a2', rating: -1, current_page_id: 'missing-page' });
+    db.close();
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+
+    // Breadcrumb chain rendered with the › separator.
+    assert.match(body, /Quickstart › Auth › JWT/);
+    // Missing-page row still shows the raw page id (dimmed branch).
+    assert.match(body, />missing-page</);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback: breadcrumb field populated per row (RFC 0002 T1-c)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    seedPage(db, {
+      page_id: 'auth-jwt',
+      breadcrumb: [
+        { id: 'fld-auth', title: 'Auth', type: 'folder' },
+        { id: 'page-jwt', title: 'JWT', type: 'page' },
+      ],
+    });
+    insertFeedback(db, { answer_id: 'a1', rating: 1, current_page_id: 'auth-jwt' });
+    insertFeedback(db, { answer_id: 'a2', rating: 1, current_page_id: 'missing-page' });
+    insertFeedback(db, { answer_id: 'a3', rating: 1, current_page_id: null });
+    db.close();
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      rows: Array<{ answerId: string; currentPageId: string | null; breadcrumb: unknown }>;
+    };
+    const byAid = new Map(body.rows.map((r) => [r.answerId, r]));
+    assert.deepEqual(byAid.get('a1')?.breadcrumb, [
+      { id: 'fld-auth', title: 'Auth', type: 'folder' },
+      { id: 'page-jwt', title: 'JWT', type: 'page' },
+    ]);
+    // Missing pages row: page_id retained, breadcrumb is null.
+    assert.equal(byAid.get('a2')?.currentPageId, 'missing-page');
+    assert.equal(byAid.get('a2')?.breadcrumb, null);
+    // page_id absent entirely.
+    assert.equal(byAid.get('a3')?.currentPageId, null);
+    assert.equal(byAid.get('a3')?.breadcrumb, null);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback?filter=no_citations: returns only rows with empty-citation runs (RFC 0002 T1-c)', async () => {
+  // The no_citations chip is data-driven from runs.jsonl, not the
+  // feedback table itself. Seed: 3 feedback rows linked to 3 runs —
+  // two with citations, one without. Filter must pick only the empty-
+  // citation one; chip badge must match.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'ans_ok1', rating: 1 });
+    insertFeedback(db, { answer_id: 'ans_ok2', rating: -1 });
+    insertFeedback(db, { answer_id: 'ans_empty', rating: 1 });
+    db.close();
+    await seedRunsFile(stateRoot, [
+      makeRunRecord({ answer_id: 'ans_ok1' }),
+      makeRunRecord({ answer_id: 'ans_ok2' }),
+      makeRunRecord({ answer_id: 'ans_empty', citations: [] }),
+    ]);
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+
+    // Chip badge: filterCounts.no_citations = 1.
+    const allBody = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      filterCounts: { no_citations: number };
+    };
+    assert.equal(allBody.filterCounts.no_citations, 1);
+
+    // filter=no_citations returns only the empty-citation row.
+    const filtBody = (await (
+      await app.request('/api/projects/docs-zh/feedback?filter=no_citations')
+    ).json()) as {
+      filter: string;
+      rows: Array<{ answerId: string; hadNoCitations: boolean | null }>;
+    };
+    assert.equal(filtBody.filter, 'no_citations');
+    assert.equal(filtBody.rows.length, 1);
+    assert.equal(filtBody.rows[0]!.answerId, 'ans_empty');
+    assert.equal(filtBody.rows[0]!.hadNoCitations, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab — no_citations chip is in the SSR chip bar (RFC 0002 T1-c)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: 1 });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+    assert.match(body, /data-feedback-chip="no_citations"/);
+    // Label is emitted as plain text followed by the count <span>, so we
+    // match the label segment without anchoring to the closing tag.
+    assert.match(body, /no citations\s*<span class="cnt"/);
   } finally {
     await cleanup();
   }
