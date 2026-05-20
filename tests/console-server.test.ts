@@ -937,6 +937,36 @@ test('GET /p/:name: Feedback tab — drawer shell hidden when zero rows', async 
   }
 });
 
+test('GET /p/:name: Feedback drawer inline JS guards against stale async responses (Codex P2 regression)', async () => {
+  // Two rapid row clicks must not let the slower fetch overwrite the
+  // faster one. Codex flagged this on PR #50 — the drawer code now
+  // tracks a request token bumped on each openDrawer() and on closeDrawer
+  // and bails on token mismatch after the await.
+  //
+  // Static-source assertion keeps the test simple (no headless browser
+  // dependency); we just verify the guard pattern is emitted.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: 1 });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+    // Token is declared, bumped on open, and checked after the await.
+    assert.match(body, /let drawerReqToken = 0;/);
+    assert.match(body, /const myToken = \+\+drawerReqToken;/);
+    assert.match(body, /if \(myToken !== drawerReqToken\) return;/);
+    // closeDrawer also bumps it so a pending fetch can't reopen the drawer.
+    assert.match(body, /function closeDrawer\(\)\s*\{[\s\S]*?drawerReqToken\+\+;/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('GET /api/projects/:name/feedback/:id: returns row + run JOIN (RFC 0002 T1-d)', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {

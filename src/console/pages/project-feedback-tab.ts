@@ -476,7 +476,17 @@ const drawerEl = document.getElementById('fb-drawer');
 const drawerHd = document.getElementById('fb-drawer-hd');
 const drawerBd = document.getElementById('fb-drawer-bd');
 
+// Stale-response guard: each openDrawer() bumps this token, and the async
+// fetch only writes to the DOM if the token is still the one captured at
+// call time. closeDrawer() also bumps it so a pending fetch can't reopen
+// the drawer after the user dismissed it.
+let drawerReqToken = 0;
+
 function closeDrawer() {
+  // Bump the token so any pending openDrawer fetch sees a token mismatch
+  // and skips its DOM write — otherwise a slow response could reopen the
+  // drawer the user just closed.
+  drawerReqToken++;
   if (drawerMask) drawerMask.hidden = true;
   if (drawerEl) drawerEl.hidden = true;
   document.body.style.overflow = '';
@@ -614,6 +624,7 @@ async function openDrawer(feedbackId, rowEl, qPreview) {
     if (prev) prev.classList.remove('sel');
   }
   if (rowEl) rowEl.classList.add('sel');
+  const myToken = ++drawerReqToken;
   setDrawerLoading(qPreview);
   drawerMask.hidden = false;
   drawerEl.hidden = false;
@@ -623,10 +634,12 @@ async function openDrawer(feedbackId, rowEl, qPreview) {
     const res = await fetch('/api/projects/' + encodeURIComponent(FB.projectName) + '/feedback/' + feedbackId);
     body = await res.json();
   } catch (err) {
+    if (myToken !== drawerReqToken) return;
     drawerBd.innerHTML = '<p style="padding: var(--s-5); color: var(--err);">Failed to load: ' + escapeHtml(String(err)) + '</p>';
     bindDrawerControls();
     return;
   }
+  if (myToken !== drawerReqToken) return; // a newer click superseded us
   if (!body || body.ok === false) {
     drawerBd.innerHTML = '<p style="padding: var(--s-5); color: var(--err);">Failed: ' + escapeHtml((body && body.error) || 'unknown') + '</p>';
     bindDrawerControls();
