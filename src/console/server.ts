@@ -44,7 +44,7 @@ import {
   readReportBody,
   writePinnedBaseline,
 } from './eval-state.ts';
-import { loadFeedbackTabSnapshot } from './feedback-state.ts';
+import { loadFeedbackTabSnapshot, parseFeedbackFilter } from './feedback-state.ts';
 import { loadIndexSnapshot, type ChildIndexStatus } from './index-state.ts';
 import { loadTrafficWindow } from './traffic-state.ts';
 import { loadProjectHomeStats, summarizeWorkspace } from './home-state.ts';
@@ -510,6 +510,42 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const limitRaw = c.req.query('limit');
     const limit = limitRaw !== undefined ? Math.max(1, Math.min(500, Number(limitRaw) || 50)) : 50;
     return c.json(tailRuns({ stateRoot, count: limit }));
+  });
+
+  // Feedback list — RFC 0002 T1-b. Drives the middle-list chip switcher.
+  // KPI numbers + window aggregates do NOT change with filter (the chip is
+  // a list cursor, not a KPI scope), so the response only carries the per-
+  // filter row page + the updated `filterCounts` for chip badges.
+  app.get('/api/projects/:name/feedback', (c) => {
+    const name = c.req.param('name');
+    const project = findProject(deps.workspacePath, name);
+    if (!project) return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
+    if (!project.valid) {
+      return c.json(
+        { ok: false, error: `project '${name}' invalid (missing: ${project.missing.join(', ')})` },
+        400,
+      );
+    }
+    const stateRoot = projectStateRoot(deps.workspacePath, project);
+    if (!stateRoot) return c.json({ ok: false, error: 'no projectId' }, 400);
+    const askConfig = loadAskConfigForView(project.path);
+    const enabled = readFeedbackEnabled(askConfig.raw);
+    const filter = parseFeedbackFilter(c.req.query('filter'));
+    const limitRaw = c.req.query('limit');
+    const limit = limitRaw !== undefined ? Number(limitRaw) || 50 : 50;
+    const snapshot = loadFeedbackTabSnapshot(
+      stateRoot,
+      { feedback: { enabled } },
+      { filter, limit },
+    );
+    return c.json({
+      ok: true,
+      enabled: snapshot.enabled,
+      filter: snapshot.filter,
+      rows: snapshot.rows,
+      filterCounts: snapshot.filterCounts,
+      hasMore: snapshot.hasMore,
+    });
   });
 
   app.get('/api/projects/:name/reports', (c) => {

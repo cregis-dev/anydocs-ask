@@ -378,33 +378,61 @@ test('GET /p/:name: Feedback tab — empty state when feedback.enabled is true b
   }
 });
 
-test('GET /p/:name: Feedback tab — "signals collected" banner when totalCount > 0 (RFC 0002 T1-a follow-up)', async () => {
-  // Pipe-alive signal: when β/γ rows already exist but T1-b list/KPI is
-  // still pending, render a thin info banner above the empty card so the
-  // author sees "the loop is collecting something" instead of staring at
-  // an unchanged empty state.
+// ---------------------------------------------------------------------------
+// T1-b helpers
+// ---------------------------------------------------------------------------
+
+async function seedFeedbackProject(ws: string, name: string): Promise<{
+  stateRoot: string;
+  db: ReturnType<typeof openDatabase>;
+}> {
+  await makeWorkspaceWithProjects(ws, [name]);
+  const projectRoot = join(ws, 'projects', name);
+  await fs.writeFile(
+    join(projectRoot, 'anydocs.ask.json'),
+    JSON.stringify({ feedback: { enabled: true } }, null, 2),
+  );
+  const stateRoot = ensureStateRoot(ws, name);
+  const db = openDatabase({ stateRoot });
+  return { stateRoot, db };
+}
+
+function insertFeedback(
+  db: ReturnType<typeof openDatabase>,
+  args: {
+    answer_id: string;
+    question?: string;
+    rating?: number | null;
+    signal_source?: 'explicit' | 'implicit' | 'curated';
+    current_page_id?: string | null;
+    created_at?: number;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO feedback
+       (answer_id, question, generated, rating, signal_source, current_page_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    args.answer_id,
+    args.question ?? 'q',
+    'gen',
+    args.rating ?? null,
+    args.signal_source ?? 'explicit',
+    args.current_page_id ?? null,
+    args.created_at ?? Date.now(),
+  );
+}
+
+test('GET /p/:name: Feedback tab — KPI tiles + list render when feedback table populated (RFC 0002 T1-b)', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
-    await makeWorkspaceWithProjects(ws, ['docs-zh']);
-    const projectRoot = join(ws, 'projects', 'docs-zh');
-    await fs.writeFile(
-      join(projectRoot, 'anydocs.ask.json'),
-      JSON.stringify({ feedback: { enabled: true } }, null, 2),
-    );
-    // Seed two β rows into <state>/<projectId>/index.db. projectId == name
-    // by makeWorkspaceWithProjects convention.
-    const stateRoot = ensureStateRoot(ws, 'docs-zh');
-    const db = openDatabase({ stateRoot });
-    db.prepare(
-      `INSERT INTO feedback
-         (answer_id, question, generated, rating, signal_source, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run('ans_a', 'how do I X', 'X is done by ...', 1, 'explicit', Date.now());
-    db.prepare(
-      `INSERT INTO feedback
-         (answer_id, question, generated, rating, signal_source, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run('ans_b', 'how do I Y', 'Y is done by ...', -1, 'explicit', Date.now());
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    // 3 explicit (2👍 + 1👎) + 1 implicit — gives every chip a non-zero count
+    // and verifies the signal_source split + KPI bucketing.
+    insertFeedback(db, { answer_id: 'ans_1', rating: 1 });
+    insertFeedback(db, { answer_id: 'ans_2', rating: 1 });
+    insertFeedback(db, { answer_id: 'ans_3', rating: -1 });
+    insertFeedback(db, { answer_id: 'ans_4', signal_source: 'implicit', rating: null });
     db.close();
 
     const app = createConsoleApp({
@@ -415,13 +443,195 @@ test('GET /p/:name: Feedback tab — "signals collected" banner when totalCount 
     const res = await app.request('/p/docs-zh');
     assert.equal(res.status, 200);
     const body = await res.text();
-    // Still the empty-shaped state in T1-a — KPIs / list don't ship until T1-b.
-    assert.match(body, /data-feedback-state="empty"/);
-    assert.match(body, /data-feedback-total="2"/);
-    // Collected banner now visible with the count.
-    assert.match(body, /data-feedback-banner="collected"/);
-    assert.match(body, /2 feedback signals collected/);
-    assert.match(body, /list view, and the per-row drawer\s*ship in T1-b/);
+
+    // State transitioned from empty to list.
+    assert.match(body, /data-feedback-state="list"/);
+    assert.match(body, /data-feedback-total="4"/);
+
+    // KPI tiles carry the real numbers — feedback·7d count and the β/γ split.
+    assert.match(body, /β\s*3\s*·\s*γ\s*1/);
+    // explicit share = 3 / (3 + 1) = 75%
+    assert.match(body, /explicit %[\s\S]*?75%/);
+    // A+ candidates tile still placeholder.
+    assert.match(body, /A\+ candidates[\s\S]*?—[\s\S]*?unlocks at 50/);
+
+    // Chip bar with the four T1-b filters + per-chip badge counts.
+    assert.match(body, /data-feedback-chip="all"/);
+    assert.match(body, /data-feedback-chip="thumbs_up"/);
+    assert.match(body, /data-feedback-chip="thumbs_down"/);
+    assert.match(body, /data-feedback-chip="implicit"/);
+
+    // List has rows — one rendered <li> per seeded row. Match the unique
+    // `data-feedback-row="<id>"` attribute to avoid counting the inline JS
+    // template's literal `class="feedback-row"` string.
+    const rowMatches = body.match(/data-feedback-row="\d+"/g) ?? [];
+    assert.equal(rowMatches.length, 4, 'expected 4 SSR feedback rows');
+    // Rating badges: 2 👍 + 1 👎 + 1 γ ⏱
+    assert.match(body, /<span class="tag ok">👍<\/span>/);
+    assert.match(body, /<span class="tag err">👎<\/span>/);
+    assert.match(body, /γ ⏱/);
+
+    // The disabled / no-data branches must NOT render alongside.
+    assert.equal(body.includes('data-feedback-state="disabled"'), false);
+    assert.equal(body.includes('No feedback yet'), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab — onboarding banner only when 0 < totalCount < 10 (RFC 0002 T1-b)', async () => {
+  // The "X signals collected" banner is an onboarding aid for the
+  // pre-PRD §10.3 ≥50 phase. It MUST hide on the 0 row case (covered by
+  // its own test) and SHOULD also hide once we cross 10 rows so the
+  // healthy state stays uncluttered.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    for (let i = 0; i < 12; i++) {
+      insertFeedback(db, { answer_id: 'a_' + i, rating: i % 2 === 0 ? 1 : -1 });
+    }
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+    assert.match(body, /data-feedback-state="list"/);
+    assert.match(body, /data-feedback-total="12"/);
+    assert.equal(
+      body.includes('data-feedback-banner="collected"'),
+      false,
+      'banner should not render once totalCount ≥ 10',
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback: returns rows + filterCounts; respects ?filter (RFC 0002 T1-b)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: 1, question: 'q-up' });
+    insertFeedback(db, { answer_id: 'a2', rating: 1, question: 'q-up-2' });
+    insertFeedback(db, { answer_id: 'a3', rating: -1, question: 'q-down' });
+    insertFeedback(db, { answer_id: 'a4', signal_source: 'implicit', question: 'q-implicit' });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+
+    // default (filter=all) — all 4 rows.
+    const allRes = await app.request('/api/projects/docs-zh/feedback');
+    assert.equal(allRes.status, 200);
+    const allBody = (await allRes.json()) as {
+      ok: boolean;
+      rows: Array<{ answerId: string; question: string }>;
+      filterCounts: Record<string, number>;
+    };
+    assert.equal(allBody.ok, true);
+    assert.equal(allBody.rows.length, 4);
+    assert.deepEqual(allBody.filterCounts, { all: 4, thumbs_up: 2, thumbs_down: 1, implicit: 1 });
+
+    // filter=thumbs_up — 2 rows.
+    const upRes = await app.request('/api/projects/docs-zh/feedback?filter=thumbs_up');
+    const upBody = (await upRes.json()) as {
+      rows: Array<{ answerId: string; question: string }>;
+    };
+    assert.equal(upBody.rows.length, 2);
+    assert.ok(upBody.rows.every((r) => r.question.startsWith('q-up')));
+
+    // filter=implicit — 1 row.
+    const impRes = await app.request('/api/projects/docs-zh/feedback?filter=implicit');
+    const impBody = (await impRes.json()) as {
+      rows: Array<{ answerId: string }>;
+    };
+    assert.equal(impBody.rows.length, 1);
+    assert.equal(impBody.rows[0]!.answerId, 'a4');
+
+    // Unknown filter falls back to 'all' (parseFeedbackFilter contract).
+    const fallbackRes = await app.request('/api/projects/docs-zh/feedback?filter=garbage');
+    const fallbackBody = (await fallbackRes.json()) as { filter: string; rows: unknown[] };
+    assert.equal(fallbackBody.filter, 'all');
+    assert.equal(fallbackBody.rows.length, 4);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback: question backfill placeholder kicks in for empty-string rows', async () => {
+  // Pre-0.2.0-alpha.2 rows have `question = ''` (the spawned "Backfill
+  // question" task fixes the writer; until that lands, the list UI must
+  // not show an empty cell — the loader rewrites the field to a stable
+  // sentinel and the test pins that contract.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', question: '', rating: 1 });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      rows: Array<{ question: string }>;
+    };
+    assert.equal(body.rows.length, 1);
+    assert.match(body.rows[0]!.question, /pre-0\.2\.0-alpha\.2/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback: disabled project returns enabled=false, empty rows', async () => {
+  // The route still answers 200 with structured data; the client uses
+  // `enabled` to decide whether to render the list at all. The SSR /p/:name
+  // path renders the disabled card; this exercises the JSON branch.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    // No anydocs.ask.json → feedback.enabled defaults to false.
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      ok: boolean;
+      enabled: boolean;
+      rows: unknown[];
+      filterCounts: Record<string, number>;
+    };
+    assert.equal(body.ok, true);
+    assert.equal(body.enabled, false);
+    assert.equal(body.rows.length, 0);
+    assert.deepEqual(body.filterCounts, { all: 0, thumbs_up: 0, thumbs_down: 0, implicit: 0 });
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback: 404 on unknown project, 400 on invalid project', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    // Add an invalid project (missing navigation/).
+    const brokenPath = join(ws, 'projects', 'broken');
+    await fs.mkdir(join(brokenPath, 'pages'), { recursive: true });
+    addToProjectRegistry(ws, brokenPath, 'broken');
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const unknown = await app.request('/api/projects/does-not-exist/feedback');
+    assert.equal(unknown.status, 404);
+    const invalid = await app.request('/api/projects/broken/feedback');
+    assert.equal(invalid.status, 400);
   } finally {
     await cleanup();
   }

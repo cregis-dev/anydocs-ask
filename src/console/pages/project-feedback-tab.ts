@@ -1,36 +1,46 @@
 /**
- * Feedback tab — RFC 0002 T1-a (skeleton).
+ * Feedback tab — RFC 0002 T1-a (skeleton) + T1-b (KPI + list + chips).
  *
- * Only the first two states from console-redesign-brief §7.5.1 are
- * implemented here:
+ * States from console-redesign-brief §7.5.1 covered here:
+ *   1. disabled                — `feedback.enabled = false` (PRD §11.4 #6)
+ *   2. enabled, empty          — switch on, table empty
+ *   3. enabled, <10 records    — KPI tiles + onboarding banner
+ *   4. enabled, healthy        — KPI + filterable list
  *
- *   1. disabled        — `feedback.enabled = false` (PRD §11.4 #6 default)
- *   2. enabled, empty  — switch on, feedback table has 0 rows
- *
- * KPI rail, middle list, and the right-side detail drawer (states 3-5)
- * land in T1-b / T1-d once the list endpoint exists. T1-a's job is to
- * make the tab visible so a design partner opening the console can see
- * where the loop is heading.
+ * State 5 (right-side detail drawer) is still T1-d.
  */
 
-import { html } from 'hono/html';
+import { html, raw } from 'hono/html';
 import type { Html } from './layout.ts';
-import type { FeedbackTabSnapshot } from '../feedback-state.ts';
+import type {
+  FeedbackFilter,
+  FeedbackRowVM,
+  FeedbackTabSnapshot,
+  FilterCounts,
+} from '../feedback-state.ts';
 
 export type FeedbackTabViewModel = {
   projectName: string;
   snapshot: FeedbackTabSnapshot;
 };
 
+const FILTER_LABELS: Record<FeedbackFilter, string> = {
+  all: 'all',
+  thumbs_up: '👍',
+  thumbs_down: '👎',
+  implicit: 'implicit',
+};
+
 export function renderFeedbackTab(vm: FeedbackTabViewModel): Html {
   if (!vm.snapshot.enabled) return disabledCard();
-  return emptyEnabledLayout(vm.snapshot.totalCount);
+  return enabledLayout(vm.projectName, vm.snapshot);
 }
 
+// ---------------------------------------------------------------------------
+// State 1 — disabled
+// ---------------------------------------------------------------------------
+
 function disabledCard(): Html {
-  // State 1 — feedback.enabled = false. PRD §11.4 #6 makes this the default,
-  // so the tab is muted instead of showing fake KPIs. The CTA points to the
-  // Settings tab where `feedback.enabled` lives.
   return html`
     <section class="card" data-feedback-state="disabled">
       <div class="card-bd">
@@ -54,32 +64,34 @@ function disabledCard(): Html {
   `;
 }
 
-function emptyEnabledLayout(totalCount: number): Html {
-  // State 2 (and a placeholder for state 3 onwards). T1-a only ships the
-  // empty-shaped layout; we keep rendering it regardless of `totalCount`
-  // because KPI math, the list, and the drawer all land in T1-b.
-  //
-  // When rows already exist we still owe the author a visible signal that
-  // the β/γ pipe is alive — otherwise design partners click 👍, see the
-  // table grow in the DB, and find the UI unchanged. The thin "signals
-  // collected" banner above the empty card bridges that gap without
-  // pulling state 3+ into T1-a.
-  const collected = totalCount > 0;
+// ---------------------------------------------------------------------------
+// States 2-4 — enabled
+// ---------------------------------------------------------------------------
+
+function enabledLayout(projectName: string, snap: FeedbackTabSnapshot): Html {
+  const state = snap.totalCount === 0 ? 'empty' : 'list';
   return html`
     <div
       class="feedback-tab"
-      data-feedback-state="empty"
-      data-feedback-total="${totalCount}"
+      data-feedback-state="${state}"
+      data-feedback-total="${snap.totalCount}"
       style="display: flex; flex-direction: column; gap: var(--s-5);"
     >
-      ${collected ? collectedBanner(totalCount) : ''}
-      ${kpiPlaceholder()}
-      ${emptyListCard()}
+      ${snap.totalCount > 0 && snap.totalCount < 10 ? onboardingBanner(snap.totalCount) : ''}
+      ${kpiStrip(snap)}
+      ${snap.totalCount === 0 ? emptyListCard() : listCard(projectName, snap)}
     </div>
+    ${snap.totalCount === 0
+      ? ''
+      : html`<script>${raw(`window.__FEEDBACK__ = ${JSON.stringify({
+          projectName,
+          filter: snap.filter,
+        })};`)}</script>
+        <script type="module">${raw(FEEDBACK_SCRIPT)}</script>`}
   `;
 }
 
-function collectedBanner(totalCount: number): Html {
+function onboardingBanner(totalCount: number): Html {
   const label = totalCount === 1 ? 'signal' : 'signals';
   return html`
     <div class="banner info" data-feedback-banner="collected">
@@ -87,41 +99,55 @@ function collectedBanner(totalCount: number): Html {
       <div class="b-bd">
         <div class="b-ti">${totalCount} feedback ${label} collected</div>
         <div class="b-de">
-          The β / γ pipe is writing rows. KPI numbers, the list view, and the per-row drawer
-          ship in T1-b — this tab will fill in then.
+          A+ failure-cluster diagnosis unlocks at 50 signals (PRD §10.3). Until then the list
+          below is the raw feed; the right-side per-row drawer ships in T1-d.
         </div>
       </div>
     </div>
   `;
 }
 
-function kpiPlaceholder(): Html {
-  // Five tiles match the §7.5.1 left rail (feedback count · explicit % ·
-  // mean confidence · non-answer rate · A+ candidates). Every value is `—`
-  // until we have rows; sparkline / refresh button arrive in T1-b.
-  const labels = [
-    { lab: 'feedback · 7d', foot: 'β + γ combined' },
-    { lab: 'explicit %', foot: '👍 / 👎 share' },
-    { lab: 'mean confidence', foot: 'across rated runs' },
-    { lab: 'non-answer rate', foot: 'error + clarify' },
-    { lab: 'A+ candidates', foot: 'unlocks at 50 (PRD §10.3)' },
-  ];
+function kpiStrip(snap: FeedbackTabSnapshot): Html {
+  const k = snap.kpi;
+  const pct = (n: number | null): string => (n === null ? '—' : `${Math.round(n * 100)}%`);
+  const conf = (n: number | null): string => (n === null ? '—' : n.toFixed(2));
+  const lowConf = k.meanConfidence !== null && k.meanConfidence < 0.5;
+  const highNonAns = k.nonAnswerRate > 0.2;
   return html`
-    <div class="kpis" style="grid-template-columns: repeat(5, 1fr);">
-      ${labels.map(
-        (k) => html`
-          <div class="kpi">
-            <div class="k-lab">${k.lab}</div>
-            <div class="k-val">—</div>
-            <div class="k-foot">${k.foot}</div>
-          </div>
-        `,
-      )}
+    <div class="kpis" style="grid-template-columns: repeat(5, 1fr);" data-feedback-kpi>
+      <div class="kpi">
+        <div class="k-lab">feedback · ${snap.days}d</div>
+        <div class="k-val">${k.count}</div>
+        <div class="k-foot">β ${k.explicitCount} · γ ${k.implicitCount}</div>
+      </div>
+      <div class="kpi">
+        <div class="k-lab">explicit %</div>
+        <div class="k-val">${pct(k.explicitShare)}</div>
+        <div class="k-foot">👍 / 👎 vs γ implicit</div>
+      </div>
+      <div class="kpi${lowConf ? ' warn' : ''}">
+        <div class="k-lab">mean confidence</div>
+        <div class="k-val">${conf(k.meanConfidence)}</div>
+        <div class="k-foot" style="color: ${lowConf ? 'var(--warn)' : 'var(--fg-mute)'};">
+          across rated runs
+        </div>
+      </div>
+      <div class="kpi${highNonAns ? ' warn' : ''}">
+        <div class="k-lab">non-answer rate</div>
+        <div class="k-val">${pct(k.nonAnswerRate)}</div>
+        <div class="k-foot">error + clarify</div>
+      </div>
+      <div class="kpi">
+        <div class="k-lab">A+ candidates</div>
+        <div class="k-val">—</div>
+        <div class="k-foot">unlocks at 50 (PRD §10.3)</div>
+      </div>
     </div>
   `;
 }
 
 function emptyListCard(): Html {
+  // State 2 — `feedback.enabled = true` but the table is empty.
   return html`
     <section class="card">
       <div class="card-bd">
@@ -129,9 +155,9 @@ function emptyListCard(): Html {
           <div class="e-ico"><svg><use href="#i-chat"/></svg></div>
           <h3>No feedback yet</h3>
           <p>
-            Once readers tap 👍 / 👎 (β channel) or the server detects a same-session re-ask within
-            5 min (γ channel), rows will appear here. Until then the loop has nothing to chew on —
-            try the Ask tab, or wait for real traffic.
+            Once readers tap 👍 / 👎 (β channel) or the server detects a same-session re-ask
+            within 5 min (γ channel), rows will appear here. Until then the loop has nothing to
+            chew on — try the Ask tab, or wait for real traffic.
           </p>
           <div class="e-cta">
             <a href="#ask" class="btn primary">
@@ -146,3 +172,233 @@ function emptyListCard(): Html {
     </section>
   `;
 }
+
+function listCard(projectName: string, snap: FeedbackTabSnapshot): Html {
+  return html`
+    <section class="card" data-feedback-list-card>
+      <div class="card-hd">
+        <h2><svg style="width:14px;height:14px;"><use href="#i-chat"/></svg> Recent feedback</h2>
+        <span class="meta" id="feedback-meta">
+          ${snap.rows.length} of ${snap.filterCounts[snap.filter]} in last ${snap.days}d
+        </span>
+      </div>
+      <div class="card-bd flush">
+        ${chipBar(snap.filterCounts, snap.filter)}
+        <div id="feedback-rows">
+          ${snap.rows.length === 0 ? emptyFilterRow(snap.filter) : rowsTable(snap.rows)}
+        </div>
+        ${snap.hasMore
+          ? html`<div class="meta" style="padding: var(--s-3) var(--s-5); color: var(--fg-mute);">
+              Showing newest 50 — older signals via
+              <code class="inline">GET /api/projects/${projectName}/feedback?limit=200</code>.
+            </div>`
+          : ''}
+      </div>
+    </section>
+  `;
+}
+
+function chipBar(counts: FilterCounts, active: FeedbackFilter): Html {
+  const chips: FeedbackFilter[] = ['all', 'thumbs_up', 'thumbs_down', 'implicit'];
+  return html`
+    <nav class="feedback-chips"
+         role="tablist"
+         aria-label="Feedback filter"
+         style="display: flex; gap: var(--s-2); padding: var(--s-3) var(--s-5); border-bottom: 1px solid var(--bd-soft); flex-wrap: wrap;">
+      ${chips.map(
+        (f) => html`
+          <button
+            type="button"
+            class="tag${f === active ? ' warn' : ''}"
+            role="tab"
+            aria-selected="${f === active ? 'true' : 'false'}"
+            data-feedback-chip="${f}"
+            style="cursor: pointer; border-style: solid;"
+          >
+            ${FILTER_LABELS[f]}
+            <span class="cnt" style="margin-left: 6px; color: var(--fg-mute);">${counts[f]}</span>
+          </button>
+        `,
+      )}
+    </nav>
+  `;
+}
+
+function rowsTable(rows: FeedbackRowVM[]): Html {
+  return html`
+    <ul class="feedback-rows" style="list-style: none; margin: 0; padding: 0;">
+      ${rows.map((r) => rowItem(r))}
+    </ul>
+  `;
+}
+
+function rowItem(r: FeedbackRowVM): Html {
+  const ratingBadge = ratingBadgeFor(r);
+  const confPill =
+    r.confidence === null
+      ? html`<span class="tag" style="color: var(--fg-mute);">conf —</span>`
+      : html`<span class="tag${r.confidence < 0.5 ? ' warn' : ''}">conf ${r.confidence.toFixed(2)}</span>`;
+  return html`
+    <li
+      class="feedback-row"
+      data-feedback-row="${r.feedback_id}"
+      data-feedback-answer-id="${r.answerId}"
+      style="display: grid; grid-template-columns: 90px 80px 90px minmax(0, 1fr) auto;
+             gap: var(--s-3); padding: var(--s-3) var(--s-5);
+             border-top: 1px solid var(--bd-soft); align-items: center;"
+    >
+      <span class="mono" style="font-size: var(--t-12); color: var(--fg-mute);">
+        ${r.ts.slice(11, 19)}
+      </span>
+      ${ratingBadge}
+      ${confPill}
+      <span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+        ${r.question}
+      </span>
+      <span class="mono" style="font-size: var(--t-12); color: var(--fg-mute);">
+        ${r.currentPageId ?? '—'}
+      </span>
+    </li>
+  `;
+}
+
+function ratingBadgeFor(r: FeedbackRowVM): Html {
+  if (r.signal_source === 'implicit') {
+    return html`<span class="tag" title="γ implicit signal">γ ⏱</span>`;
+  }
+  if (r.rating !== null && r.rating > 0) {
+    return html`<span class="tag ok">👍</span>`;
+  }
+  if (r.rating !== null && r.rating < 0) {
+    return html`<span class="tag err">👎</span>`;
+  }
+  return html`<span class="tag">β ?</span>`;
+}
+
+function emptyFilterRow(filter: FeedbackFilter): Html {
+  return html`
+    <div
+      style="padding: var(--s-8) var(--s-5); text-align: center; color: var(--fg-soft); font-size: var(--t-13);"
+    >
+      No rows match
+      <code class="inline">${filter}</code>
+      in this window. Try another chip or widen the window with
+      <code class="inline">?days=30</code>.
+    </div>
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// Inline bootstrap — chip click → fetch endpoint → swap DOM
+// ---------------------------------------------------------------------------
+
+const FEEDBACK_SCRIPT = `
+const FB = window.__FEEDBACK__;
+const rowsRoot = document.getElementById('feedback-rows');
+const metaEl = document.getElementById('feedback-meta');
+const chipBar = document.querySelector('[data-feedback-chip="all"]')?.parentElement;
+const RATING_LABELS = { up: '👍', down: '👎' };
+const CHIP_LABELS = {
+  all: 'all',
+  thumbs_up: '👍',
+  thumbs_down: '👎',
+  implicit: 'implicit',
+};
+const FILTER_FALLBACK_HINT = 'Try another chip or widen the window with <code class="inline">?days=30</code>.';
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+function renderRow(r) {
+  let badge;
+  if (r.signal_source === 'implicit') {
+    badge = '<span class="tag" title="γ implicit signal">γ ⏱</span>';
+  } else if (r.rating !== null && r.rating > 0) {
+    badge = '<span class="tag ok">👍</span>';
+  } else if (r.rating !== null && r.rating < 0) {
+    badge = '<span class="tag err">👎</span>';
+  } else {
+    badge = '<span class="tag">β ?</span>';
+  }
+  const confTag = r.confidence === null
+    ? '<span class="tag" style="color: var(--fg-mute);">conf —</span>'
+    : '<span class="tag' + (r.confidence < 0.5 ? ' warn' : '') + '">conf ' + r.confidence.toFixed(2) + '</span>';
+  return (
+    '<li class="feedback-row"' +
+    ' data-feedback-row="' + r.feedback_id + '"' +
+    ' data-feedback-answer-id="' + escapeHtml(r.answerId) + '"' +
+    ' style="display: grid; grid-template-columns: 90px 80px 90px minmax(0, 1fr) auto;' +
+    ' gap: var(--s-3); padding: var(--s-3) var(--s-5);' +
+    ' border-top: 1px solid var(--bd-soft); align-items: center;">' +
+    '<span class="mono" style="font-size: var(--t-12); color: var(--fg-mute);">' + escapeHtml(r.ts.slice(11, 19)) + '</span>' +
+    badge +
+    confTag +
+    '<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">' + escapeHtml(r.question) + '</span>' +
+    '<span class="mono" style="font-size: var(--t-12); color: var(--fg-mute);">' + escapeHtml(r.currentPageId ?? '—') + '</span>' +
+    '</li>'
+  );
+}
+
+function emptyFilterCopy(filter) {
+  return (
+    '<div style="padding: var(--s-8) var(--s-5); text-align: center; color: var(--fg-soft); font-size: var(--t-13);">' +
+    'No rows match <code class="inline">' + escapeHtml(filter) + '</code> in this window. ' +
+    FILTER_FALLBACK_HINT +
+    '</div>'
+  );
+}
+
+async function load(filter) {
+  if (!rowsRoot) return;
+  rowsRoot.setAttribute('aria-busy', 'true');
+  let res, body;
+  try {
+    res = await fetch(
+      '/api/projects/' + encodeURIComponent(FB.projectName) + '/feedback?filter=' + encodeURIComponent(filter),
+    );
+    body = await res.json();
+  } catch (err) {
+    rowsRoot.innerHTML = '<div style="padding: var(--s-8) var(--s-5); text-align: center; color: var(--err);">Failed to load: ' + escapeHtml(String(err)) + '</div>';
+    rowsRoot.setAttribute('aria-busy', 'false');
+    return;
+  }
+  if (!body || body.ok === false) {
+    rowsRoot.innerHTML = '<div style="padding: var(--s-8) var(--s-5); text-align: center; color: var(--err);">Failed: ' + escapeHtml((body && body.error) || res.statusText) + '</div>';
+    rowsRoot.setAttribute('aria-busy', 'false');
+    return;
+  }
+  rowsRoot.innerHTML = body.rows.length === 0
+    ? emptyFilterCopy(filter)
+    : '<ul class="feedback-rows" style="list-style: none; margin: 0; padding: 0;">' + body.rows.map(renderRow).join('') + '</ul>';
+  if (metaEl) {
+    metaEl.textContent = body.rows.length + ' of ' + body.filterCounts[filter] + ' in last 7d';
+  }
+  // Update chip badges + aria-selected state.
+  if (chipBar) {
+    chipBar.querySelectorAll('[data-feedback-chip]').forEach((b) => {
+      const f = b.getAttribute('data-feedback-chip');
+      const cnt = body.filterCounts[f] ?? 0;
+      const active = f === filter;
+      b.setAttribute('aria-selected', active ? 'true' : 'false');
+      b.classList.toggle('warn', active);
+      const cntEl = b.querySelector('.cnt');
+      if (cntEl) cntEl.textContent = String(cnt);
+    });
+  }
+  rowsRoot.setAttribute('aria-busy', 'false');
+  FB.filter = filter;
+}
+
+if (chipBar) {
+  chipBar.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-feedback-chip]');
+    if (!btn) return;
+    const f = btn.getAttribute('data-feedback-chip');
+    if (!f || f === FB.filter) return;
+    load(f);
+  });
+}
+`;
