@@ -277,6 +277,67 @@ test('GET /p/:name: project tabs (Ask/Index/Eval/Traffic) + scoped JS handler so
   }
 });
 
+test('GET /p/:name: Feedback tab — disabled state when feedback.enabled is false (RFC 0002 T1-a)', async () => {
+  // PRD §11.4 #6 makes feedback.enabled=false the default. The tab must
+  // still register (so URL/anchor jumps work), but render the disabled
+  // empty state pointing at Settings.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    // No anydocs.ask.json written → feedback.enabled = default false.
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    // Tab is registered in the nav strip + panel container.
+    assert.match(body, /data-project-tab="feedback"/);
+    assert.match(body, /id="ptab-feedback"/);
+    // Disabled state rendered (state 1 from console-redesign-brief §7.5.1).
+    assert.match(body, /data-feedback-state="disabled"/);
+    assert.match(body, /Feedback loop is off/);
+    // CTA points at Settings where feedback.enabled lives.
+    assert.match(body, /href="#settings"[^>]*>\s*<svg><use href="#i-gear"\/><\/svg>\s*open Settings/);
+    // Empty/enabled state must NOT also be rendered.
+    assert.equal(body.includes('data-feedback-state="empty"'), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab — empty state when feedback.enabled is true but no rows (RFC 0002 T1-a)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const projectRoot = join(ws, 'projects', 'docs-zh');
+    await fs.writeFile(
+      join(projectRoot, 'anydocs.ask.json'),
+      JSON.stringify({ feedback: { enabled: true } }, null, 2),
+    );
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    // Empty/enabled state rendered (state 2 from console-redesign-brief §7.5.1).
+    assert.match(body, /data-feedback-state="empty"/);
+    assert.match(body, /No feedback yet/);
+    // KPI rail is in place even with no data — every tile shows the em-dash placeholder.
+    assert.match(body, /feedback · 7d/);
+    assert.match(body, /A\+ candidates/);
+    // Disabled card must NOT also render.
+    assert.equal(body.includes('data-feedback-state="disabled"'), false);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('GET /p/:name: renders Settings tab with prompt + LLM + retrieval + feedback fields', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {

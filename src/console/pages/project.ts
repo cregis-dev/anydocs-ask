@@ -22,9 +22,11 @@ import type { RegisteredProcess } from '../registry.ts';
 import type { ReportListing } from '../ops.ts';
 import { layout, type Html, type NavContext } from './layout.ts';
 import { renderEvalTab } from './project-eval-tab.ts';
+import { renderFeedbackTab } from './project-feedback-tab.ts';
 import { renderIndexTab } from './project-index-tab.ts';
 import { renderTrafficTab } from './project-traffic-tab.ts';
 import type { EvalTabSnapshot } from '../eval-state.ts';
+import type { FeedbackTabSnapshot } from '../feedback-state.ts';
 import type { IndexSnapshot } from '../index-state.ts';
 import type { TrafficWindow } from '../traffic-state.ts';
 import type { CandidateSnapshot } from '../golden-workshop-state.ts';
@@ -43,6 +45,7 @@ export type ProjectViewModel = {
   latestEvalReportBody?: string | null;
   indexSnapshot?: IndexSnapshot;
   trafficWindow?: TrafficWindow;
+  feedbackSnapshot?: FeedbackTabSnapshot;
   candidates?: CandidateSnapshot;
   analyzeHistory?: AnalyzeReportSummary[];
   latestAnalyzeBody?: string | null;
@@ -274,6 +277,9 @@ function renderTabs(): Html {
       <a class="tab" role="tab" data-project-tab="traffic" href="#traffic" aria-selected="false">
         <svg style="width:14px;height:14px;opacity:.7;"><use href="#i-chart"/></svg> Traffic
       </a>
+      <a class="tab" role="tab" data-project-tab="feedback" href="#feedback" aria-selected="false">
+        <svg style="width:14px;height:14px;opacity:.7;"><use href="#i-chat"/></svg> Feedback
+      </a>
       <a class="tab" role="tab" data-project-tab="settings" href="#settings" aria-selected="false">
         <svg style="width:14px;height:14px;opacity:.7;"><use href="#i-gear"/></svg> Settings
       </a>
@@ -314,6 +320,11 @@ function tabPanels(
             latestAnalyzeBody: vm.latestAnalyzeBody ?? null,
           })
         : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">Traffic status unavailable.</p></div></div>`}
+    </div>
+    <div id="ptab-feedback" class="tab-panel" data-project-tab="feedback" hidden>
+      ${vm.feedbackSnapshot
+        ? renderFeedbackTab({ projectName: project.name, snapshot: vm.feedbackSnapshot })
+        : html`<div class="card"><div class="card-bd"><p class="empty" style="padding: 24px 0;">Feedback status unavailable.</p></div></div>`}
     </div>
     <div id="ptab-settings" class="tab-panel" data-project-tab="settings" hidden>
       ${vm.askConfig
@@ -1266,12 +1277,12 @@ function hashTab() {
   return (location.hash || '').replace('#', '').split('?')[0];
 }
 const initialTab = hashTab();
-if (['ask', 'index', 'eval', 'traffic'].includes(initialTab)) {
+if (['ask', 'index', 'eval', 'traffic', 'feedback'].includes(initialTab)) {
   setProjectTab(initialTab);
 }
 window.addEventListener('hashchange', () => {
   const t = hashTab();
-  if (['ask', 'index', 'eval', 'traffic'].includes(t)) {
+  if (['ask', 'index', 'eval', 'traffic', 'feedback'].includes(t)) {
     setProjectTab(t);
   }
 });
