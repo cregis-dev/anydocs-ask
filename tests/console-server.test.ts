@@ -9,6 +9,8 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createConsoleApp, type ProjectStatusJSON } from '../src/console/server.ts';
+import { openDatabase } from '../src/db/index.ts';
+import { ensureStateRoot } from '../src/workspace.ts';
 import {
   ProcessRegistry,
   type RegistryConfig,
@@ -327,12 +329,64 @@ test('GET /p/:name: Feedback tab — empty state when feedback.enabled is true b
     const body = await res.text();
     // Empty/enabled state rendered (state 2 from console-redesign-brief §7.5.1).
     assert.match(body, /data-feedback-state="empty"/);
+    assert.match(body, /data-feedback-total="0"/);
     assert.match(body, /No feedback yet/);
     // KPI rail is in place even with no data — every tile shows the em-dash placeholder.
     assert.match(body, /feedback · 7d/);
     assert.match(body, /A\+ candidates/);
     // Disabled card must NOT also render.
     assert.equal(body.includes('data-feedback-state="disabled"'), false);
+    // No "signals collected" banner when totalCount is 0.
+    assert.equal(body.includes('data-feedback-banner="collected"'), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab — "signals collected" banner when totalCount > 0 (RFC 0002 T1-a follow-up)', async () => {
+  // Pipe-alive signal: when β/γ rows already exist but T1-b list/KPI is
+  // still pending, render a thin info banner above the empty card so the
+  // author sees "the loop is collecting something" instead of staring at
+  // an unchanged empty state.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const projectRoot = join(ws, 'projects', 'docs-zh');
+    await fs.writeFile(
+      join(projectRoot, 'anydocs.ask.json'),
+      JSON.stringify({ feedback: { enabled: true } }, null, 2),
+    );
+    // Seed two β rows into <state>/<projectId>/index.db. projectId == name
+    // by makeWorkspaceWithProjects convention.
+    const stateRoot = ensureStateRoot(ws, 'docs-zh');
+    const db = openDatabase({ stateRoot });
+    db.prepare(
+      `INSERT INTO feedback
+         (answer_id, question, generated, rating, signal_source, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run('ans_a', 'how do I X', 'X is done by ...', 1, 'explicit', Date.now());
+    db.prepare(
+      `INSERT INTO feedback
+         (answer_id, question, generated, rating, signal_source, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run('ans_b', 'how do I Y', 'Y is done by ...', -1, 'explicit', Date.now());
+    db.close();
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    // Still the empty-shaped state in T1-a — KPIs / list don't ship until T1-b.
+    assert.match(body, /data-feedback-state="empty"/);
+    assert.match(body, /data-feedback-total="2"/);
+    // Collected banner now visible with the count.
+    assert.match(body, /data-feedback-banner="collected"/);
+    assert.match(body, /2 feedback signals collected/);
+    assert.match(body, /list view, and the per-row drawer\s*ship in T1-b/);
   } finally {
     await cleanup();
   }

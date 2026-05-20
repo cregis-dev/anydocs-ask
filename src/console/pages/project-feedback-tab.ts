@@ -24,7 +24,7 @@ export type FeedbackTabViewModel = {
 
 export function renderFeedbackTab(vm: FeedbackTabViewModel): Html {
   if (!vm.snapshot.enabled) return disabledCard();
-  return emptyEnabledLayout();
+  return emptyEnabledLayout(vm.snapshot.totalCount);
 }
 
 function disabledCard(): Html {
@@ -54,15 +54,43 @@ function disabledCard(): Html {
   `;
 }
 
-function emptyEnabledLayout(): Html {
-  // State 2 — enabled but no rows yet. We show the three-column footprint
-  // from §7.5.1 so the tab already looks like the final layout, then fill
-  // every slot with `—` / empty-state copy. KPI logic + list rendering
-  // ship in T1-b.
+function emptyEnabledLayout(totalCount: number): Html {
+  // State 2 (and a placeholder for state 3 onwards). T1-a only ships the
+  // empty-shaped layout; we keep rendering it regardless of `totalCount`
+  // because KPI math, the list, and the drawer all land in T1-b.
+  //
+  // When rows already exist we still owe the author a visible signal that
+  // the β/γ pipe is alive — otherwise design partners click 👍, see the
+  // table grow in the DB, and find the UI unchanged. The thin "signals
+  // collected" banner above the empty card bridges that gap without
+  // pulling state 3+ into T1-a.
+  const collected = totalCount > 0;
   return html`
-    <div class="feedback-tab" data-feedback-state="empty" style="display: flex; flex-direction: column; gap: var(--s-5);">
+    <div
+      class="feedback-tab"
+      data-feedback-state="empty"
+      data-feedback-total="${totalCount}"
+      style="display: flex; flex-direction: column; gap: var(--s-5);"
+    >
+      ${collected ? collectedBanner(totalCount) : ''}
       ${kpiPlaceholder()}
       ${emptyListCard()}
+    </div>
+  `;
+}
+
+function collectedBanner(totalCount: number): Html {
+  const label = totalCount === 1 ? 'signal' : 'signals';
+  return html`
+    <div class="banner info" data-feedback-banner="collected">
+      <span class="b-ico"><svg><use href="#i-info"/></svg></span>
+      <div class="b-bd">
+        <div class="b-ti">${totalCount} feedback ${label} collected</div>
+        <div class="b-de">
+          The β / γ pipe is writing rows. KPI numbers, the list view, and the per-row drawer
+          ship in T1-b — this tab will fill in then.
+        </div>
+      </div>
     </div>
   `;
 }
