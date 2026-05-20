@@ -279,6 +279,41 @@ test('GET /p/:name: project tabs (Ask/Index/Eval/Traffic) + scoped JS handler so
   }
 });
 
+test('GET /p/:name: every nav tab is in the hashchange whitelist (URL-anchor jumps stay in sync)', async () => {
+  // Regression: T1-a added a Feedback tab CTA pointing at `#settings`, which
+  // exposed an existing gap — 'settings' was never in the hashchange
+  // whitelist, so the URL changed but the panel didn't. Lock down the rule:
+  // every `data-project-tab=...` value emitted in the nav strip must also
+  // appear in both the initial-load and the hashchange whitelists in the
+  // inline bootstrap script. Asserting the SSR string keeps the test simple
+  // (DOM execution is overkill here).
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    const body = await res.text();
+    const tabs = Array.from(body.matchAll(/<a class="tab"[^>]*data-project-tab="([^"]+)"/g))
+      .map((m) => m[1]!);
+    assert.ok(tabs.length > 0, 'expected at least one tab in nav');
+    // Find every `['ask', 'index', ...]` whitelist literal in the inline script.
+    const whitelists = Array.from(body.matchAll(/\[((?:'[a-z]+'(?:,\s*)?)+)\]\.includes/g))
+      .map((m) => m[1]!.split(',').map((s) => s.trim().replace(/'/g, '')));
+    assert.ok(whitelists.length >= 2, 'expected ≥2 hash whitelists in bootstrap script');
+    for (const wl of whitelists) {
+      for (const tab of tabs) {
+        assert.ok(wl.includes(tab), `tab '${tab}' missing from whitelist [${wl.join(', ')}]`);
+      }
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
 test('GET /p/:name: Feedback tab — disabled state when feedback.enabled is false (RFC 0002 T1-a)', async () => {
   // PRD §11.4 #6 makes feedback.enabled=false the default. The tab must
   // still register (so URL/anchor jumps work), but render the disabled

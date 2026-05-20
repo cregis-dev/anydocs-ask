@@ -1276,13 +1276,17 @@ document.querySelectorAll('[role=tab][data-project-tab]').forEach((b) => {
 function hashTab() {
   return (location.hash || '').replace('#', '').split('?')[0];
 }
+// 'settings' belongs here too: every tab the user can land on via URL hash
+// (initial nav, shared link, OR an in-page CTA like the Feedback tab's
+// disabled-state "open Settings" button) must be whitelisted, else
+// hashchange flips the URL without flipping the panel.
 const initialTab = hashTab();
-if (['ask', 'index', 'eval', 'traffic', 'feedback'].includes(initialTab)) {
+if (['ask', 'index', 'eval', 'traffic', 'feedback', 'settings'].includes(initialTab)) {
   setProjectTab(initialTab);
 }
 window.addEventListener('hashchange', () => {
   const t = hashTab();
-  if (['ask', 'index', 'eval', 'traffic', 'feedback'].includes(t)) {
+  if (['ask', 'index', 'eval', 'traffic', 'feedback', 'settings'].includes(t)) {
     setProjectTab(t);
   }
 });
