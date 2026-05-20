@@ -887,6 +887,170 @@ test('GET /p/:name: Feedback tab — no_citations chip is in the SSR chip bar (R
   }
 });
 
+// ---------------------------------------------------------------------------
+// T1-d — per-row detail drawer + endpoint
+// ---------------------------------------------------------------------------
+
+test('GET /p/:name: Feedback tab — drawer SSR shell appears when rows exist (RFC 0002 T1-d)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: 1 });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+    // Drawer skeleton + close-button container present.
+    assert.match(body, /id="fb-drawer-mask"/);
+    assert.match(body, /id="fb-drawer"[\s\S]*?aria-label="Feedback detail"/);
+    assert.match(body, /id="fb-drawer-bd"/);
+    // Rows are click-affordant.
+    assert.match(body, /class="feedback-row"[\s\S]*?cursor:\s*pointer/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab — drawer shell hidden when zero rows', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const projectRoot = join(ws, 'projects', 'docs-zh');
+    await fs.writeFile(
+      join(projectRoot, 'anydocs.ask.json'),
+      JSON.stringify({ feedback: { enabled: true } }, null, 2),
+    );
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+    // Empty state should NOT carry the drawer skeleton — nothing to open.
+    assert.equal(body.includes('id="fb-drawer-mask"'), false);
+    assert.equal(body.includes('id="fb-drawer"'), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback/:id: returns row + run JOIN (RFC 0002 T1-d)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    seedPage(db, {
+      page_id: 'auth-jwt',
+      breadcrumb: [
+        { id: 'fld-auth', title: 'Auth', type: 'folder' },
+        { id: 'page-jwt', title: 'JWT', type: 'page' },
+      ],
+    });
+    // Stable insert id: 1.
+    insertFeedback(db, {
+      answer_id: 'ans_x',
+      rating: 1,
+      question: 'how do I get a JWT?',
+      current_page_id: 'auth-jwt',
+    });
+    db.close();
+    await seedRunsFile(stateRoot, [
+      makeRunRecord({
+        answer_id: 'ans_x',
+        confidence: 0.82,
+        citations: [{ chunk_id: 7, page: 'auth-jwt', quote: 'use bearer token' }],
+      }),
+    ]);
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/api/projects/docs-zh/feedback/1');
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      detail: {
+        feedback_id: number;
+        question: string;
+        rating: number | null;
+        breadcrumb: Array<{ title: string }>;
+        confidence: number | null;
+        hadNoCitations: boolean | null;
+        run: { kind: string; fused: unknown[]; latencyMs: number; model: string | null } | null;
+      };
+    };
+    assert.equal(body.ok, true);
+    assert.equal(body.detail.feedback_id, 1);
+    assert.equal(body.detail.question, 'how do I get a JWT?');
+    assert.equal(body.detail.rating, 1);
+    assert.equal(body.detail.confidence, 0.82);
+    assert.equal(body.detail.hadNoCitations, false);
+    assert.deepEqual(
+      body.detail.breadcrumb,
+      [
+        { id: 'fld-auth', title: 'Auth', type: 'folder' },
+        { id: 'page-jwt', title: 'JWT', type: 'page' },
+      ],
+    );
+    assert.ok(body.detail.run);
+    assert.equal(body.detail.run!.kind, 'answer');
+    assert.equal(body.detail.run!.model, 'mock');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback/:id: returns 404 on unknown id, 400 on non-numeric, 404 on missing project', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: 1 });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    // Unknown numeric id → 404.
+    const missing = await app.request('/api/projects/docs-zh/feedback/9999');
+    assert.equal(missing.status, 404);
+    // Non-numeric id → 400 (not a routing match; we explicitly validate).
+    const bad = await app.request('/api/projects/docs-zh/feedback/abc');
+    assert.equal(bad.status, 400);
+    // Unknown project → 404.
+    const noProj = await app.request('/api/projects/does-not-exist/feedback/1');
+    assert.equal(noProj.status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback/:id: row with no linked run → run=null, breadcrumb=null', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'orphan', rating: -1 }); // no runs.jsonl seeded
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = (await (await app.request('/api/projects/docs-zh/feedback/1')).json()) as {
+      detail: { run: unknown; confidence: number | null; breadcrumb: unknown };
+    };
+    assert.equal(body.detail.run, null);
+    assert.equal(body.detail.confidence, null);
+    assert.equal(body.detail.breadcrumb, null);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('GET /p/:name: renders Settings tab with prompt + LLM + retrieval + feedback fields', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {

@@ -44,7 +44,11 @@ import {
   readReportBody,
   writePinnedBaseline,
 } from './eval-state.ts';
-import { loadFeedbackTabSnapshot, parseFeedbackFilter } from './feedback-state.ts';
+import {
+  loadFeedbackRowDetail,
+  loadFeedbackTabSnapshot,
+  parseFeedbackFilter,
+} from './feedback-state.ts';
 import { loadIndexSnapshot, type ChildIndexStatus } from './index-state.ts';
 import { loadTrafficWindow } from './traffic-state.ts';
 import { loadProjectHomeStats, summarizeWorkspace } from './home-state.ts';
@@ -546,6 +550,32 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       filterCounts: snapshot.filterCounts,
       hasMore: snapshot.hasMore,
     });
+  });
+
+  // Per-row feedback detail — RFC 0002 T1-d. Drives the right-side drawer.
+  // Returns the feedback row + linked run record (retrieval trace + answer
+  // markdown + citations). Reuses the same loader stack as the list, plus
+  // an additional runs.jsonl scan to recover the full RunRecord.
+  app.get('/api/projects/:name/feedback/:id', (c) => {
+    const name = c.req.param('name');
+    const project = findProject(deps.workspacePath, name);
+    if (!project) return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
+    if (!project.valid) {
+      return c.json(
+        { ok: false, error: `project '${name}' invalid (missing: ${project.missing.join(', ')})` },
+        400,
+      );
+    }
+    const stateRoot = projectStateRoot(deps.workspacePath, project);
+    if (!stateRoot) return c.json({ ok: false, error: 'no projectId' }, 400);
+    const idRaw = c.req.param('id');
+    const id = Number.parseInt(idRaw, 10);
+    if (!Number.isFinite(id) || id <= 0 || String(id) !== idRaw) {
+      return c.json({ ok: false, error: `invalid feedback id: ${idRaw}` }, 400);
+    }
+    const detail = loadFeedbackRowDetail(stateRoot, id);
+    if (!detail) return c.json({ ok: false, error: `feedback row not found: ${id}` }, 404);
+    return c.json({ ok: true, detail });
   });
 
   app.get('/api/projects/:name/reports', (c) => {
