@@ -9,6 +9,8 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createConsoleApp, type ProjectStatusJSON } from '../src/console/server.ts';
+import { openDatabase } from '../src/db/index.ts';
+import { ensureStateRoot } from '../src/workspace.ts';
 import {
   ProcessRegistry,
   type RegistryConfig,
@@ -272,6 +274,154 @@ test('GET /p/:name: project tabs (Ask/Index/Eval/Traffic) + scoped JS handler so
       false,
       'unscoped [role=tab] selector would re-introduce the cross-talk bug',
     );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: every nav tab is in the hashchange whitelist (URL-anchor jumps stay in sync)', async () => {
+  // Regression: T1-a added a Feedback tab CTA pointing at `#settings`, which
+  // exposed an existing gap — 'settings' was never in the hashchange
+  // whitelist, so the URL changed but the panel didn't. Lock down the rule:
+  // every `data-project-tab=...` value emitted in the nav strip must also
+  // appear in both the initial-load and the hashchange whitelists in the
+  // inline bootstrap script. Asserting the SSR string keeps the test simple
+  // (DOM execution is overkill here).
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    const body = await res.text();
+    const tabs = Array.from(body.matchAll(/<a class="tab"[^>]*data-project-tab="([^"]+)"/g))
+      .map((m) => m[1]!);
+    assert.ok(tabs.length > 0, 'expected at least one tab in nav');
+    // Find every `['ask', 'index', ...]` whitelist literal in the inline script.
+    const whitelists = Array.from(body.matchAll(/\[((?:'[a-z]+'(?:,\s*)?)+)\]\.includes/g))
+      .map((m) => m[1]!.split(',').map((s) => s.trim().replace(/'/g, '')));
+    assert.ok(whitelists.length >= 2, 'expected ≥2 hash whitelists in bootstrap script');
+    for (const wl of whitelists) {
+      for (const tab of tabs) {
+        assert.ok(wl.includes(tab), `tab '${tab}' missing from whitelist [${wl.join(', ')}]`);
+      }
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab — disabled state when feedback.enabled is false (RFC 0002 T1-a)', async () => {
+  // PRD §11.4 #6 makes feedback.enabled=false the default. The tab must
+  // still register (so URL/anchor jumps work), but render the disabled
+  // empty state pointing at Settings.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    // No anydocs.ask.json written → feedback.enabled = default false.
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    // Tab is registered in the nav strip + panel container.
+    assert.match(body, /data-project-tab="feedback"/);
+    assert.match(body, /id="ptab-feedback"/);
+    // Disabled state rendered (state 1 from console-redesign-brief §7.5.1).
+    assert.match(body, /data-feedback-state="disabled"/);
+    assert.match(body, /Feedback loop is off/);
+    // CTA points at Settings where feedback.enabled lives.
+    assert.match(body, /href="#settings"[^>]*>\s*<svg><use href="#i-gear"\/><\/svg>\s*open Settings/);
+    // Empty/enabled state must NOT also be rendered.
+    assert.equal(body.includes('data-feedback-state="empty"'), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab — empty state when feedback.enabled is true but no rows (RFC 0002 T1-a)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const projectRoot = join(ws, 'projects', 'docs-zh');
+    await fs.writeFile(
+      join(projectRoot, 'anydocs.ask.json'),
+      JSON.stringify({ feedback: { enabled: true } }, null, 2),
+    );
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    // Empty/enabled state rendered (state 2 from console-redesign-brief §7.5.1).
+    assert.match(body, /data-feedback-state="empty"/);
+    assert.match(body, /data-feedback-total="0"/);
+    assert.match(body, /No feedback yet/);
+    // KPI rail is in place even with no data — every tile shows the em-dash placeholder.
+    assert.match(body, /feedback · 7d/);
+    assert.match(body, /A\+ candidates/);
+    // Disabled card must NOT also render.
+    assert.equal(body.includes('data-feedback-state="disabled"'), false);
+    // No "signals collected" banner when totalCount is 0.
+    assert.equal(body.includes('data-feedback-banner="collected"'), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab — "signals collected" banner when totalCount > 0 (RFC 0002 T1-a follow-up)', async () => {
+  // Pipe-alive signal: when β/γ rows already exist but T1-b list/KPI is
+  // still pending, render a thin info banner above the empty card so the
+  // author sees "the loop is collecting something" instead of staring at
+  // an unchanged empty state.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const projectRoot = join(ws, 'projects', 'docs-zh');
+    await fs.writeFile(
+      join(projectRoot, 'anydocs.ask.json'),
+      JSON.stringify({ feedback: { enabled: true } }, null, 2),
+    );
+    // Seed two β rows into <state>/<projectId>/index.db. projectId == name
+    // by makeWorkspaceWithProjects convention.
+    const stateRoot = ensureStateRoot(ws, 'docs-zh');
+    const db = openDatabase({ stateRoot });
+    db.prepare(
+      `INSERT INTO feedback
+         (answer_id, question, generated, rating, signal_source, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run('ans_a', 'how do I X', 'X is done by ...', 1, 'explicit', Date.now());
+    db.prepare(
+      `INSERT INTO feedback
+         (answer_id, question, generated, rating, signal_source, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run('ans_b', 'how do I Y', 'Y is done by ...', -1, 'explicit', Date.now());
+    db.close();
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    // Still the empty-shaped state in T1-a — KPIs / list don't ship until T1-b.
+    assert.match(body, /data-feedback-state="empty"/);
+    assert.match(body, /data-feedback-total="2"/);
+    // Collected banner now visible with the count.
+    assert.match(body, /data-feedback-banner="collected"/);
+    assert.match(body, /2 feedback signals collected/);
+    assert.match(body, /list view, and the per-row drawer\s*ship in T1-b/);
   } finally {
     await cleanup();
   }

@@ -44,6 +44,7 @@ import {
   readReportBody,
   writePinnedBaseline,
 } from './eval-state.ts';
+import { loadFeedbackTabSnapshot } from './feedback-state.ts';
 import { loadIndexSnapshot, type ChildIndexStatus } from './index-state.ts';
 import { loadTrafficWindow } from './traffic-state.ts';
 import { loadProjectHomeStats, summarizeWorkspace } from './home-state.ts';
@@ -344,6 +345,12 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       stateRoot && analyzeHistory[0]
         ? readAnalyzeReportBody(stateRoot, analyzeHistory[0].filename)
         : null;
+    const askConfig = project.valid ? loadAskConfigForView(project.path) : undefined;
+    const feedbackSnapshot = project.valid && askConfig
+      ? loadFeedbackTabSnapshot(stateRoot, {
+          feedback: { enabled: readFeedbackEnabled(askConfig.raw) },
+        })
+      : undefined;
     return c.html(
       renderProject({
         project,
@@ -355,10 +362,11 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         latestEvalReportBody,
         ...(indexSnapshot ? { indexSnapshot } : {}),
         ...(trafficWindow ? { trafficWindow } : {}),
+        ...(feedbackSnapshot ? { feedbackSnapshot } : {}),
         ...(candidates ? { candidates } : {}),
         analyzeHistory,
         latestAnalyzeBody,
-        askConfig: project.valid ? loadAskConfigForView(project.path) : undefined,
+        askConfig,
       }),
     );
   });
@@ -1043,6 +1051,19 @@ function findProject(workspacePath: string, name: string): ProjectListing | null
 function projectStateRoot(workspacePath: string, project: ProjectListing): string | null {
   if (!project.projectId) return null;
   return resolveStateRoot(workspacePath, project.projectId);
+}
+
+/**
+ * Read `feedback.enabled` from the raw anydocs.ask.json object. Returns
+ * false (PRD §11.4 #6 default) when the file is missing/malformed or the
+ * field is absent / not a boolean. Trusts only `=== true` so any junk
+ * value falls back to "off".
+ */
+function readFeedbackEnabled(raw: Record<string, unknown> | null): boolean {
+  if (!raw) return false;
+  const fb = raw['feedback'];
+  if (typeof fb !== 'object' || fb === null) return false;
+  return (fb as Record<string, unknown>)['enabled'] === true;
 }
 
 type OpContext =
