@@ -562,6 +562,46 @@ test('GET /api/projects/:name/feedback: returns rows + filterCounts; respects ?f
   }
 });
 
+test('GET /api/projects/:name/feedback: curated rows excluded from all chip + KPI count (Codex P2 regression)', async () => {
+  // Codex review on PR #47 caught: filterCounts.all was a raw row count
+  // including signal_source='curated', but the SQL filter for 'all'
+  // restricts to explicit/implicit. Result: chip badge said "all 5" while
+  // the list only rendered 4. KPI feedback·7d also footnoted "β + γ
+  // combined" but counted curated. Both must now exclude curated.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: 1 });
+    insertFeedback(db, { answer_id: 'a2', rating: -1 });
+    insertFeedback(db, { answer_id: 'a3', signal_source: 'implicit' });
+    insertFeedback(db, { answer_id: 'a4', signal_source: 'curated', rating: 1 });
+    insertFeedback(db, { answer_id: 'a5', signal_source: 'curated', rating: 1 });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+
+    // Endpoint contract: filterCounts.all = 3 (1👍 + 1👎 + 1γ), NOT 5.
+    const body = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      rows: Array<{ signal_source: string }>;
+      filterCounts: Record<string, number>;
+    };
+    assert.deepEqual(body.filterCounts, { all: 3, thumbs_up: 1, thumbs_down: 1, implicit: 1 });
+    // List rows when filter='all' must also stay at 3 (curated suppressed
+    // by the SQL filter; counts and list must agree).
+    assert.equal(body.rows.length, 3);
+    assert.ok(body.rows.every((r) => r.signal_source !== 'curated'));
+
+    // SSR KPI: feedback·7d count tile reads explicit+implicit only.
+    const ssr = await (await app.request('/p/docs-zh')).text();
+    assert.match(ssr, /feedback · 7d[\s\S]*?>3</);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('GET /api/projects/:name/feedback: question backfill placeholder kicks in for empty-string rows', async () => {
   // Pre-0.2.0-alpha.2 rows have `question = ''` (the spawned "Backfill
   // question" task fixes the writer; until that lands, the list UI must

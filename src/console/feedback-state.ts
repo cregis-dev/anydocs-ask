@@ -178,8 +178,12 @@ function computeSnapshot(
     )
     .all(sinceMs) as Array<Pick<FeedbackRow, 'signal_source' | 'rating'>>;
 
+  // `all` is the union of the four chips, NOT a raw row count — curated
+  // rows are deliberately outside the chip taxonomy (post-review, surfaced
+  // via inbox/approved files), and the `all` SQL filter excludes them too,
+  // so the badge and the list must agree.
   const filterCounts: FilterCounts = {
-    all: inWindow.length,
+    all: 0,
     thumbs_up: 0,
     thumbs_down: 0,
     implicit: 0,
@@ -189,14 +193,15 @@ function computeSnapshot(
   for (const r of inWindow) {
     if (r.signal_source === 'explicit') {
       explicitCount++;
+      filterCounts.all++;
       if (r.rating !== null && r.rating > 0) filterCounts.thumbs_up++;
       else if (r.rating !== null && r.rating < 0) filterCounts.thumbs_down++;
     } else if (r.signal_source === 'implicit') {
       implicitCount++;
+      filterCounts.all++;
       filterCounts.implicit++;
     }
-    // 'curated' is intentionally outside the chip taxonomy — those are
-    // post-review rows, surfaced via the inbox/approved files, not here.
+    // 'curated' rows skip every counter; see chip-taxonomy comment above.
   }
 
   const rowsRaw = selectRows(db, sinceMs, filter, limit);
@@ -254,7 +259,9 @@ function computeSnapshot(
     sinceISO,
     days,
     kpi: {
-      count: inWindow.length,
+      // Same denominator as filterCounts.all — KPI footer reads "β + γ
+      // combined" so curated rows must not be folded in.
+      count: explicitCount + implicitCount,
       explicitCount,
       implicitCount,
       explicitShare,
