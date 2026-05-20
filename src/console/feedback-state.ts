@@ -511,6 +511,174 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
 }
 
+// ---------------------------------------------------------------------------
+// Per-row detail (T1-d drawer)
+// ---------------------------------------------------------------------------
+
+export type FeedbackRunCitationVM = {
+  page: string;
+  quote: string;
+  chunkId: number | null;
+};
+
+export type FeedbackFusedChunkVM = {
+  page: string;
+  chunkId: number;
+  finalScore: number | null;
+  rrfScore: number | null;
+  vecRank: number | null;
+  bm25Rank: number | null;
+  navIndex: number | null;
+};
+
+export type FeedbackRowDetail = {
+  /** List view fields — same shape as `FeedbackRowVM` so the client doesn't
+   *  have to reconcile two schemas. */
+  feedback_id: number;
+  ts: string;
+  rating: number | null;
+  signal_source: 'explicit' | 'implicit' | 'curated';
+  question: string;
+  answerId: string;
+  currentPageId: string | null;
+  breadcrumb: BreadcrumbNode[] | null;
+  confidence: number | null;
+  hadNoCitations: boolean | null;
+  /** Markdown body — pulled from feedback.generated. Empty string when the
+   *  ask never made it through generation (error kind). */
+  answerMd: string;
+  /** Citation snapshot stored at feedback time. Best-effort decode. */
+  citations: FeedbackRunCitationVM[];
+  /** Reviewer correction (β button "答错了" sends a `correction` field) or
+   *  null when none. */
+  correction: string | null;
+  /** Linked run record fields. Null when no run line matched (rare —
+   *  the run rolled out of the window, or runs.enabled=false). */
+  run: {
+    kind: 'answer' | 'clarify' | 'error';
+    fused: FeedbackFusedChunkVM[];
+    subtreeAskTriggered: boolean;
+    latencyMs: number;
+    model: string | null;
+    errorCode: string | null;
+  } | null;
+};
+
+export function loadFeedbackRowDetail(
+  stateRoot: string | null,
+  feedbackId: number,
+  opts: { days?: number } = {},
+): FeedbackRowDetail | null {
+  if (!stateRoot) return null;
+  const dbPath = join(stateRoot, 'index.db');
+  if (!existsSync(dbPath)) return null;
+  let db: ReturnType<typeof openDatabase>;
+  try {
+    db = openDatabase({ stateRoot, skipMigrations: true });
+  } catch {
+    return null;
+  }
+  try {
+    const row = db
+      .prepare(`SELECT * FROM feedback WHERE feedback_id = ?`)
+      .get(feedbackId) as FeedbackRow | undefined;
+    if (!row) return null;
+
+    // Pull breadcrumb + run record via the existing helpers, narrowed to the
+    // single answer_id. The runs window default is generous (30d) here
+    // since older feedback rows may legitimately be inspected; the list
+    // view's 7d is purely a chip-counting window.
+    const days = Math.max(1, opts.days ?? 30);
+    const sinceMs = Date.now() - days * DAY_MS;
+    const runIndex = buildRunIndex(stateRoot, sinceMs, new Set([row.answer_id]));
+    const runMeta = runIndex.get(row.answer_id);
+    const runRecord = readRunRecord(stateRoot, sinceMs, row.answer_id);
+
+    const breadcrumbs = row.current_page_id
+      ? loadBreadcrumbs(db, [row.current_page_id])
+      : new Map<string, BreadcrumbNode[]>();
+
+    const citations = parseRunCitations(row.retrieved);
+
+    return {
+      feedback_id: row.feedback_id,
+      ts: new Date(row.created_at).toISOString(),
+      rating: row.rating,
+      signal_source: row.signal_source,
+      question: row.question.length > 0 ? row.question : QUESTION_FALLBACK,
+      answerId: row.answer_id,
+      currentPageId: row.current_page_id,
+      breadcrumb: row.current_page_id ? breadcrumbs.get(row.current_page_id) ?? null : null,
+      confidence: runMeta?.confidence ?? null,
+      hadNoCitations: runMeta?.citationsEmpty ?? null,
+      answerMd: row.generated ?? '',
+      citations,
+      correction: row.correction ?? null,
+      run: runRecord
+        ? {
+            kind: runRecord.answer.kind,
+            fused: runRecord.retrieval.fused.map((f) => ({
+              page: f.page,
+              chunkId: f.chunk_id,
+              finalScore: f.final_score ?? null,
+              rrfScore: f.rrf_score ?? null,
+              vecRank: f.vec_rank,
+              bm25Rank: f.bm25_rank,
+              navIndex: f.nav_index,
+            })),
+            subtreeAskTriggered: runRecord.retrieval.subtree_ask_triggered,
+            latencyMs: runRecord.answer.latency_ms,
+            model: runRecord.answer.model,
+            errorCode: runRecord.answer.error_code,
+          }
+        : null,
+    };
+  } catch {
+    return null;
+  } finally {
+    try {
+      db.close();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function readRunRecord(
+  stateRoot: string,
+  sinceMs: number,
+  answerId: string,
+): RunRecord | null {
+  let latest: RunRecord | null = null;
+  for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
+    if ('type' in line && line.type === 'feedback-update') continue;
+    const rec = line as RunRecord;
+    if (rec.answer.answer_id !== answerId) continue;
+    // Last write wins for re-asks; keep iterating to the end.
+    latest = rec;
+  }
+  return latest;
+}
+
+function parseRunCitations(json: string | null): FeedbackRunCitationVM[] {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((c): c is { page: string; quote?: string; chunk_id?: number | null } =>
+        typeof c?.page === 'string',
+      )
+      .map((c) => ({
+        page: c.page,
+        quote: typeof c.quote === 'string' ? c.quote : '',
+        chunkId: typeof c.chunk_id === 'number' ? c.chunk_id : null,
+      }));
+  } catch {
+    return [];
+  }
+}
+
 export function parseFeedbackFilter(raw: unknown): FeedbackFilter {
   return typeof raw === 'string' && (FEEDBACK_FILTERS as readonly string[]).includes(raw)
     ? (raw as FeedbackFilter)

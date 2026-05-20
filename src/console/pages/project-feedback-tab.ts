@@ -71,6 +71,7 @@ function disabledCard(): Html {
 
 function enabledLayout(projectName: string, snap: FeedbackTabSnapshot): Html {
   const state = snap.totalCount === 0 ? 'empty' : 'list';
+  const showInteractive = snap.totalCount > 0;
   return html`
     <div
       class="feedback-tab"
@@ -82,13 +83,33 @@ function enabledLayout(projectName: string, snap: FeedbackTabSnapshot): Html {
       ${kpiStrip(snap)}
       ${snap.totalCount === 0 ? emptyListCard() : listCard(projectName, snap)}
     </div>
-    ${snap.totalCount === 0
-      ? ''
-      : html`<script>${raw(`window.__FEEDBACK__ = ${JSON.stringify({
+    ${showInteractive ? drawerShell() : ''}
+    ${showInteractive
+      ? html`<script>${raw(`window.__FEEDBACK__ = ${JSON.stringify({
           projectName,
           filter: snap.filter,
         })};`)}</script>
-        <script type="module">${raw(FEEDBACK_SCRIPT)}</script>`}
+        <script type="module">${raw(FEEDBACK_SCRIPT)}</script>`
+      : ''}
+  `;
+}
+
+function drawerShell(): Html {
+  // T1-d drawer skeleton — mirrors Traffic tab's pattern (.drawer-mask +
+  // <aside class="drawer">), filled async by the inline JS on row click.
+  return html`
+    <div class="drawer-mask" id="fb-drawer-mask" hidden></div>
+    <aside
+      class="drawer"
+      id="fb-drawer"
+      hidden
+      role="dialog"
+      aria-label="Feedback detail"
+      aria-modal="true"
+    >
+      <div class="drawer-hd" id="fb-drawer-hd"></div>
+      <div class="drawer-bd" id="fb-drawer-bd"></div>
+    </aside>
   `;
 }
 
@@ -252,7 +273,8 @@ function rowItem(r: FeedbackRowVM): Html {
       data-feedback-answer-id="${r.answerId}"
       style="display: grid; grid-template-columns: 90px 80px 90px minmax(0, 1fr) minmax(0, 1fr);
              gap: var(--s-3); padding: var(--s-3) var(--s-5);
-             border-top: 1px solid var(--bd-soft); align-items: center;"
+             border-top: 1px solid var(--bd-soft); align-items: center;
+             cursor: pointer;"
     >
       <span class="mono" style="font-size: var(--t-12); color: var(--fg-mute);">
         ${r.ts.slice(11, 19)}
@@ -375,7 +397,7 @@ function renderRow(r) {
     ' data-feedback-answer-id="' + escapeHtml(r.answerId) + '"' +
     ' style="display: grid; grid-template-columns: 90px 80px 90px minmax(0, 1fr) minmax(0, 1fr);' +
     ' gap: var(--s-3); padding: var(--s-3) var(--s-5);' +
-    ' border-top: 1px solid var(--bd-soft); align-items: center;">' +
+    ' border-top: 1px solid var(--bd-soft); align-items: center; cursor: pointer;">' +
     '<span class="mono" style="font-size: var(--t-12); color: var(--fg-mute);">' + escapeHtml(r.ts.slice(11, 19)) + '</span>' +
     badge +
     confTag +
@@ -444,4 +466,227 @@ if (chipBar) {
     load(f);
   });
 }
+
+// ---------------------------------------------------------------------------
+// T1-d — per-row drawer
+// ---------------------------------------------------------------------------
+
+const drawerMask = document.getElementById('fb-drawer-mask');
+const drawerEl = document.getElementById('fb-drawer');
+const drawerHd = document.getElementById('fb-drawer-hd');
+const drawerBd = document.getElementById('fb-drawer-bd');
+
+// Stale-response guard: each openDrawer() bumps this token, and the async
+// fetch only writes to the DOM if the token is still the one captured at
+// call time. closeDrawer() also bumps it so a pending fetch can't reopen
+// the drawer after the user dismissed it.
+let drawerReqToken = 0;
+
+function closeDrawer() {
+  // Bump the token so any pending openDrawer fetch sees a token mismatch
+  // and skips its DOM write — otherwise a slow response could reopen the
+  // drawer the user just closed.
+  drawerReqToken++;
+  if (drawerMask) drawerMask.hidden = true;
+  if (drawerEl) drawerEl.hidden = true;
+  document.body.style.overflow = '';
+  if (rowsRoot) {
+    const prev = rowsRoot.querySelector('.feedback-row.sel');
+    if (prev) prev.classList.remove('sel');
+  }
+}
+
+function setDrawerLoading(qPreview) {
+  if (!drawerHd || !drawerBd) return;
+  drawerHd.innerHTML =
+    '<div style="display:flex; justify-content:space-between; align-items:center; gap:var(--s-3);">' +
+      '<span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600;">' + escapeHtml(qPreview) + '</span>' +
+      '<button class="icon-btn" id="fb-drawer-close" title="close" aria-label="close"><svg><use href="#i-x"/></svg></button>' +
+    '</div>';
+  drawerBd.innerHTML = '<p class="muted" style="padding: var(--s-5);">loading…</p>';
+}
+
+function ratingLine(d) {
+  if (d.signal_source === 'implicit') return 'γ ⏱ implicit (same-session re-ask)';
+  if (d.signal_source === 'curated')   return '★ curated (post-review)';
+  if (d.rating !== null && d.rating > 0) return '👍 explicit positive';
+  if (d.rating !== null && d.rating < 0) return '👎 explicit negative';
+  return 'β explicit (rating absent)';
+}
+
+function fmtConf(n) {
+  return typeof n === 'number' ? n.toFixed(2) : '—';
+}
+
+function breadcrumbLine(d) {
+  if (Array.isArray(d.breadcrumb) && d.breadcrumb.length > 0) {
+    return escapeHtml(d.breadcrumb.map((n) => n.title).join(' › '));
+  }
+  if (d.currentPageId) return '<span class="mono" style="color:var(--fg-mute);">' + escapeHtml(d.currentPageId) + '</span>';
+  return '<span style="color:var(--fg-mute);">—</span>';
+}
+
+function renderFusedTable(fused) {
+  if (!Array.isArray(fused) || fused.length === 0) {
+    return '<p class="muted" style="font-size:var(--t-12); margin:0;">no fused retrieval trace</p>';
+  }
+  let body = '<table class="tbl" style="font-size:var(--t-12); margin:0;"><thead><tr>' +
+    '<th>page · chunk</th><th class="num">final</th><th class="num">rrf</th>' +
+    '<th class="num">vec</th><th class="num">bm25</th><th class="num">nav</th>' +
+  '</tr></thead><tbody>';
+  fused.slice(0, 8).forEach((f) => {
+    body += '<tr><td>' + escapeHtml(f.page || '') +
+      ' <span class="mono" style="color:var(--fg-mute);">#' + (f.chunkId ?? '—') + '</span></td>' +
+      '<td class="num">' + (f.finalScore != null ? f.finalScore.toFixed(3) : '—') + '</td>' +
+      '<td class="num">' + (f.rrfScore != null ? f.rrfScore.toFixed(3) : '—') + '</td>' +
+      '<td class="num">' + (f.vecRank != null ? f.vecRank : '—') + '</td>' +
+      '<td class="num">' + (f.bm25Rank != null ? f.bm25Rank : '—') + '</td>' +
+      '<td class="num">' + (f.navIndex != null ? f.navIndex : '—') + '</td></tr>';
+  });
+  body += '</tbody></table>';
+  return body;
+}
+
+function renderCitations(cits) {
+  if (!Array.isArray(cits) || cits.length === 0) {
+    return '<p class="muted" style="font-size:var(--t-12); margin:0;">no citations on this answer</p>';
+  }
+  let out = '<div>';
+  cits.forEach((c, i) => {
+    out += '<div class="cit"><span class="ci-no"><span class="cite">' + (i + 1) + '</span></span>' +
+      '<div class="ci-bd"><div class="ci-ti">' + escapeHtml(c.page || '') + '</div>' +
+      (c.quote ? '<div class="ci-sn">' + escapeHtml(c.quote) + '</div>' : '') +
+      '</div></div>';
+  });
+  out += '</div>';
+  return out;
+}
+
+function drawerSec(title, sub, body) {
+  return '<div class="drawer-sec"><div class="drawer-sec-hd"><h3>' + title + '</h3>' +
+    (sub ? '<span class="meta">' + sub + '</span>' : '') + '</div>' +
+    '<div class="drawer-sec-bd">' + body + '</div></div>';
+}
+
+function renderDrawerHead(d) {
+  return (
+    '<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:var(--s-3);">' +
+      '<div style="min-width:0; flex:1;">' +
+        '<div class="meta" style="font-size:var(--t-12);">' + escapeHtml(d.ts.slice(0, 19).replace('T', ' ')) + ' · ' + escapeHtml(ratingLine(d)) + '</div>' +
+        '<h2 style="margin:4px 0 0; font-size:var(--t-16); font-weight:600; line-height:1.35;">' + escapeHtml(d.question) + '</h2>' +
+      '</div>' +
+      '<button class="icon-btn" id="fb-drawer-close" title="close" aria-label="close"><svg><use href="#i-x"/></svg></button>' +
+    '</div>'
+  );
+}
+
+function renderDrawerBody(d) {
+  let out = '';
+  const metaBits = [
+    'conf ' + fmtConf(d.confidence),
+    d.run ? ('latency ' + (d.run.latencyMs >= 1000 ? (d.run.latencyMs / 1000).toFixed(1) + 's' : d.run.latencyMs + 'ms')) : 'latency —',
+    d.run && d.run.model ? 'model ' + escapeHtml(d.run.model) : 'model —',
+    d.hadNoCitations ? '<span class="tag warn">no citations</span>' : null,
+  ].filter(Boolean).join(' · ');
+  out += drawerSec('META', '', '<div style="font-size:var(--t-12); color:var(--fg-soft);">' + metaBits + '</div>' +
+    '<div style="font-size:var(--t-12); color:var(--fg-soft); margin-top:4px;">page: ' + breadcrumbLine(d) + '</div>');
+  out += drawerSec('ANSWER',
+    d.run && d.run.kind ? ('kind ' + d.run.kind) : '',
+    '<pre style="white-space:pre-wrap; font-family:inherit; font-size:var(--t-13); margin:0; max-height:240px; overflow:auto;">' +
+      escapeHtml(d.answerMd && d.answerMd.length > 0 ? d.answerMd : (d.run && d.run.errorCode ? 'error · ' + d.run.errorCode : '(no answer body)')) +
+    '</pre>');
+  if (d.correction) {
+    out += drawerSec('CORRECTION', '— from reviewer',
+      '<pre style="white-space:pre-wrap; font-family:inherit; font-size:var(--t-13); margin:0;">' + escapeHtml(d.correction) + '</pre>');
+  }
+  out += drawerSec('CITATIONS', d.citations.length ? '· ' + d.citations.length : '', renderCitations(d.citations));
+  if (d.run) {
+    out += drawerSec('RETRIEVAL', '· ' + d.run.fused.length + ' fused' +
+      (d.run.subtreeAskTriggered ? ' · subtree-ask' : ''),
+      renderFusedTable(d.run.fused));
+  } else {
+    out += drawerSec('RETRIEVAL', '', '<p class="muted" style="font-size:var(--t-12); margin:0;">no linked run line (rolled out of 30d window or runs disabled)</p>');
+  }
+  out += drawerSec('ACTIONS', '',
+    '<div style="display:flex; gap:var(--s-2); flex-wrap:wrap;">' +
+      '<button class="btn sm primary" data-replay-query="' + escapeHtml(d.question) + '">' +
+        '<svg><use href="#i-act"/></svg> replay in Ask →</button>' +
+      '<span class="tag" title="ships after T1-d">add to golden — soon</span>' +
+      '<span class="tag" title="ships after T1-d">jump to doc section — soon</span>' +
+    '</div>');
+  return out;
+}
+
+async function openDrawer(feedbackId, rowEl, qPreview) {
+  if (!drawerEl || !drawerMask || !drawerBd) return;
+  if (rowsRoot) {
+    const prev = rowsRoot.querySelector('.feedback-row.sel');
+    if (prev) prev.classList.remove('sel');
+  }
+  if (rowEl) rowEl.classList.add('sel');
+  const myToken = ++drawerReqToken;
+  setDrawerLoading(qPreview);
+  drawerMask.hidden = false;
+  drawerEl.hidden = false;
+  document.body.style.overflow = 'hidden';
+  let body;
+  try {
+    const res = await fetch('/api/projects/' + encodeURIComponent(FB.projectName) + '/feedback/' + feedbackId);
+    body = await res.json();
+  } catch (err) {
+    if (myToken !== drawerReqToken) return;
+    drawerBd.innerHTML = '<p style="padding: var(--s-5); color: var(--err);">Failed to load: ' + escapeHtml(String(err)) + '</p>';
+    bindDrawerControls();
+    return;
+  }
+  if (myToken !== drawerReqToken) return; // a newer click superseded us
+  if (!body || body.ok === false) {
+    drawerBd.innerHTML = '<p style="padding: var(--s-5); color: var(--err);">Failed: ' + escapeHtml((body && body.error) || 'unknown') + '</p>';
+    bindDrawerControls();
+    return;
+  }
+  const d = body.detail;
+  if (drawerHd) drawerHd.innerHTML = renderDrawerHead(d);
+  drawerBd.innerHTML = renderDrawerBody(d);
+  drawerBd.scrollTop = 0;
+  bindDrawerControls();
+}
+
+function bindDrawerControls() {
+  const closeBtn = document.getElementById('fb-drawer-close');
+  if (closeBtn) closeBtn.addEventListener('click', closeDrawer);
+  // Replay-in-Ask delegates to the existing console:reask receiver in
+  // project.ts BOOTSTRAP_SCRIPT — fills #ask-q and switches the tab.
+  const replay = drawerBd && drawerBd.querySelector('[data-replay-query]');
+  if (replay) {
+    replay.addEventListener('click', () => {
+      window.dispatchEvent(new CustomEvent('console:reask', {
+        detail: { query: replay.dataset.replayQuery || '' },
+      }));
+      closeDrawer();
+    });
+  }
+}
+
+// Row click → fetch detail → open drawer. We delegate from rowsRoot so the
+// handler keeps working after chip swaps replace innerHTML.
+if (rowsRoot) {
+  rowsRoot.addEventListener('click', (e) => {
+    if (!e.target || !e.target.closest) return;
+    const row = e.target.closest('.feedback-row');
+    if (!row) return;
+    const idAttr = row.getAttribute('data-feedback-row');
+    if (!idAttr) return;
+    const id = Number(idAttr);
+    if (!Number.isFinite(id)) return;
+    const qCell = row.children[3];
+    const qPreview = qCell ? qCell.textContent.trim() : '';
+    openDrawer(id, row, qPreview);
+  });
+}
+
+if (drawerMask) drawerMask.addEventListener('click', closeDrawer);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && drawerEl && !drawerEl.hidden) closeDrawer();
+});
 `;
