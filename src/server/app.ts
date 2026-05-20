@@ -25,6 +25,7 @@ import type { AskRequest, AskResult, Citation } from '../query/types.ts';
 import type { LLM } from '../llm/types.ts';
 import type { RunCitation, RunRecord } from '../runs/types.ts';
 import { observeAsk } from '../feedback/gamma.ts';
+import { renderAskPage, getMarkedScript } from './web-ask.ts';
 
 const SSE_HEARTBEAT_MS = 2_000;
 const SSE_INITIAL_PADDING_BYTES = 4_096;
@@ -59,6 +60,23 @@ export function createApp(deps: AppDeps): Hono {
   const { runtime } = deps;
 
   app.use('*', buildCorsMiddleware(runtime.config.server));
+
+  // -----------------------------------------------------------------------
+  // Web Ask reader — minimal end-user HTML at GET /ask. Designed so the
+  // operator can hand an internal/early user the URL to try the project's
+  // answering quality, and so the same page can be embedded later (no
+  // cookies, no auth). The page POSTs to /v1/ask/stream for live streaming.
+  // -----------------------------------------------------------------------
+  app.get('/ask', (c) => {
+    const html = renderAskPage({ prompt: runtime.config.prompt });
+    return c.html(html);
+  });
+  app.get('/ask/marked.esm.js', (c) => {
+    const asset = getMarkedScript();
+    c.header('Content-Type', asset.contentType);
+    c.header('Cache-Control', 'public, max-age=3600');
+    return c.body(asset.body);
+  });
 
   // -----------------------------------------------------------------------
   // Health
