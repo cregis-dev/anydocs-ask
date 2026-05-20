@@ -1258,12 +1258,19 @@ document.querySelectorAll('[role=tab][data-project-tab]').forEach((b) => {
     setProjectTab(b.dataset.projectTab);
   });
 });
-const initialTab = (location.hash || '').replace('#', '');
+// Strip any \`?...\` query string from the hash before matching tab names.
+// Existing golden pagination uses \`#eval?gp=N\`; new cross-journey jumps
+// (RFC 0002 T2) use \`#eval?focus=...\` patterns. Without stripping here the
+// matcher would see \`eval?gp=2\` and ignore the tab switch.
+function hashTab() {
+  return (location.hash || '').replace('#', '').split('?')[0];
+}
+const initialTab = hashTab();
 if (['ask', 'index', 'eval', 'traffic'].includes(initialTab)) {
   setProjectTab(initialTab);
 }
 window.addEventListener('hashchange', () => {
-  const t = (location.hash || '').replace('#', '');
+  const t = hashTab();
   if (['ask', 'index', 'eval', 'traffic'].includes(t)) {
     setProjectTab(t);
   }
@@ -2034,6 +2041,64 @@ if (fbDown) fbDown.addEventListener('click', () => sendFeedback(-1, fbDown));
 window.addEventListener('console:reask', (e) => {
   if (askQ && e.detail && e.detail.query) askQ.value = e.detail.query;
   setProjectTab('ask');
+});
+
+// RFC 0002 T2 — "Add as golden case" cross-journey jump.
+// Traffic drawer dispatches \`console:add-golden\` with the run's payload.
+// We POST it to /golden/candidate/create-from-run (idempotent on normalized
+// query), switch to the Eval tab, and toast the result. The new candidate
+// lands in the pending list; author reviews via the existing approve/reject
+// flow — PRD §11.2 decision ③ ("审核走文件 + git") stays intact because we
+// only write a pending row, never auto-approve.
+function toastInline(msg, kind) {
+  const t = document.createElement('div');
+  t.textContent = msg;
+  t.setAttribute('role', 'status');
+  t.style.cssText =
+    'position:fixed; top:14px; left:50%; transform:translateX(-50%);' +
+    ' padding:8px 14px; border-radius:6px; font-size:13px; z-index:9999;' +
+    ' box-shadow:0 2px 8px rgba(0,0,0,.18);' +
+    ' background:' + (kind === 'err' ? 'var(--err)' : kind === 'warn' ? 'var(--warn)' : 'var(--ok)') +
+    '; color:#fff;';
+  document.body.appendChild(t);
+  setTimeout(() => { try { t.remove(); } catch (_) {} }, 2600);
+}
+window.addEventListener('console:add-golden', async (e) => {
+  const detail = e.detail || {};
+  if (!detail.query) return;
+  try {
+    const res = await fetch(
+      '/api/projects/' + encodeURIComponent(cfg.name) + '/golden/candidate/create-from-run',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: detail.query,
+          context_pageId: detail.context_pageId ?? null,
+          citation_pages: Array.isArray(detail.citation_pages) ? detail.citation_pages : [],
+        }),
+      },
+    );
+    const body = await res.json();
+    if (!res.ok || body.ok === false) {
+      toastInline('add as golden failed: ' + ((body && body.error) || res.statusText), 'err');
+      return;
+    }
+    if (body.isNew === false) {
+      toastInline('already in pending list', 'warn');
+    } else {
+      toastInline('added — review in Pending list', 'ok');
+    }
+    // Switch to Eval tab so the author sees the pending list. We reload to
+    // pick up the freshly written candidate (server-rendered on next GET).
+    // Only reload when we actually inserted; idempotent hit just nudges tab.
+    setProjectTab('eval');
+    if (body.isNew !== false) {
+      setTimeout(() => location.reload(), 600);
+    }
+  } catch (err) {
+    toastInline('network error: ' + (err && err.message ? err.message : err), 'err');
+  }
 });
 
 // Autostart

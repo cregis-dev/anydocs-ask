@@ -14,7 +14,8 @@
 
 import { readCandidates, writeCandidates } from '../golden/store.ts';
 import { reviewCandidates, type ReviewSummary } from '../golden/reviewer.ts';
-import { isDocsLang } from '../anydocs/types.ts';
+import { detectLangForQuery, makeIdFromQuery } from '../golden/generator-from-runs.ts';
+import { isDocsLang, type DocsLang } from '../anydocs/types.ts';
 import type {
   GoldenCaseCandidate,
   GoldenCaseExpected,
@@ -177,4 +178,78 @@ export function updateCandidate(
 
   writeCandidates(stateRoot, rows);
   return { ok: true, updated: target };
+}
+
+/**
+ * RFC 0002 T2 — Console "Traffic → Golden" cross-journey jump.
+ *
+ * Promotes a single live run into a pending Golden candidate. Mirrors what
+ * `golden generate --from runs` does for a batch, but for one row at the
+ * author's explicit click. Idempotent on the same normalized query: a second
+ * click on the same run returns the existing candidate with isNew=false.
+ *
+ * Decision PRD §11.2 ③ stays intact: the new row lands in pending list with
+ * decision=null; the author still reviews via the existing approve/reject
+ * flow (or the file + git path). This endpoint just removes the "copy query,
+ * switch tabs, paste" friction.
+ */
+export type CreateFromRunInput = {
+  query: string;
+  context_pageId?: string | null;
+  citation_pages?: string[];
+  filters?: { audience?: string | null; version?: string | null };
+  lang?: DocsLang;
+};
+
+export type CreateFromRunResult =
+  | { ok: true; created: GoldenCaseCandidate; isNew: boolean }
+  | { ok: false; error: string };
+
+export function createCandidateFromRun(
+  stateRoot: string,
+  input: CreateFromRunInput,
+): CreateFromRunResult {
+  if (typeof input.query !== 'string' || input.query.trim().length === 0) {
+    return { ok: false, error: 'query required (non-empty string)' };
+  }
+  if (input.lang !== undefined && !isDocsLang(input.lang)) {
+    return { ok: false, error: `lang must be one of zh|en (got ${String(input.lang)})` };
+  }
+  if (input.citation_pages !== undefined) {
+    if (!Array.isArray(input.citation_pages) || input.citation_pages.some((p) => typeof p !== 'string')) {
+      return { ok: false, error: 'citation_pages must be string[]' };
+    }
+  }
+
+  const id = makeIdFromQuery(input.query);
+  const { rows } = readCandidates(stateRoot);
+  const existing = rows.find((r) => r.id === id);
+  if (existing) return { ok: true, created: existing, isNew: false };
+
+  const lang = input.lang ?? detectLangForQuery(input.query);
+  const citePages = Array.from(new Set(input.citation_pages ?? []));
+  const cand: GoldenCaseCandidate = {
+    id,
+    query: input.query,
+    filters: {
+      audience: input.filters?.audience ?? null,
+      version: input.filters?.version ?? null,
+    },
+    context_pageId: input.context_pageId ?? null,
+    expected: {
+      must_cite_pages: citePages,
+      must_contain: [],
+      forbid_contain: [],
+    },
+    tags: [],
+    created_by: 'runs',
+    reviewed_at: null,
+    reviewer: null,
+    lang,
+    decision: null,
+    template_id: 'from_runs',
+  };
+  rows.push(cand);
+  writeCandidates(stateRoot, rows);
+  return { ok: true, created: cand, isNew: true };
 }

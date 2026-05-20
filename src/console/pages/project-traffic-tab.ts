@@ -427,11 +427,25 @@ function drawerBodyHtml(r) {
     : '<dd class="miss">no metadata</dd>') + '</dl>';
   out += drawerSec('CONFIG', '', cfgBody);
 
-  // ACTIONS
+  // ACTIONS — cross-journey jumps (RFC 0002 T2).
+  // data-add-golden-payload carries the JSON that the BOOTSTRAP_SCRIPT handler
+  // POSTs to /golden/candidate/create-from-run. Citations come from the answer
+  // record so the candidate's expected.must_cite_pages defaults to what
+  // production actually retrieved — author refines from there in pending list.
+  const citePages = a.citations && Array.isArray(a.citations)
+    ? a.citations.map((cit) => cit.page).filter((p) => typeof p === 'string')
+    : [];
+  const addGoldenPayload = JSON.stringify({
+    query: r.query || '',
+    context_pageId: r.context_pageId ?? null,
+    citation_pages: citePages,
+  });
   out += drawerSec('ACTIONS', '',
     '<div style="display:flex; gap:var(--s-2); flex-wrap:wrap;">' +
       '<button class="btn sm primary" data-reask-query="' + escapeHtml(r.query || '') + '">' +
         '<svg><use href="#i-act"/></svg> re-ask in Ask</button>' +
+      '<button class="btn sm" data-add-golden-payload="' + escapeHtml(addGoldenPayload) + '">' +
+        '<svg><use href="#i-plus"/></svg> add as golden case</button>' +
     '</div>');
 
   return out;
@@ -470,6 +484,22 @@ function openDrawer(r, tr) {
   if (reask) {
     reask.addEventListener('click', () => {
       window.dispatchEvent(new CustomEvent('console:reask', { detail: { query: reask.dataset.reaskQuery || '' } }));
+      closeDrawer();
+    });
+  }
+  // RFC 0002 T2: cross-journey jump — "add as golden case" delegates to
+  // BOOTSTRAP_SCRIPT's console:add-golden handler (POST + tab switch + toast).
+  const addGold = bd.querySelector('[data-add-golden-payload]');
+  if (addGold) {
+    addGold.addEventListener('click', () => {
+      let payload;
+      try {
+        payload = JSON.parse(addGold.dataset.addGoldenPayload || '{}');
+      } catch (e) {
+        payload = null;
+      }
+      if (!payload || !payload.query) return;
+      window.dispatchEvent(new CustomEvent('console:add-golden', { detail: payload }));
       closeDrawer();
     });
   }

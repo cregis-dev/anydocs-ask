@@ -192,7 +192,20 @@ function toCandidate(r: RunRecord): GoldenCaseCandidate {
  * dedup already picked one rep — the id reflects that).
  */
 function makeId(r: RunRecord): string {
-  return `runs:${shortHash(normalize(r.query))}`;
+  return makeIdFromQuery(r.query);
+}
+
+/** Variant for callers that only have the raw query (e.g. console cross-journey
+ *  jumps adding a single run as a candidate). Same hash function — same id, so
+ *  appending the same query twice is idempotent. */
+export function makeIdFromQuery(query: string): string {
+  return `runs:${shortHash(normalize(query))}`;
+}
+
+/** Exported for console cross-journey "add as golden case" — the candidate
+ *  needs a lang field and the same heuristic should apply. */
+export function detectLangForQuery(query: string): 'zh' | 'en' {
+  return detectLang(query);
 }
 
 function shortHash(s: string): string {

@@ -1697,6 +1697,130 @@ test('POST /api/projects/:name/golden/flush: moves approved → cases.jsonl, lea
   }
 });
 
+// RFC 0002 T2 — Traffic → Golden cross-journey jump endpoint.
+// Writes one pending candidate (decision=null) so the existing approve/reject
+// flow takes over from there; PRD §11.2 ③ ("审核走文件 + git") stays intact.
+test('POST /api/projects/:name/golden/candidate/create-from-run: appends a pending candidate', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request(
+      '/api/projects/docs-zh/golden/candidate/create-from-run',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: '怎么续期 JWT？',
+          context_pageId: 'auth/jwt',
+          citation_pages: ['auth/jwt', 'auth/refresh'],
+        }),
+      },
+    );
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      isNew: boolean;
+      created: {
+        id: string;
+        query: string;
+        lang: string;
+        decision: null | string;
+        template_id: string;
+        created_by: string;
+        expected: { must_cite_pages: string[] };
+        context_pageId: string | null;
+      };
+    };
+    assert.equal(body.ok, true);
+    assert.equal(body.isNew, true);
+    assert.match(body.created.id, /^runs:[0-9a-f]{8}$/);
+    assert.equal(body.created.query, '怎么续期 JWT？');
+    assert.equal(body.created.lang, 'zh');
+    assert.equal(body.created.decision, null);
+    assert.equal(body.created.template_id, 'from_runs');
+    assert.equal(body.created.created_by, 'runs');
+    assert.equal(body.created.context_pageId, 'auth/jwt');
+    assert.deepEqual(body.created.expected.must_cite_pages, ['auth/jwt', 'auth/refresh']);
+    // The JSONL file actually contains the new row.
+    const goldenDir = join(ws, 'state', 'docs-zh', 'golden');
+    const content = await fs.readFile(join(goldenDir, 'cases.candidate.jsonl'), 'utf8');
+    const lines = content.trim().split('\n').filter((l) => l.length > 0);
+    assert.equal(lines.length, 1);
+    assert.equal((JSON.parse(lines[0]!) as { id: string }).id, body.created.id);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/golden/candidate/create-from-run: idempotent on same query', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const reqBody = JSON.stringify({
+      query: 'how to refresh tokens',
+      citation_pages: ['auth'],
+    });
+    const first = await app.request(
+      '/api/projects/docs-zh/golden/candidate/create-from-run',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: reqBody },
+    );
+    assert.equal(first.status, 200);
+    const firstBody = (await first.json()) as { isNew: boolean; created: { id: string } };
+    assert.equal(firstBody.isNew, true);
+
+    const second = await app.request(
+      '/api/projects/docs-zh/golden/candidate/create-from-run',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: reqBody },
+    );
+    assert.equal(second.status, 200);
+    const secondBody = (await second.json()) as { isNew: boolean; created: { id: string } };
+    assert.equal(secondBody.isNew, false);
+    assert.equal(secondBody.created.id, firstBody.created.id);
+    // Only one row on disk despite two POSTs.
+    const goldenDir = join(ws, 'state', 'docs-zh', 'golden');
+    const content = await fs.readFile(join(goldenDir, 'cases.candidate.jsonl'), 'utf8');
+    const lines = content.trim().split('\n').filter((l) => l.length > 0);
+    assert.equal(lines.length, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /api/projects/:name/golden/candidate/create-from-run: 400 on empty query', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request(
+      '/api/projects/docs-zh/golden/candidate/create-from-run',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: '   ' }),
+      },
+    );
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string };
+    assert.match(body.error, /query/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('POST /api/projects/:name/eval: 500 with op error on failure', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
