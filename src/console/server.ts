@@ -50,11 +50,13 @@ import { loadProjectHomeStats, summarizeWorkspace } from './home-state.ts';
 import { loadAskConfigForView } from './ask-config-state.ts';
 import { parseAndValidateAskConfig } from '../config.ts';
 import {
+  createCandidateFromRun,
   decideCandidate,
   flushApproved,
   loadCandidates,
   updateCandidate,
   type CandidateUpdate,
+  type CreateFromRunInput,
 } from './golden-workshop-state.ts';
 
 export type ConsoleAppDeps = {
@@ -921,6 +923,27 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       return c.json({ ok: false, error: r.error }, code);
     }
     return c.json({ ok: true, updated: r.updated });
+  });
+
+  // RFC 0002 T2 cross-journey jump: promote one Traffic run into a pending
+  // Golden candidate. Idempotent on normalized query — clicking twice on the
+  // same run returns isNew=false instead of duplicating the row. Author still
+  // reviews via existing approve/reject flow (PRD §11.2 decision ③ unbroken).
+  app.post('/api/projects/:name/golden/candidate/create-from-run', async (c) => {
+    const ctx = resolveOpContext(deps.workspacePath, c.req.param('name'));
+    if ('error' in ctx) return c.json({ ok: false, error: ctx.error }, ctx.status);
+    let body: Partial<CreateFromRunInput> | null = null;
+    try {
+      body = (await c.req.json()) as Partial<CreateFromRunInput>;
+    } catch {
+      return c.json({ ok: false, error: 'invalid JSON body' }, 400);
+    }
+    if (!body || typeof body.query !== 'string' || body.query.trim().length === 0) {
+      return c.json({ ok: false, error: 'body.query (non-empty string) required' }, 400);
+    }
+    const r = createCandidateFromRun(ctx.stateRoot, body as CreateFromRunInput);
+    if (!r.ok) return c.json({ ok: false, error: r.error }, 400);
+    return c.json({ ok: true, created: r.created, isNew: r.isNew });
   });
 
   app.post('/api/projects/:name/golden/flush', (c) => {
