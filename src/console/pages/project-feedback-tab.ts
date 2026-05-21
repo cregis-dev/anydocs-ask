@@ -607,12 +607,28 @@ function renderDrawerBody(d) {
   } else {
     out += drawerSec('RETRIEVAL', '', '<p class="muted" style="font-size:var(--t-12); margin:0;">no linked run line (rolled out of 30d window or runs disabled)</p>');
   }
+  // RFC 0002 §5.1 cross-journey jumps. Payloads are serialised onto data-
+  // attrs and consumed by bindDrawerControls so the JSON-encoding stays
+  // out of the listener.
+  const citePages = Array.isArray(d.citations)
+    ? d.citations.map((c) => c.page).filter((p) => typeof p === 'string' && p.length > 0)
+    : [];
+  const addGoldenPayload = JSON.stringify({
+    query: d.question,
+    context_pageId: d.currentPageId,
+    citation_pages: citePages,
+  });
+  const jumpEnabled = typeof d.currentPageId === 'string' && d.currentPageId.length > 0;
   out += drawerSec('ACTIONS', '',
     '<div style="display:flex; gap:var(--s-2); flex-wrap:wrap;">' +
       '<button class="btn sm primary" data-replay-query="' + escapeHtml(d.question) + '">' +
         '<svg><use href="#i-act"/></svg> replay in Ask →</button>' +
-      '<span class="tag" title="ships after T1-d">add to golden — soon</span>' +
-      '<span class="tag" title="ships after T1-d">jump to doc section — soon</span>' +
+      '<button class="btn sm" data-add-golden-payload="' + escapeHtml(addGoldenPayload) + '">' +
+        '<svg><use href="#i-plus"/></svg> add to golden →</button>' +
+      (jumpEnabled
+        ? '<button class="btn sm" data-jump-page-id="' + escapeHtml(d.currentPageId) + '">' +
+            '<svg><use href="#i-folder"/></svg> jump to doc section →</button>'
+        : '<span class="tag" title="no current_page_id on this row">jump to doc section — n/a</span>') +
     '</div>');
   return out;
 }
@@ -655,15 +671,45 @@ async function openDrawer(feedbackId, rowEl, qPreview) {
 function bindDrawerControls() {
   const closeBtn = document.getElementById('fb-drawer-close');
   if (closeBtn) closeBtn.addEventListener('click', closeDrawer);
+  if (!drawerBd) return;
   // Replay-in-Ask delegates to the existing console:reask receiver in
   // project.ts BOOTSTRAP_SCRIPT — fills #ask-q and switches the tab.
-  const replay = drawerBd && drawerBd.querySelector('[data-replay-query]');
+  const replay = drawerBd.querySelector('[data-replay-query]');
   if (replay) {
     replay.addEventListener('click', () => {
       window.dispatchEvent(new CustomEvent('console:reask', {
         detail: { query: replay.dataset.replayQuery || '' },
       }));
       closeDrawer();
+    });
+  }
+  // Add-to-golden: reuse the existing console:add-golden handler that
+  // Traffic drawer already wires (POST + toast + tab switch). Payload
+  // shape identical → no new endpoint.
+  const addGold = drawerBd.querySelector('[data-add-golden-payload]');
+  if (addGold) {
+    addGold.addEventListener('click', () => {
+      let payload;
+      try {
+        payload = JSON.parse(addGold.dataset.addGoldenPayload || '{}');
+      } catch (e) {
+        payload = null;
+      }
+      if (!payload || !payload.query) return;
+      window.dispatchEvent(new CustomEvent('console:add-golden', { detail: payload }));
+      closeDrawer();
+    });
+  }
+  // Jump-to-doc-section: switch hash to #index?focus=<pageId>. The hash
+  // change triggers project.ts's hashchange listener (switches the tab)
+  // and the Index tab's own focus receiver (scrolls + flashes the row).
+  const jump = drawerBd.querySelector('[data-jump-page-id]');
+  if (jump) {
+    jump.addEventListener('click', () => {
+      const pageId = jump.dataset.jumpPageId || '';
+      if (!pageId) return;
+      closeDrawer();
+      location.hash = '#index?focus=' + encodeURIComponent(pageId);
     });
   }
 }

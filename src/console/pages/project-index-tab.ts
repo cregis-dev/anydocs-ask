@@ -343,17 +343,17 @@ function langSwitchScript(): Html {
   return html`<script>${raw(`
     (function(){
       var tabs = document.querySelectorAll('.lang-tabs [role=tab]');
-      tabs.forEach(function(b){
-        b.addEventListener('click', function(){
-          var lang = b.dataset.lang;
-          tabs.forEach(function(t){
-            t.setAttribute('aria-selected', t.dataset.lang === lang ? 'true' : 'false');
-            if (t.dataset.lang === lang) t.classList.add('active'); else t.classList.remove('active');
-          });
-          document.querySelectorAll('.lang-panel').forEach(function(p){
-            p.hidden = p.dataset.lang !== lang;
-          });
+      function activateLang(lang) {
+        tabs.forEach(function(t){
+          t.setAttribute('aria-selected', t.dataset.lang === lang ? 'true' : 'false');
+          if (t.dataset.lang === lang) t.classList.add('active'); else t.classList.remove('active');
         });
+        document.querySelectorAll('.lang-panel').forEach(function(p){
+          p.hidden = p.dataset.lang !== lang;
+        });
+      }
+      tabs.forEach(function(b){
+        b.addEventListener('click', function(){ activateLang(b.dataset.lang); });
       });
       var filter = document.getElementById('idx-filter');
       if (filter) {
@@ -365,6 +365,43 @@ function langSwitchScript(): Html {
           });
         });
       }
+
+      // RFC 0002 T1-d follow-up — Feedback drawer's "jump to doc section"
+      // chip sets location.hash to #index?focus=<pageId>. We listen here
+      // (not in BOOTSTRAP_SCRIPT) so the receiver lives next to the data
+      // it acts on (the page tree).
+      function applyFocus() {
+        var hash = location.hash || '';
+        if (hash.indexOf('#index') !== 0) return;
+        var m = /[?&]focus=([^&]+)/.exec(hash);
+        if (!m) return;
+        var pageId;
+        try { pageId = decodeURIComponent(m[1]); } catch (e) { return; }
+        var row = document.querySelector('.tree-row[data-page-id="' + pageId.replace(/"/g, '\\\\"') + '"]');
+        if (!row) return;
+        // If the matching row lives in a different lang panel, flip lang
+        // first so the row is actually visible before we scroll.
+        var panel = row.closest && row.closest('.lang-panel');
+        if (panel && panel.hidden && panel.dataset.lang) {
+          activateLang(panel.dataset.lang);
+        }
+        try { row.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {
+          row.scrollIntoView();
+        }
+        // 1.5s outline flash — no new CSS rule, keeps inline-style policy.
+        row.style.outline = '2px solid var(--accent)';
+        row.style.outlineOffset = '2px';
+        row.style.transition = 'outline 0.3s ease-out';
+        setTimeout(function(){
+          row.style.outline = '';
+          row.style.outlineOffset = '';
+          row.style.transition = '';
+        }, 1500);
+      }
+      window.addEventListener('hashchange', applyFocus);
+      // Apply on initial load too — sharing a /p/<name>#index?focus=foo
+      // link should land on the right row.
+      applyFocus();
     })();
   `)}</script>`;
 }
