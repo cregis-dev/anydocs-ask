@@ -104,6 +104,34 @@ export type FeedbackConfig = {
   rerankerWeight: number;
 };
 
+/**
+ * Multi-turn / session rewrite — RFC 0003 (0.4.x). Schema登记 only in 0.2;
+ * pipeline does not read these values yet. Mirrors `FeedbackConfig` /
+ * `feedback.rerankerWeight` precedent of "register now, consume later".
+ *
+ * Default `enabled = false` is load-bearing: with this off, query pipeline
+ * behaviour is byte-equivalent to single-turn — no extra latency, no extra
+ * Claude tokens.
+ *
+ * Architecture (RFC 0003 §2.1, B.2 path locked 2026-05-21): the existing
+ * primary LLM (Claude / Anthropic provider) consumes a short session
+ * history alongside chunks in a single call. No external small-model
+ * runtime, no separate reformulation step. anydocs-ask therefore takes
+ * **zero new dependencies** to enable multi-turn — authors flip
+ * `enabled` and the pipeline starts feeding the existing LLM provider
+ * with prior turns.
+ */
+export type MultiTurnConfig = {
+  enabled: boolean;
+  /**
+   * History window length (RFC §4.3). The pipeline keeps the most recent
+   * N turns from the session table and injects them into the LLM prompt
+   * alongside retrieval chunks. 3 is enough to resolve typical pronoun
+   * chains without bloating context; > ~5 risks drowning current_q signal.
+   */
+  historyTurns: number;
+};
+
 export type PromptConfig = {
   /**
    * Optional project-specific assistant identity. This replaces only the
@@ -130,6 +158,7 @@ export type ResolvedConfig = {
   runs: RunsConfig;
   analyze: AnalyzeConfig;
   feedback: FeedbackConfig;
+  multiTurn: MultiTurnConfig;
   prompt: PromptConfig;
 };
 
@@ -185,6 +214,10 @@ const DEFAULTS: ResolvedConfig = {
     enabled: false,
     implicitSignals: 'session-only',
     rerankerWeight: 0.15,
+  },
+  multiTurn: {
+    enabled: false,
+    historyTurns: 3,
   },
   prompt: {
     assistantName: null,
@@ -298,6 +331,7 @@ function mergeWithDefaults(
   applyRuns(user.runs, out.runs, warnings);
   applyAnalyze(user.analyze, out.analyze, warnings);
   applyFeedback(user.feedback, out.feedback, warnings);
+  applyMultiTurn(user.multiTurn, out.multiTurn, warnings);
   applyPrompt(user.prompt, out.prompt, warnings);
   return out;
 }
@@ -418,6 +452,30 @@ function applyFeedback(value: unknown, target: FeedbackConfig, warnings: string[
       target.rerankerWeight = v;
     } else {
       warnings.push(`anydocs.ask.json: feedback.rerankerWeight must be a number in [0, 1]; using default`);
+    }
+  }
+}
+
+function applyMultiTurn(value: unknown, target: MultiTurnConfig, warnings: string[]): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'multiTurn' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.enabled !== undefined) {
+    if (typeof obj.enabled === 'boolean') {
+      target.enabled = obj.enabled;
+    } else {
+      warnings.push(`anydocs.ask.json: multiTurn.enabled must be a boolean; using default`);
+    }
+  }
+  if (obj.historyTurns !== undefined) {
+    const v = obj.historyTurns;
+    if (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 20) {
+      target.historyTurns = v;
+    } else {
+      warnings.push(`anydocs.ask.json: multiTurn.historyTurns must be an integer in [1, 20]; using default`);
     }
   }
 }
