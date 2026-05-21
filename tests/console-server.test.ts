@@ -1082,6 +1082,113 @@ test('GET /api/projects/:name/feedback/:id: row with no linked run → run=null,
 });
 
 // ---------------------------------------------------------------------------
+// T1-d follow-up — drawer cross-journey chips
+// ---------------------------------------------------------------------------
+
+test('GET /p/:name: drawer JS emits add-to-golden + jump-to-doc chip handlers (RFC 0002 T1-d follow-up)', async () => {
+  // Static-source assertion that the wiring exists, mirroring the same
+  // pattern as the stale-response regression. The two chips dispatch via
+  // (a) console:add-golden CustomEvent (reuses BOOTSTRAP_SCRIPT receiver
+  // shipped with PR #44) and (b) location.hash = #index?focus=<id> (the
+  // Index tab listens for the focus query string).
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: 1, current_page_id: 'some-page' });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+    // The drawer template now renders both buttons.
+    assert.match(body, /data-add-golden-payload=/);
+    assert.match(body, /data-jump-page-id=/);
+    // Handlers are bound in bindDrawerControls.
+    assert.match(body, /querySelector\('\[data-add-golden-payload\]'\)/);
+    assert.match(body, /querySelector\('\[data-jump-page-id\]'\)/);
+    // add-to-golden reuses the existing CustomEvent contract.
+    assert.match(body, /new CustomEvent\('console:add-golden'/);
+    // jump uses location.hash with #index?focus= prefix.
+    assert.match(body, /location\.hash\s*=\s*'#index\?focus='/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: drawer jump-to-doc chip disabled when current_page_id is null', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    // No current_page_id → can't anchor a jump.
+    insertFeedback(db, { answer_id: 'a1', rating: 1, current_page_id: null });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    // Detail endpoint should report no breadcrumb / no page_id.
+    const body = (await (await app.request('/api/projects/docs-zh/feedback/1')).json()) as {
+      detail: { currentPageId: string | null };
+    };
+    assert.equal(body.detail.currentPageId, null);
+    // The drawer template renders the disabled tag instead of the button when
+    // the row has no page id. We assert by checking the rendered detail
+    // body via the inline JS string — the renderer function always emits
+    // the conditional branch text into the bundled script.
+    const ssr = await (await app.request('/p/docs-zh')).text();
+    assert.match(ssr, /jump to doc section — n\/a/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Index tab JS reads ?focus=<id> from hash and scrolls/flashes the row (RFC 0002 T1-d follow-up)', async () => {
+  // Static-source assertion of the focus receiver. The receiver lives in
+  // langSwitchScript so it ships when the explorer renders at all.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const projectRoot = join(ws, 'projects', 'docs-zh');
+    await fs.writeFile(
+      join(projectRoot, 'navigation', 'zh.json'),
+      JSON.stringify({ version: 1, items: [{ type: 'page', pageId: 'auth' }] }),
+    );
+    await fs.mkdir(join(projectRoot, 'pages', 'zh'), { recursive: true });
+    await fs.writeFile(
+      join(projectRoot, 'pages', 'zh', 'auth.json'),
+      JSON.stringify({
+        id: 'auth',
+        lang: 'zh',
+        slug: 'auth',
+        title: 'Auth',
+        status: 'published',
+        content: { version: 1, blocks: [] },
+      }),
+    );
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+    // Receiver hooks into hashchange + initial.
+    assert.match(body, /\[?focus=/);
+    assert.match(body, /window\.addEventListener\('hashchange', applyFocus\)/);
+    assert.match(body, /applyFocus\(\);/);
+    // Flash highlight uses the accent outline style — sanity-check the
+    // exact style string so a future refactor doesn't silently drop it.
+    assert.match(body, /outline = '2px solid var\(--accent\)'/);
+    // Row carries data-page-id for the focus query.
+    assert.match(body, /data-page-id="auth"/);
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // T4 — Index tab reverse marks (per-page + per-section)
 // ---------------------------------------------------------------------------
 

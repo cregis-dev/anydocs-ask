@@ -44,13 +44,15 @@ The console talks to a workspace at `~/anydocs-ask-runtime/` that contains one o
 The redesign must make these feel natural and obvious. Numbered in priority order.
 
 > **2026-05-20 update**: Journey 6 added to formalize the "console as feedback-loop studio" direction. Detailed scope lives in [RFC 0002](./rfcs/0002-console-studio-feedback-loop.md).
+>
+> **2026-05-21 update**: T1-a → T1-d and T4 shipped in 0.2.0-alpha.x ([#46](https://github.com/cregis-dev/anydocs-ask/pull/46), [#47](https://github.com/cregis-dev/anydocs-ask/pull/47), [#49](https://github.com/cregis-dev/anydocs-ask/pull/49), [#50](https://github.com/cregis-dev/anydocs-ask/pull/50), [#51](https://github.com/cregis-dev/anydocs-ask/pull/51)). Feedback tab (KPI + list + chips + drawer) and Index reverse marks are live; cross-journey jumps wired in Feedback drawer (replay-in-Ask / add-to-golden / jump-to-doc). T6 (A+ failure-cluster view) still gated on the 0.3 data threshold per PRD §10.3.
 
 1. **First-time setup**: I just installed anydocs-ask. I want to add my docs folder, see it index, and ask my first question.
 2. **Dogfood a question**: I made some doc edits. I want to ask 3 questions, see if citations are right, and iterate.
 3. **Run an eval**: My golden case set has 30 questions. I want to run them all, see R@5 / Citation / Answer-rule pass rates, and compare against the last report.
 4. **Manage the golden case set**: I want to generate candidate questions from doc structure, approve/reject them one by one, and flush approved ones into the active case set.
 5. **Diagnose live traffic**: My Reader integration is in production. I want to see this week's confidence / latency / error trends and drill into the worst requests.
-6. **Close the feedback loop** *(new — RFC 0002)*: I want to see which queries failed last week (no_citations / low confidence / 👎), see them clustered against my nav tree, drill from a failed query straight to the doc page that should have answered it, and one-click draft a golden case from a real failure. Cross-journey jumps make every other journey a starting point for this one.
+6. **Close the feedback loop** *(new — RFC 0002, T1-a → T1-d + T4 shipped)*: I open the Feedback tab to see this week's β/γ rows; KPI tiles show explicit share + mean confidence + non-answer rate; chips narrow to 👍/👎/implicit/no-citations. Click a row → drawer shows the full question, retrieval trace, and three cross-journey actions: **replay in Ask**, **add to golden case**, **jump to doc section** (which scrolls the Index tab to the matching page row and flashes it). Index tab itself shows reverse marks per page — "X asks · warn" when the past 7d's median confidence on that page dipped below 0.5 — so I can spot which docs are getting visited a lot but answered badly without leaving the explorer. A+ failure-cluster grouping still pending 0.3 (PRD §10.3 ≥ 50 threshold).
 
 ---
 
