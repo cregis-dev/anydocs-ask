@@ -171,7 +171,7 @@ Console 体验台 persist 落的 runs 自带 `source=console`，`analyze` / `gol
 
 ### 5.1 v1 立即可调（无需上游字段）
 
-- **检索权重**：`anydocs.ask.json` 的 `retrieval.{rrfK,rerankSameSubtreeBoost,navOrderBoost,maxChunksHardCap}` + `clarify.{dominantThreshold,ambiguousGap}`。先看 eval / analyze 指标再动手；冷启动期一律默认值（PRD §12.6）。
+- **检索权重**：`anydocs.ask.json` 的 `retrieval.{rrfK,rerankSameSubtreeBoost,navOrderBoost,maxChunksHardCap}`。先看 eval / analyze 指标再动手；冷启动期一律默认值（PRD §12.6）。clarify 子树聚合阈值（dominance / spread）现固化为 `src/query/aggregate.ts` 的代码常量，跨项目标定经验充足后再考虑外露。
 - **chunk 边界**：`indexing.{chunkMaxTokens,chunkHardCap}`；analyze D2 显示 "long queries + many candidates 慢" → 多半是 chunk 过大触发 token 爆。
 - **embedding 量化**：`embedding.preferQuantized: true` 走 int8 版 bge-m3，冷启快 5-6× / 磁盘 ~191MB vs 1.2GB（ARCH §8 spike 实测）。VPS / 小内存场景推荐。
 - **navigation 编排**：D3 歧义高发 → 合并 / 拆分子树。R@5 偏低 → 给重要 section 显式写 `id`（ARCH §2.2.2 推荐）+ 调整 nav 顺序（`nav_index` 作权重）。

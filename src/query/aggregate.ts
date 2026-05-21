@@ -4,21 +4,23 @@
  * Decides one of three outcomes for a top-K reranked list:
  *
  *   A. answer-same-lang   — same-lang slice has signal AND a single subtree
- *                           clearly dominates (max share ≥ 0.65), OR top-2
- *                           subtree share difference is large enough that
- *                           we can safely pick the leader.
+ *                           clearly dominates (max share ≥ SUBTREE_DOMINANCE),
+ *                           OR top-2 subtree share difference is large enough
+ *                           that we can safely pick the leader.
  *   B. clarify            — same-lang slice has signal AND top-2 subtree
- *                           shares are close (Δ < 0.15); we ask the user to
- *                           pick. Options are constrained to same-lang
- *                           subtrees (PRD §8 #13).
+ *                           shares are close (Δ < SUBTREE_SPREAD); we ask
+ *                           the user to pick. Options are constrained to
+ *                           same-lang subtrees (PRD §8 #13).
  *   C. translate-fallback — same-lang slice is empty, OR even the strongest
  *                           same-lang hit is too weak (max RRF < 0.05). We
  *                           use the cross-lang top-K and the LLM is told to
  *                           translate (PRD §4.8).
  *
- * The ARCH-level thresholds (0.65 dominance, 0.15 spread, 0.05 RRF floor)
- * are the v1 acceptance lock. They live as named constants so a future
- * spike can tune them without touching call sites.
+ * The thresholds (0.55 dominance, 0.25 spread tuned via eval round-1, and
+ * 0.01 RRF floor recalibrated below) are baked as code constants. We do
+ * NOT expose them via anydocs.ask.json: tuning needs cross-project signal
+ * we don't yet have, and the dogfood-driven adjustments so far have all
+ * been in-tree. Revisit when feedback loop data warrants per-project tuning.
  */
 
 import type { DocsLang } from '../anydocs/types.ts';
