@@ -268,6 +268,7 @@ test('detectApiIntent: endpoint, parameter, response, and status questions are A
 test('detectApiIntent: broad concept questions are not API-intent', () => {
   assert.equal(detectApiIntent('支付引擎是什么？'), false);
   assert.equal(detectApiIntent('What is WaaS?'), false);
+  assert.equal(detectApiIntent('Cregis API 签名应该怎么拼接参数？'), false);
   assert.equal(detectApiIntent('Cregis API 签名应该怎么拼接参数？sign 字段本身要不要参与签名？'), false);
   assert.equal(
     detectApiIntent('What should my WaaS webhook return after processing successfully, and how should I handle duplicate callbacks?'),

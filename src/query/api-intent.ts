@@ -15,7 +15,7 @@ export function detectApiIntent(question: string): boolean {
   if (q.length === 0) return false;
   if (API_PATH_RE.test(q)) return true;
   if (/\b(?:data\.status|event_type|event_name)\b/i.test(q)) return true;
-  if (isSignatureAuthQuestion(q)) return false;
+  if (detectSignatureAuthIntent(q)) return false;
   if (detectProjectSetupIntent(q)) return false;
   if (ZH_API_TERMS_RE.test(q)) return true;
   if (EN_API_TERMS_RE.test(q)) return true;
@@ -27,8 +27,8 @@ export function detectApiIntent(question: string): boolean {
   return IDENTIFIER_RE.test(q) && /\b(map|mapping|return|returns|send|query|create|lookup)\b/i.test(q);
 }
 
-function isSignatureAuthQuestion(question: string): boolean {
-  return /签名|signature/i.test(question) && /\bsign\b|API Key|MD5|排序|字典序|升序/i.test(question);
+export function detectSignatureAuthIntent(question: string): boolean {
+  return /签名|验签|signature/i.test(question);
 }
 
 export function detectProjectSetupIntent(question: string): boolean {

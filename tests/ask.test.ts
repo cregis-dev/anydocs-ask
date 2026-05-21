@@ -631,6 +631,92 @@ test('ask: non-API signature questions keep unrelated API reference chunks out o
   }
 });
 
+test('ask: short signature questions answer from authentication without current-page context', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', {
+      id: 'authentication',
+      title: '认证与签名',
+      body: 'Cregis API 签名规则：将参数按字典序升序排列，sign 字段不参与签名计算，最后追加 API Key 做 MD5。',
+    });
+    await writePage(root, 'zh', {
+      id: 'webhook-mechanism',
+      title: 'Webhook 回调机制',
+      body: 'Webhook 回调需要验签，并返回 HTTP 200 和 success。',
+    });
+    await writePage(root, 'zh', {
+      id: 'waas-setup',
+      title: 'WaaS 接入准备',
+      body: 'WaaS API 项目需要准备 API Key、Base URL 和 Project ID。',
+    });
+    await writePage(root, 'zh', {
+      id: 'payment-engine-setup',
+      title: '支付引擎接入准备',
+      body: '支付引擎项目需要准备 API Key、Base URL 和 Project ID。',
+    });
+    await writePage(root, 'zh', {
+      id: 'api-payment-engine-api-post-api-v2-order-info',
+      title: 'POST /api/v2/order/info — 查询订单信息',
+      body: 'API reference: Payment Engine API. HTTP Request POST /api/v2/order/info. Request field sign is required.',
+    });
+    await writePage(root, 'zh', {
+      id: 'api-waas-api-post-api-v1-payout-query',
+      title: 'POST /api/v1/payout/query — 查询提币',
+      body: 'API reference: WaaS API. HTTP Request POST /api/v1/payout/query. Request field sign is required.',
+    });
+    await writeNav(root, 'zh', {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'quickstart',
+          title: '快速入门',
+          children: [
+            { type: 'page', pageId: 'authentication' },
+            { type: 'page', pageId: 'webhook-mechanism' },
+          ],
+        },
+        {
+          type: 'section',
+          id: 'waas',
+          title: 'WaaS 钱包',
+          children: [{ type: 'page', pageId: 'waas-setup' }],
+        },
+        {
+          type: 'section',
+          id: 'payment-engine',
+          title: '支付引擎',
+          children: [{ type: 'page', pageId: 'payment-engine-setup' }],
+        },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API 参考',
+          children: [
+            { type: 'page', pageId: 'api-payment-engine-api-post-api-v2-order-info' },
+            { type: 'page', pageId: 'api-waas-api-post-api-v1-payout-query' },
+          ],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.userPrompt, /认证与签名/);
+      assert.match(input.userPrompt, /字典序升序排列/);
+      assert.doesNotMatch(input.userPrompt, /\/api\/v2\/order\/info/);
+      assert.doesNotMatch(input.userPrompt, /\/api\/v1\/payout\/query/);
+      return 'Cregis API 签名参数需要按字典序升序排列，排除 sign 字段，最后追加 API Key 做 MD5 [cit_1]。';
+    });
+    const { result: r, trace } = await askWithTrace(ctx, {
+      question: 'Cregis API 签名应该怎么拼接参数？',
+    });
+    assert.equal(r.type, 'answer', JSON.stringify(r));
+    assert.equal(trace.subtree_ask_triggered, false);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test('ask: English crypto order questions promote checkout API reference snippets', async () => {
   const ctx = await bootstrap(async (root) => {
     await writePage(root, 'en', {

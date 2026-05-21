@@ -38,6 +38,7 @@ import {
   apiReferenceVersionPreferences,
   detectProjectSetupIntent,
   detectApiIntent,
+  detectSignatureAuthIntent,
   isApiReferenceChunk,
 } from './api-intent.ts';
 import { aggregate, TOP_K_FOR_AGGREGATION, type AggregateOutcome, type SubtreeShare } from './aggregate.ts';
@@ -205,11 +206,15 @@ async function askWithTraceInternal(
   // 3. Hybrid retrieve.
   throwIfAborted(hooks.signal);
   await hooks.onStatus?.('retrieving');
+  const apiIntent = detectApiIntent(question);
+  const signatureAuthIntent = detectSignatureAuthIntent(question);
+  const currentSubtreeRoot = req.context?.current_page_id
+    ? lookupSubtreeRoot(deps.db, req.context.current_page_id, queryLang)
+    : null;
   const queryVector = (await deps.embedder.embed([question]))[0]!.vector;
   throwIfAborted(hooks.signal);
   const ftsQuery = sanitizeFtsQuery(question);
   const entityTerms = extractEntityTerms(question);
-  const apiIntent = detectApiIntent(question);
   const projectSetupIntent = detectProjectSetupIntent(question);
   const apiReferenceHints = apiReferenceSearchHints(question);
   const apiReferenceVersionPrefs = apiReferenceVersionPreferences(question);
@@ -219,9 +224,6 @@ async function askWithTraceInternal(
   const apiReferenceFtsQueries = apiReferenceHints
     .map((hint) => sanitizeFtsQuery(hint))
     .filter((hint): hint is string => !!hint);
-  const currentSubtreeRoot = req.context?.current_page_id
-    ? lookupSubtreeRoot(deps.db, req.context.current_page_id, queryLang)
-    : null;
   const apiReferencePagePrefix = apiReferencePagePrefixFor(currentSubtreeRoot);
   const { chunks: retrieved, trace: retrievalTrace } = retrieveWithTrace(deps.db, {
     queryVector,
@@ -255,14 +257,18 @@ async function askWithTraceInternal(
   // 5. Aggregate.
   // Derive title-match subtrees so aggregate can skip clarify when the user's
   // query explicitly names a page.
+  const aggregationCandidates = pickAggregationCandidates(reranked, {
+    apiIntent,
+    signatureAuthIntent,
+  });
   const titleMatchedPageIds = computeTitleMatches(retrieved, question);
   const titleMatchedSubtrees = new Set<string>();
-  for (const c of reranked) {
+  for (const c of aggregationCandidates) {
     if (titleMatchedPageIds.has(c.page_id) && c.subtree_root) {
       titleMatchedSubtrees.add(c.subtree_root);
     }
   }
-  const outcome = aggregate(reranked, { queryLang, currentSubtreeRoot, titleMatchedSubtrees });
+  const outcome = aggregate(aggregationCandidates, { queryLang, currentSubtreeRoot, titleMatchedSubtrees });
 
   if (outcome.kind === 'clarify') {
     return {
@@ -519,6 +525,32 @@ function navIndexBoostForTrace(navIndex: number | null): number {
   // the internal helper through rerank.ts's public surface).
   if (navIndex === null) return 0;
   return 0.1 * (1 / Math.log(navIndex + 2));
+}
+
+function preferNonApiContext(chunks: RerankedChunk[]): RerankedChunk[] {
+  const nonApi = chunks.filter((c) => !isApiReferenceChunk(c));
+  return nonApi.length > 0 ? nonApi : chunks;
+}
+
+function pickAggregationCandidates(
+  chunks: RerankedChunk[],
+  opts: { apiIntent: boolean; signatureAuthIntent: boolean },
+): RerankedChunk[] {
+  const allowApiReference = opts.apiIntent;
+  const pool = allowApiReference ? chunks : preferNonApiContext(chunks);
+  if (allowApiReference) return pool;
+  const nonApi = pool;
+  if (!opts.signatureAuthIntent) return nonApi;
+  const signatureContext = nonApi.filter(isSignatureAuthContext);
+  return signatureContext.length > 0 ? signatureContext : nonApi;
+}
+
+function isSignatureAuthContext(c: RerankedChunk): boolean {
+  const haystack = `${c.page_id} ${c.page_title} ${c.text}`.toLowerCase();
+  return (
+    /signature|sign field|md5|authentication|authenticate|auth|webhook/.test(haystack) ||
+    /签名|验签|认证|鉴权|字典序|升序/.test(haystack)
+  );
 }
 
 // ---------------------------------------------------------------------------
