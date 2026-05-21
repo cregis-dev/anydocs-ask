@@ -49,11 +49,6 @@ export type RetrievalConfig = {
   maxChunksHardCap: number;
 };
 
-export type ClarifyConfig = {
-  dominantThreshold: number;
-  ambiguousGap: number;
-};
-
 export type ServerConfig = {
   host: string;
   port: number;
@@ -131,7 +126,6 @@ export type ResolvedConfig = {
   embedding: EmbeddingConfig;
   llm: LLMConfig;
   retrieval: RetrievalConfig;
-  clarify: ClarifyConfig;
   server: ServerConfig;
   indexing: IndexingConfig;
   runs: RunsConfig;
@@ -167,10 +161,6 @@ const DEFAULTS: ResolvedConfig = {
     rerankSameSubtreeBoost: 0.2,
     navOrderBoost: 0.1,
     maxChunksHardCap: 20,
-  },
-  clarify: {
-    dominantThreshold: 0.65,
-    ambiguousGap: 0.15,
   },
   server: {
     host: '127.0.0.1',
@@ -305,7 +295,6 @@ function mergeWithDefaults(
   applySection(user.embedding, out.embedding, 'embedding', warnings);
   applySection(user.llm, out.llm, 'llm', warnings);
   applySection(user.retrieval, out.retrieval, 'retrieval', warnings);
-  applySection(user.clarify, out.clarify, 'clarify', warnings);
   applyServer(user.server, out.server, warnings);
   applySection(user.indexing, out.indexing, 'indexing', warnings);
   applyRuns(user.runs, out.runs, warnings);

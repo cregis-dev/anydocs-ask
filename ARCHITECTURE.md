@@ -452,8 +452,8 @@ HTTP 400。`scope_id` 校验是硬条件——未命中 `pages` 表中任一 `su
 
    分支 A — 同 lang 充分（top10_same_lang 非空且 max(rrf) ≥ 0.01）
      按 chunks.page_id → pages.subtree_root 分组，计算各子树得分占比 p_i：
-     ├─ max(p_i) ≥ 0.65 → 单一子树主导，进入生成（语种 = query_lang，正常路径）
-     ├─ 否则 top-2 子树得分差 < 0.15 → 触发 clarify（选项全是同 lang 子树，
+     ├─ max(p_i) ≥ 0.55 → 单一子树主导，进入生成（语种 = query_lang，正常路径）
+     ├─ 否则 top-2 子树得分差 < 0.25 → 触发 clarify（选项全是同 lang 子树，
      │  反问文案也用 query_lang）
      └─ 中间情况 → 直接进入生成（按主导子树，语种 = query_lang）
 
@@ -684,10 +684,6 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
     "rerankSameSubtreeBoost": 0.20,
     "navOrderBoost": 0.10,
     "maxChunksHardCap": 20
-  },
-  "clarify": {
-    "dominantThreshold": 0.65,
-    "ambiguousGap": 0.15
   },
   "server": {
     "host": "127.0.0.1",

@@ -337,7 +337,7 @@ function tabPanels(
 // ---------------------------------------------------------------------------
 // Settings tab — structured form over the full anydocs.ask.json schema.
 // Every section in ResolvedConfig (prompt / llm / embedding / retrieval /
-// clarify / indexing / runs / analyze / feedback / server) gets a group of
+// feedback / indexing / runs / analyze / server) gets a group of
 // fields; the bootstrap script reads `data-cfg-path` + `data-cfg-type` on
 // each control to reconstruct the JSON object on submit. Save POSTs the
 // full file to /api/projects/:name/ask-config — server re-validates.
@@ -401,7 +401,6 @@ function renderSettingsTab(view: AskConfigView): Html {
         ${llmSection(ctx)}
         ${embeddingSection(ctx)}
         ${retrievalSection(ctx)}
-        ${clarifySection(ctx)}
         ${feedbackSection(ctx)}
         ${indexingSection(ctx)}
         ${runsSection(ctx)}
@@ -483,13 +482,6 @@ function retrievalSection(ctx: SettingsCtx): Html {
     floatField(ctx, { path: 'retrieval.rerankSameSubtreeBoost', label: 'Re-rank same-subtree boost' }),
     floatField(ctx, { path: 'retrieval.navOrderBoost', label: 'Nav-order boost' }),
     intField(ctx, { path: 'retrieval.maxChunksHardCap', label: 'Max chunks (hard cap)', min: 1 }),
-  ]);
-}
-
-function clarifySection(ctx: SettingsCtx): Html {
-  return fieldGroup('Clarify', 'Thresholds that decide when to ask a clarifying sub-tree question vs. answering directly.', [
-    floatField(ctx, { path: 'clarify.dominantThreshold', label: 'Dominant threshold' }),
-    floatField(ctx, { path: 'clarify.ambiguousGap', label: 'Ambiguous gap' }),
   ]);
 }
 

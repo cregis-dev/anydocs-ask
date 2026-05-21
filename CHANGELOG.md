@@ -2,6 +2,12 @@
 
 `@anydocs/ask` 的所有重要变更均记录于此。格式大体遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循 semver 语义（`0.1.0` 起脱离 alpha 预发布；0.1.x 阶段允许 minor 内的 API 增量演进）。
 
+## Unreleased
+
+### 删除
+
+- **`clarify.dominantThreshold` / `clarify.ambiguousGap` 配置字段** —— 这两个字段自 0.1.0-alpha.0（2026-05-07）引入起从未被读取：`src/query/aggregate.ts` 一直使用写死的代码常量，且在 eval round-1（0.1.0-alpha.2，2026-05-16）从 `0.65 / 0.15` 调到 `0.55 / 0.25` 时没有同步配置默认值，造成两套不一致的死字段。clarify 子树聚合阈值现明确固化为 `aggregate.ts` 中的 `SUBTREE_DOMINANCE = 0.55` / `SUBTREE_SPREAD = 0.25`；跨项目标定经验积累充分后再考虑外露。同步删除 `ClarifyConfig` 类型、`anydocs.ask.json` 的 `clarify` 节、Console Config drawer 的 Clarify 字段组，以及 ARCHITECTURE.md §9 example / docs/ask-overview.md §5.1 中对该配置的指引。无运行时行为变化。
+
 ## 0.1.0 — 2026-05-16
 
 毕业 alpha。本版聚焦三件大事：**Ask SSE 流式（token-by-token）** + **控制台重设计** + **项目删除 / Eval 流式进度 / Clarify 可点击建议**。面向作者侧的 Web 控制台、SSE 流式 ask、运行时与 dogfood 通道经过完整迭代；对 `/v1/ask` HTTP API 保持向后兼容（`/v1/ask/stream` 是新增端点）。
