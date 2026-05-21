@@ -205,6 +205,8 @@ async function askWithTraceInternal(
     ftsQuery,
     scopeId,
     entityTerms,
+    currentPageId: req.context?.current_page_id ?? null,
+    currentPageLang: queryLang,
   });
 
   // 4. Rerank.
@@ -214,6 +216,7 @@ async function askWithTraceInternal(
   const reranked = rerank(retrieved, {
     queryLang,
     currentSubtreeRoot,
+    currentPageId: req.context?.current_page_id ?? null,
     query: question,
     entityTerms,
   });

@@ -47,6 +47,7 @@ export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
 
   const chunkById = new Map<string, RerankedChunk>();
   const chunkBlocks: string[] = [];
+  const hasApiReference = chunks.some(isApiReferenceChunk);
   chunks.forEach((c, idx) => {
     const id = `cit_${idx + 1}`;
     chunkById.set(id, c);
@@ -56,7 +57,14 @@ export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
     );
   });
 
-  const system = systemPromptFor(answerLang, isCrossLang, formatHint, promptConfig, entityTerms);
+  const system = systemPromptFor(
+    answerLang,
+    isCrossLang,
+    formatHint,
+    promptConfig,
+    entityTerms,
+    hasApiReference,
+  );
   const user = `${userIntro(answerLang)}\n\n${question}\n\n${chunkLabel(answerLang)}\n\n${chunkBlocks.join('\n\n---\n\n')}`;
 
   return { system, user, chunkById };
@@ -72,9 +80,11 @@ function systemPromptFor(
   hint: FormatHint,
   promptConfig: PromptConfig | undefined,
   entityTerms: string[] | undefined,
+  hasApiReference: boolean,
 ): string {
   const formatLine = formatLineFor(lang, hint);
   const entityLine = entityCoverageLine(lang, entityTerms);
+  const apiReferenceLine = apiReferenceLineFor(lang, hasApiReference);
   if (lang === 'zh') {
     const identity = promptConfig?.assistantName
       ? `你是 ${promptConfig.assistantName}。严格遵守以下规则：`
@@ -91,6 +101,7 @@ function systemPromptFor(
       '- 答案语种必须为中文。',
       formatLine,
       entityLine,
+      apiReferenceLine,
       crossLangLine,
     ].filter(Boolean);
     appendProjectInstructions(lines, promptConfig, 'zh');
@@ -112,10 +123,25 @@ function systemPromptFor(
     '- Answer in English.',
     formatLine,
     entityLine,
+    apiReferenceLine,
     crossLangLine,
   ].filter(Boolean);
   appendProjectInstructions(lines, promptConfig, 'en');
   return lines.join('\n');
+}
+
+function isApiReferenceChunk(c: RerankedChunk): boolean {
+  if (c.page_id.startsWith('api-')) return true;
+  if ((c.page_url ?? '').includes('/reference/')) return true;
+  return /\bAPI reference:/i.test(c.text) || /\bEndpoint:\s*(GET|POST|PUT|PATCH|DELETE)\s+`?\//i.test(c.text);
+}
+
+function apiReferenceLineFor(lang: DocsLang, hasApiReference: boolean): string {
+  if (!hasApiReference) return '';
+  if (lang === 'zh') {
+    return '- 如果问题涉及接口、参数、请求/响应字段、状态查询或具体路径，且参考片段包含 API reference，请优先引用对应 API reference 片段，并写出完整接口路径（例如 `/api/...`）。';
+  }
+  return '- If the question is about an endpoint, parameter, request/response field, status lookup, or concrete path, and the context includes API reference snippets, prefer citing the relevant API reference snippet and include the full endpoint path (for example `/api/...`).';
 }
 
 /**

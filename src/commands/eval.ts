@@ -22,10 +22,17 @@ import { join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { Runtime } from '../server/runtime.ts';
 import { loadConfig } from '../config.ts';
-import { askWithTrace, type AskTrace } from '../query/answer.ts';
+import { askWithTrace } from '../query/answer.ts';
 import { readApproved } from '../golden/store.ts';
+import {
+  failedCase,
+  scoreCase,
+  summarizeResults,
+  type CaseResult,
+  type EvalSummary,
+} from '../eval/scoring.ts';
 import type { GoldenCase } from '../golden/types.ts';
-import type { AskRequest, AskResult } from '../query/types.ts';
+import type { AskRequest } from '../query/types.ts';
 
 export type EvalOptions = {
   projectRoot: string;
@@ -47,27 +54,6 @@ export type EvalProgressEvent =
   | { type: 'case-start'; i: number; total: number; caseId: string; query: string; lang: string }
   | { type: 'case-done'; i: number; total: number; caseId: string; latencyMs: number; kind: CaseResult['kind']; r_at_5: boolean; citation_pass: boolean; answer_rule_pass: boolean }
   | { type: 'done'; reportPath: string; totalMs: number; summary: EvalSummary };
-
-export type CaseResult = {
-  case_id: string;
-  query: string;
-  kind: 'answer' | 'clarify' | 'error';
-  r_at_5: boolean;
-  citation_pass: boolean;
-  answer_rule_pass: boolean;
-  retrieved_pages_top5: string[];
-  cited_pages: string[];
-  missing_must_contain: string[];
-  hit_forbid_contain: string[];
-  latency_ms: number;
-};
-
-export type EvalSummary = {
-  n: number;
-  r_at_5: number;
-  citation_pass: number;
-  answer_rule_pass: number;
-};
 
 export async function runEval(opts: EvalOptions): Promise<number> {
   const projectRoot = resolve(opts.projectRoot);
@@ -142,12 +128,7 @@ export async function runEval(opts: EvalOptions): Promise<number> {
   const totalMs = Math.round(performance.now() - t0);
 
   // 4. Aggregate.
-  const summary: EvalSummary = {
-    n: results.length,
-    r_at_5: mean(results.map((r) => (r.r_at_5 ? 1 : 0))),
-    citation_pass: mean(results.map((r) => (r.citation_pass ? 1 : 0))),
-    answer_rule_pass: mean(results.map((r) => (r.answer_rule_pass ? 1 : 0))),
-  };
+  const summary = summarizeResults(results);
 
   // 5. Diff against baseline (last prior eval report if not specified).
   const baseline = loadBaseline(stateRoot, opts.baselinePath);
@@ -156,15 +137,11 @@ export async function runEval(opts: EvalOptions): Promise<number> {
   const reportPath = writeReport(stateRoot, { summary, results, totalMs, baseline });
   process.stdout.write(
     `anydocs-ask eval: wrote ${reportPath}\n` +
-      `  R@5=${summary.r_at_5.toFixed(2)}  Cit=${summary.citation_pass.toFixed(2)}  Ans=${summary.answer_rule_pass.toFixed(2)}  (${results.length} cases, ${totalMs}ms)\n`,
+      `  R@5=${summary.r_at_5.toFixed(2)}  Cit=${summary.citation_pass.toFixed(2)}  Ans=${summary.answer_rule_pass.toFixed(2)}  Kind=${summary.kind_pass.toFixed(2)}  Api=${summary.api_rule_pass === null ? '—' : summary.api_rule_pass.toFixed(2)}  (${results.length} cases, ${totalMs}ms)\n`,
   );
   opts.onProgress?.({ type: 'done', reportPath, totalMs, summary });
   return 0;
 }
-
-// ---------------------------------------------------------------------------
-// Per-case scoring
-// ---------------------------------------------------------------------------
 
 function goldenToAskRequest(c: GoldenCase): AskRequest {
   const req: AskRequest = { question: c.query };
@@ -172,91 +149,6 @@ function goldenToAskRequest(c: GoldenCase): AskRequest {
     req.context = { current_page_id: c.context_pageId };
   }
   return req;
-}
-
-function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): CaseResult {
-  const must = new Set(c.expected.must_cite_pages);
-
-  // R@5: page-level OR-set intersection on top-5 retrieved chunks.
-  const top5Pages = uniqueOrdered(trace.fused.slice(0, 5).map((f) => f.page_id));
-  const r_at_5 = top5Pages.some((p) => must.has(p));
-
-  // Default fail for clarify / error.
-  let kind: CaseResult['kind'] = 'error';
-  let cited_pages: string[] = [];
-  let citation_pass = false;
-  let answer_rule_pass = false;
-  let missing_must_contain: string[] = [];
-  let hit_forbid_contain: string[] = [];
-
-  if (result.type === 'answer') {
-    kind = 'answer';
-    cited_pages = uniqueOrdered(result.citations.map((cit) => cit.page_id));
-    // Citation-pass: every cited page must be in must_cite_pages (subset).
-    // Empty cited list still passes the subset check; require ≥1 citation
-    // for a meaningful pass (matches ARCH §6 "至少 1 条引用" rule).
-    citation_pass = cited_pages.length > 0 && cited_pages.every((p) => must.has(p));
-
-    const md = result.answer_md;
-    missing_must_contain = c.expected.must_contain.filter((s) => !substringHit(md, s));
-    hit_forbid_contain = c.expected.forbid_contain.filter((s) => substringHit(md, s));
-    answer_rule_pass = missing_must_contain.length === 0 && hit_forbid_contain.length === 0;
-  } else if (result.type === 'clarify') {
-    kind = 'clarify';
-  }
-
-  return {
-    case_id: c.id,
-    query: c.query,
-    kind,
-    r_at_5,
-    citation_pass,
-    answer_rule_pass,
-    retrieved_pages_top5: top5Pages,
-    cited_pages,
-    missing_must_contain,
-    hit_forbid_contain,
-    latency_ms: 0,
-  };
-}
-
-function failedCase(c: GoldenCase, latencyMs: number): CaseResult {
-  return {
-    case_id: c.id,
-    query: c.query,
-    kind: 'error',
-    r_at_5: false,
-    citation_pass: false,
-    answer_rule_pass: false,
-    retrieved_pages_top5: [],
-    cited_pages: [],
-    missing_must_contain: c.expected.must_contain,
-    hit_forbid_contain: [],
-    latency_ms: Math.round(latencyMs),
-  };
-}
-
-function substringHit(text: string, needle: string): boolean {
-  return text.toLowerCase().includes(needle.toLowerCase());
-}
-
-function uniqueOrdered<T>(xs: T[]): T[] {
-  const seen = new Set<T>();
-  const out: T[] = [];
-  for (const x of xs) {
-    if (!seen.has(x)) {
-      seen.add(x);
-      out.push(x);
-    }
-  }
-  return out;
-}
-
-function mean(xs: number[]): number {
-  if (xs.length === 0) return 0;
-  let s = 0;
-  for (const x of xs) s += x;
-  return s / xs.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -312,8 +204,11 @@ function renderReport(
 ): string {
   const { summary, results, totalMs, baseline } = args;
   const fmt = (x: number): string => x.toFixed(2);
+  const fmtOpt = (x: number | null | undefined): string => x === null || x === undefined ? '—' : x.toFixed(2);
   const delta = (curr: number, base: number | undefined): string =>
     base === undefined ? '—' : `${curr - base >= 0 ? '+' : ''}${(curr - base).toFixed(2)}`;
+  const deltaOpt = (curr: number | null, base: number | null | undefined): string =>
+    curr === null || base === null || base === undefined ? '—' : `${curr - base >= 0 ? '+' : ''}${(curr - base).toFixed(2)}`;
   const baseRow = baseline?.summary;
 
   const lines: string[] = [];
@@ -322,7 +217,7 @@ function renderReport(
   lines.push(`Cases: ${summary.n}  Wall time: ${totalMs}ms`);
   if (baseline) {
     lines.push(
-      `Baseline: ${baseline.date} (R@5=${fmt(baseRow!.r_at_5)}, Cit=${fmt(baseRow!.citation_pass)}, Ans=${fmt(baseRow!.answer_rule_pass)})`,
+      `Baseline: ${baseline.date} (R@5=${fmt(baseRow!.r_at_5)}, Cit=${fmt(baseRow!.citation_pass)}, Ans=${fmt(baseRow!.answer_rule_pass)}, Kind=${fmtOpt(baseRow!.kind_pass)}, Api=${fmtOpt(baseRow!.api_rule_pass)})`,
     );
   } else {
     lines.push(`Baseline: (none — first run)`);
@@ -339,6 +234,16 @@ function renderReport(
   lines.push(
     `| Answer-rule-pass | ${fmt(summary.answer_rule_pass)}  | ${baseRow ? fmt(baseRow.answer_rule_pass) : '—   '}    | ${delta(summary.answer_rule_pass, baseRow?.answer_rule_pass)} |`,
   );
+  lines.push(
+    `| Kind-pass        | ${fmt(summary.kind_pass)}  | ${baseRow ? fmtOpt(baseRow.kind_pass) : '—   '}    | ${delta(summary.kind_pass, baseRow?.kind_pass)} |`,
+  );
+  lines.push(
+    `| API-rule-pass    | ${fmtOpt(summary.api_rule_pass)}  | ${baseRow ? fmtOpt(baseRow.api_rule_pass) : '—   '}    | ${deltaOpt(summary.api_rule_pass, baseRow?.api_rule_pass)} |`,
+  );
+  if (summary.api_rule_n > 0) {
+    lines.push('');
+    lines.push(`API-rule cases: ${summary.api_rule_n}`);
+  }
   lines.push('');
 
   const recallFails = results.filter((r) => !r.r_at_5);
@@ -366,8 +271,35 @@ function renderReport(
     for (const r of ruleFails) {
       const bits: string[] = [];
       if (r.missing_must_contain.length > 0) bits.push(`missing: ${r.missing_must_contain.join(', ')}`);
+      if (r.missing_must_contain_regex.length > 0) bits.push(`missing regex: ${r.missing_must_contain_regex.join(', ')}`);
       if (r.hit_forbid_contain.length > 0) bits.push(`forbid hit: ${r.hit_forbid_contain.join(', ')}`);
+      if (r.hit_forbid_contain_regex.length > 0) bits.push(`forbid regex hit: ${r.hit_forbid_contain_regex.join(', ')}`);
       lines.push(`- ${r.case_id}: ${bits.join(' | ')}`);
+    }
+    lines.push('');
+  }
+
+  const apiFails = results.filter((r) => r.api_rule_pass === false);
+  if (apiFails.length > 0) {
+    lines.push(`## API-rule failures (${apiFails.length})`);
+    for (const r of apiFails) {
+      const bits: string[] = [];
+      if (r.missing_must_cite_operations.length > 0) {
+        bits.push(`missing operations: ${r.missing_must_cite_operations.join(', ')}`);
+      }
+      if (r.missing_must_cite_urls.length > 0) {
+        bits.push(`missing citation URLs: ${r.missing_must_cite_urls.join(', ')}`);
+      }
+      lines.push(`- ${r.case_id}: ${bits.join(' | ')}`);
+    }
+    lines.push('');
+  }
+
+  const kindFails = results.filter((r) => !r.kind_pass);
+  if (kindFails.length > 0) {
+    lines.push(`## Kind failures (${kindFails.length})`);
+    for (const r of kindFails) {
+      lines.push(`- ${r.case_id}: expected ${r.expected_kind}, got ${r.kind}`);
     }
     lines.push('');
   }
@@ -376,7 +308,11 @@ function renderReport(
   if (offBranch.length > 0) {
     lines.push(`## Non-answer outcomes (${offBranch.length})`);
     for (const r of offBranch) {
-      lines.push(`- ${r.case_id} → ${r.kind}: ${r.query}`);
+      const diagnostic = [r.error_code, r.error_message, r.error_detail]
+        .filter((part): part is string => typeof part === 'string' && part.length > 0)
+        .map((part) => oneLine(part))
+        .join(' — ');
+      lines.push(`- ${r.case_id} → ${r.kind}: ${r.query}${diagnostic ? ` (${diagnostic})` : ''}`);
     }
     lines.push('');
   }
@@ -386,4 +322,8 @@ function renderReport(
   lines.push(`<!-- EVAL_SUMMARY ${embed} -->`);
   lines.push('');
   return lines.join('\n');
+}
+
+function oneLine(s: string): string {
+  return s.replace(/\s+/g, ' ').slice(0, 240);
 }

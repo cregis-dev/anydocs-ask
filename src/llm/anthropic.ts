@@ -33,6 +33,7 @@ export type AnthropicLLMOptions = {
 };
 
 const DEFAULT_MAX_TOKENS = 1024;
+const GENERATE_ATTEMPTS = 3;
 
 export class AnthropicLLM implements LLM {
   readonly model: string;
@@ -63,25 +64,33 @@ export class AnthropicLLM implements LLM {
         create: (req: AnthropicMessageRequest) => Promise<AnthropicMessageResponse>;
       };
     };
-    let response: AnthropicMessageResponse;
-    try {
-      response = await client.messages.create({
-        model: this.model,
-        max_tokens: input.maxTokens ?? this.defaultMaxTokens,
-        system: input.systemPrompt,
-        messages: [{ role: 'user', content: input.userPrompt }],
-        ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
-      });
-    } catch (err) {
-      throw new Error(`AnthropicLLM request failed (model=${this.model}): ${describeRequestError(err)}`);
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= GENERATE_ATTEMPTS; attempt++) {
+      let response: AnthropicMessageResponse;
+      try {
+        response = await client.messages.create({
+          model: this.model,
+          max_tokens: input.maxTokens ?? this.defaultMaxTokens,
+          system: input.systemPrompt,
+          messages: [{ role: 'user', content: input.userPrompt }],
+          ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+        });
+      } catch (err) {
+        lastError = new Error(`AnthropicLLM request failed (model=${this.model}): ${describeRequestError(err)}`);
+        if (attempt < GENERATE_ATTEMPTS && shouldRetryRequestError(err)) continue;
+        throw lastError;
+      }
+      if (!response || typeof response !== 'object') {
+        lastError = new Error(
+          `AnthropicLLM: gateway returned non-object response (model=${this.model}): ${describeNonObject(response)}`,
+        );
+        if (attempt < GENERATE_ATTEMPTS) continue;
+        throw lastError;
+      }
+      const text = extractText(response);
+      return { text, modelUsed: response.model ?? this.model };
     }
-    if (!response || typeof response !== 'object') {
-      throw new Error(
-        `AnthropicLLM: gateway returned non-object response (model=${this.model}): ${describeNonObject(response)}`,
-      );
-    }
-    const text = extractText(response);
-    return { text, modelUsed: response.model ?? this.model };
+    throw lastError ?? new Error(`AnthropicLLM request failed (model=${this.model})`);
   }
 
   async streamGenerate(
@@ -226,6 +235,16 @@ function describeRequestError(err: unknown): string {
     if (bodyStr && bodyStr !== msg) parts.push(`body=${truncate(bodyStr, 240)}`);
   }
   return parts.length > 0 ? parts.join(' ') : (err instanceof Error ? err.message : String(err));
+}
+
+function shouldRetryRequestError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as APIErrorLike;
+  if (typeof e.status === 'number') return e.status === 408 || e.status === 429 || e.status >= 500;
+  const msg = typeof e.message === 'string' ? e.message : (err instanceof Error ? err.message : '');
+  if (/\b(timeout|timed out|etimedout|econnreset)\b/i.test(msg)) return true;
+  if (/fetch failed|socket hang up/i.test(msg)) return true;
+  return false;
 }
 
 function describeNonObject(value: unknown): string {

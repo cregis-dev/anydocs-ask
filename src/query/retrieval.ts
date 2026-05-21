@@ -54,6 +54,10 @@ export type RetrieveOptions = {
    * even if the combined OR query demoted those chunks below perPathK.
    */
   entityTerms?: string[];
+  /** Current page id from the client context. Used to keep page-local context in the candidate pool. */
+  currentPageId?: string | null;
+  /** Language to use when resolving currentPageId, usually the resolved query language. */
+  currentPageLang?: DocsLang | null;
 };
 
 const DEFAULT_PER_PATH_K = 20;
@@ -73,6 +77,14 @@ const ENTITY_K = 5;
  * coverage gaps without displacing strong hits.
  */
 const ENTITY_INJECT_RANK = DEFAULT_PER_PATH_K;
+/** Max chunks to inject from the exact current page. */
+const CURRENT_PAGE_K = 3;
+/**
+ * Current-page context is a UI signal, not a retrieval path, so give it a
+ * modest synthetic rank: strong enough to survive finalK trimming, weaker
+ * than top vector/BM25 matches.
+ */
+const CURRENT_PAGE_INJECT_RANK = 8;
 
 /**
  * Trace metadata from the retrieve step — exposed by retrieveWithTrace() for
@@ -84,6 +96,8 @@ export type RetrievalTrace = {
   bm25Ranks: Map<number, number>;
   /** chunk_ids that entered the pool via the per-entity injection pass. */
   entityInjected: Set<number>;
+  /** chunk_ids that entered the pool because they belong to context.current_page_id. */
+  currentPageInjected: Set<number>;
 };
 
 export function retrieve(db: DbHandle, opts: RetrieveOptions): RetrievedChunk[] {
@@ -145,11 +159,34 @@ export function retrieveWithTrace(
     }
   }
 
+  const currentPageInjected = new Set<number>();
+  if (opts.currentPageId && opts.currentPageLang) {
+    const currentPageInjectScore = 1 / (RRF_K + CURRENT_PAGE_INJECT_RANK);
+    const currentPageIds = currentPagePath(
+      db,
+      opts.currentPageId,
+      opts.currentPageLang,
+      CURRENT_PAGE_K,
+      opts.scopeId,
+    );
+    for (const id of currentPageIds) {
+      const cur = rrfScores.get(id);
+      if (cur === undefined) {
+        rrfScores.set(id, currentPageInjectScore);
+        currentPageInjected.add(id);
+      } else {
+        rrfScores.set(id, cur + currentPageInjectScore);
+      }
+    }
+  }
+
   const ranked = [...rrfScores.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, finalK);
 
-  if (ranked.length === 0) return { chunks: [], trace: { vecRanks, bm25Ranks, entityInjected } };
+  if (ranked.length === 0) {
+    return { chunks: [], trace: { vecRanks, bm25Ranks, entityInjected, currentPageInjected } };
+  }
 
   const idList = ranked.map(([id]) => id);
   const rows = fetchChunkRows(db, idList);
@@ -161,7 +198,7 @@ export function retrieveWithTrace(
     if (!r) continue; // boundary check kicked it; shouldn't happen since we already filtered
     out.push({ ...r, rrf_score: score });
   }
-  return { chunks: out, trace: { vecRanks, bm25Ranks, entityInjected } };
+  return { chunks: out, trace: { vecRanks, bm25Ranks, entityInjected, currentPageInjected } };
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +256,29 @@ function bm25Path(
         LIMIT ?`,
     )
     .all(ftsQuery, scopeId, scopeId, perPathK) as Array<{ chunk_id: number }>;
+  return rows.map((r) => r.chunk_id);
+}
+
+function currentPagePath(
+  db: DbHandle,
+  pageId: string,
+  lang: DocsLang,
+  limit: number,
+  scopeId: string | null,
+): number[] {
+  const rows = db
+    .prepare(
+      `SELECT c.chunk_id
+         FROM chunks c
+         JOIN pages p ON p.page_id = c.page_id AND p.lang = c.lang
+        WHERE c.page_id = ?
+          AND c.lang = ?
+          AND p.status = 'published'
+          AND (? IS NULL OR p.subtree_root = ?)
+        ORDER BY c.chunk_id ASC
+        LIMIT ?`,
+    )
+    .all(pageId, lang, scopeId, scopeId, limit) as Array<{ chunk_id: number }>;
   return rows.map((r) => r.chunk_id);
 }
 

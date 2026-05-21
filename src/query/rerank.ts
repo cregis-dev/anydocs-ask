@@ -2,7 +2,8 @@
  * Structural rerank — ARCH §6 step 4.
  *
  *   final_score = rrf_score × (1 + lang_boost + same_subtree_boost
- *                                + nav_index_boost + title_match_boost)
+ *                                + current_page_boost + nav_index_boost
+ *                                + title_match_boost)
  *
  *     lang_boost          = +0.30 when chunk.lang == query_lang (PRD §4.8)
  *     same_subtree_boost  = +0.20 when chunk's page shares subtree_root with
@@ -14,6 +15,11 @@
  *                           more useful (boosts siblings, not just ancestors)
  *                           and consistent with PRD §4.2 "structure context"
  *                           intent.
+ *     current_page_boost  = +0.45 when chunk.page_id exactly matches the
+ *                           current page. Current-page context is a strong
+ *                           UI signal: the user is usually asking about what
+ *                           they are reading, while same-subtree siblings
+ *                           should remain secondary.
  *     nav_index_boost     = +0.10 × (1 / log(nav_index + 2))
  *                           (anydocs nav order ≈ author intent priority)
  *     title_match_boost   = +0.30 when query contains chunk.page_title
@@ -43,6 +49,8 @@ export type RerankOptions = {
   queryLang: DocsLang;
   /** Subtree root of the user's current page. Pass null if unknown. */
   currentSubtreeRoot: string | null;
+  /** Page id of the user's current page. Pass null/omit if unknown. */
+  currentPageId?: string | null;
   /** Raw user query — used for title_match_boost. */
   query: string;
   /**
@@ -58,6 +66,7 @@ export type RerankOptions = {
 
 const LANG_BOOST = 0.3;
 const SAME_SUBTREE_BOOST = 0.2;
+const CURRENT_PAGE_BOOST = 0.45;
 const NAV_INDEX_BOOST = 0.1;
 const TITLE_MATCH_BOOST = 0.3;
 const ENTITY_MATCH_BOOST = 0.2;
@@ -78,11 +87,16 @@ export function rerank(
         opts.currentSubtreeRoot !== null && c.subtree_root === opts.currentSubtreeRoot
           ? SAME_SUBTREE_BOOST
           : 0;
+      const currentPageBoost =
+        (opts.currentPageId ?? null) !== null && c.page_id === opts.currentPageId
+          ? CURRENT_PAGE_BOOST
+          : 0;
       const navIdxBoost = navIndexBoostFor(c.nav_index);
       const titleBoost = titleMatchedPageIds.has(c.page_id) ? TITLE_MATCH_BOOST : 0;
       const entityBoost = entityMatchedPageIds.has(c.page_id) ? ENTITY_MATCH_BOOST : 0;
       const final_score =
-        c.rrf_score * (1 + langBoost + sameSubtreeBoost + navIdxBoost + titleBoost + entityBoost);
+        c.rrf_score *
+        (1 + langBoost + sameSubtreeBoost + currentPageBoost + navIdxBoost + titleBoost + entityBoost);
       return { ...c, final_score };
     })
     .sort((a, b) => b.final_score - a.final_score);

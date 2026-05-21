@@ -45,6 +45,8 @@ export type PageDoc = {
   updatedAt?: string;
   content: unknown;
   metadata?: Record<string, unknown>;
+  /** Optional pre-rendered markdown used by generated docs such as OpenAPI references. */
+  render?: { markdown?: string };
 };
 
 export function isDocsLang(value: unknown): value is DocsLang {

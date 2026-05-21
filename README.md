@@ -210,9 +210,14 @@ anydocs-ask runs export      <projectRoot> --since <when> [--format jsonl|csv]
 anydocs-ask golden generate  <projectRoot> [--from structure|runs] [--limit N]
                                            [--since 14d] [--no-llm-rewrite] [--force]
 anydocs-ask golden review    <projectRoot> [--reviewer <name>]
+anydocs-ask golden import    <projectRoot> --file <jsonl> [--replace]
 anydocs-ask eval             <projectRoot> [--baseline <path>]
 anydocs-ask analyze runs     <projectRoot> [--since 7d]
 ```
+
+`golden import` is intended for source-controlled, hand-curated eval sets.
+Relative `--file` paths are resolved from `<projectRoot>`, then written into
+the runtime workspace under `<workspace>/state/<projectId>/golden/cases.jsonl`.
 
 `--since` 接受 ISO 日期（`2026-04-01`）、ISO 时间戳，或时长简写（`7d` / `48h` / `30m`）。
 

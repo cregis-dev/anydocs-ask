@@ -59,8 +59,7 @@ export function chunkPage(page: PageDoc, options: ChunkPageOptions = {}): ChunkI
   const maxChars = options.maxChars ?? CHUNK_MAX_CHARS_DEFAULT;
   const overlapChars = options.overlapChars ?? CHUNK_OVERLAP_CHARS_DEFAULT;
 
-  const rendered = renderPageContent(page.content);
-  const markdown = rendered.markdown ?? '';
+  const markdown = page.render?.markdown ?? renderPageContent(page.content).markdown ?? '';
   if (!markdown.trim()) return [];
 
   const sections = extractMarkdownSections(markdown, page.title);

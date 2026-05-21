@@ -299,6 +299,31 @@ test('buildPrompt: appends project-specific assistant identity and instructions 
   assert.match(prompt.system, /WaaS 主要用于钱包/);
 });
 
+test('buildPrompt: adds API reference citation rule when context contains API reference chunks', () => {
+  const prompt = buildPrompt({
+    question: '创建订单返回哪些字段？',
+    chunks: [
+      {
+        ...fakeRetrieved({
+          chunk_id: 1,
+          page_id: 'api-payment-engine-api-post-api-v2-checkout',
+          page_title: 'POST /api/v2/checkout — 创建订单',
+          page_url: '/zh/reference/payment-engine-api/post-api-v2-checkout',
+          text: 'API reference: Payment Engine API\nEndpoint: POST `/api/v2/checkout`\nResponse fields: `cregis_id`, `checkout_url`',
+          breadcrumb: [{ id: 'api', title: 'API Reference', type: 'section' }],
+        }),
+        final_score: 0.2,
+      },
+    ],
+    answerLang: 'zh',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+  });
+
+  assert.match(prompt.system, /API reference/);
+  assert.match(prompt.system, /完整接口路径/);
+});
+
 test('rerank: lang_boost +0.30 applied when chunk.lang == query_lang', () => {
   const out = rerank(
     [
@@ -325,6 +350,37 @@ test('rerank: same_subtree_boost +0.20 when current subtree matches', () => {
   const a = out.find((c) => c.chunk_id === 1)!;
   const b = out.find((c) => c.chunk_id === 2)!;
   assert.ok(a.final_score > b.final_score);
+});
+
+test('rerank: current_page_boost prefers exact current page over same-subtree sibling', () => {
+  const out = rerank(
+    [
+      fakeRetrieved({
+        chunk_id: 1,
+        page_id: 'authentication',
+        page_title: 'Authentication & Signature',
+        subtree_root: 'get-started',
+        rrf_score: 0.1,
+        nav_index: 1000,
+      }),
+      fakeRetrieved({
+        chunk_id: 2,
+        page_id: 'webhook-mechanism',
+        page_title: 'Webhook Callback Mechanism',
+        subtree_root: 'get-started',
+        rrf_score: 0.12,
+        nav_index: 1000,
+      }),
+    ],
+    {
+      queryLang: 'en',
+      currentSubtreeRoot: 'get-started',
+      currentPageId: 'authentication',
+      query: 'How do I calculate sign?',
+    },
+  );
+
+  assert.equal(out[0]?.page_id, 'authentication');
 });
 
 test('rerank: nav_index_boost decays with depth', () => {

@@ -18,6 +18,7 @@ import {
   type NavigationDoc,
   type PageDoc,
 } from './types.ts';
+import { loadOpenApiPages } from './openapi.ts';
 
 export type LoadedProject = {
   projectRoot: string;
@@ -99,6 +100,21 @@ export async function loadProject(projectRoot: string): Promise<LoadedProject> {
         `navigation/${lang}.json exists but pages/${lang}/ has no readable page files`,
       );
     }
+  }
+
+  const apiPagesByLang = await loadOpenApiPages(root, warnings);
+  for (const [lang, apiPages] of apiPagesByLang) {
+    const langMap = pagesByLangAndId.get(lang) ?? new Map<string, PageDoc>();
+    for (const page of apiPages) {
+      if (langMap.has(page.id)) {
+        warnings.push(
+          `api-sources: duplicate generated API page id "${page.id}" for lang "${lang}"; skipped`,
+        );
+        continue;
+      }
+      langMap.set(page.id, page);
+    }
+    if (langMap.size > 0) pagesByLangAndId.set(lang, langMap);
   }
 
   const defaultLanguage = await readDefaultLanguage(root, warnings);

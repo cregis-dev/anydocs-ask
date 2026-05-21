@@ -16,10 +16,28 @@ import type { DocsLang } from '../anydocs/types.ts';
 export type GoldenCaseExpected = {
   /** At least one slug must appear in retrieval top-K (R@5 OR semantics). */
   must_cite_pages: string[];
+  /**
+   * Additional pages that are acceptable final citations but do not satisfy
+   * the retrieval recall target by themselves.
+   */
+  allow_cite_pages?: string[];
+  /** Optional exact API operations that should be supported by the answer/citations. */
+  must_cite_operations?: string[];
+  /** Optional citation URL fragments that should appear in final citations. */
+  must_cite_urls?: string[];
   /** Substrings that must all appear in answer.md (case-insensitive substring). */
   must_contain: string[];
+  /** Regexes that must all match answer.md. */
+  must_contain_regex?: string[];
   /** Substrings that must NOT appear in answer.md. */
   forbid_contain: string[];
+  /** Regexes that must NOT match answer.md. */
+  forbid_contain_regex?: string[];
+  /**
+   * Expected branch outcome. Defaults to "answer" for backwards-compatible
+   * behavior with existing golden cases.
+   */
+  expected_kind?: 'answer' | 'clarify' | 'error';
 };
 
 export type GoldenCase = {
