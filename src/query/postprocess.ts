@@ -186,6 +186,7 @@ const DIRECTORY_PATH_RE = /^[a-zA-Z0-9_-]+(\/[a-zA-Z0-9_-]+)*\/$/;
 // authored without a scheme — URL_SCHEME_RE only covers fully qualified
 // URLs. Codex round-9 surfaced this on Hermes API examples.
 const API_PATH_RE = /^\/[a-zA-Z0-9_-]+(\/[a-zA-Z0-9_.:~-]+)+\/?$/;
+const HTTP_METHOD_API_PATH_RE = /^(GET|POST|PUT|PATCH|DELETE)\s+\/[a-zA-Z0-9_-]+(\/[a-zA-Z0-9_.:~-]+)+\/?$/i;
 // Dash-connected compound names (≥2 segments, each ≥2 alphanumeric chars).
 // Theme names (`blueprint-review`, `classic-docs`, `atlas-docs`), npm
 // packages, docker image names, model identifiers (`bge-m3`) all fit this
@@ -211,6 +212,7 @@ function isClearlyTechnicalIdentifier(body: string): boolean {
   if (WELL_KNOWN_FILE_NAMES.has(body.toLowerCase())) return true;
   if (DOTTED_CONFIG_KEY_RE.test(body)) return true;
   if (DIRECTORY_PATH_RE.test(body)) return true;
+  if (HTTP_METHOD_API_PATH_RE.test(body)) return true;
   if (API_PATH_RE.test(body)) return true;
   if (DASH_NAME_RE.test(body)) return true;
   return false;

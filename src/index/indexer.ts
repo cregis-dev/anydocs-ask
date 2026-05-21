@@ -28,7 +28,7 @@ import { resolve } from 'node:path';
 import { loadProject, type LoadedProject } from '../anydocs/loader.ts';
 import { projectStructure } from '../structure/project.ts';
 import { upsertPages } from '../structure/upsert.ts';
-import { chunkPage, type ChunkInput } from '../content/chunk.ts';
+import { chunkPage, type ChunkInput, type ChunkPageOptions } from '../content/chunk.ts';
 import { upsertChunksForPage } from '../content/upsert.ts';
 import { classifyPath } from './paths.ts';
 import type { DbHandle } from '../db/index.ts';
@@ -62,17 +62,22 @@ export type IndexerOptions = {
   db: DbHandle;
   embedder: Embedder;
   projectRoot: string;
+  /** Per-call chunk options forwarded to chunkPage. Tests / default callers
+   *  can omit; production wiring in Runtime passes config.indexing.chunkMaxTokens. */
+  chunkOptions?: ChunkPageOptions;
 };
 
 export class Indexer {
   private readonly db: DbHandle;
   private readonly embedder: Embedder;
   private readonly projectRoot: string;
+  private readonly chunkOptions: ChunkPageOptions;
 
   constructor(opts: IndexerOptions) {
     this.db = opts.db;
     this.embedder = opts.embedder;
     this.projectRoot = resolve(opts.projectRoot);
+    this.chunkOptions = opts.chunkOptions ?? {};
   }
 
   /**
@@ -103,7 +108,7 @@ export class Indexer {
       const [pageId, lang] = splitKey(key);
       const pageDoc = pickPage(project, lang as DocsLang, pageId);
       if (!pageDoc) continue;
-      const chunks = chunkPage(pageDoc);
+      const chunks = chunkPage(pageDoc, this.chunkOptions);
       // decideChunkWrite will always return 'write' after clearAllChunks, but
       // we keep the call so applyChanges (which doesn't clear) stays on the
       // same code path without a flag.
@@ -186,7 +191,7 @@ export class Indexer {
         if (!affectedLangs.has(row.lang as DocsLang)) continue;
         const pageDoc = pickPage(project, row.lang as DocsLang, row.page_id);
         if (!pageDoc) continue;
-        const chunks = chunkPage(pageDoc);
+        const chunks = chunkPage(pageDoc, this.chunkOptions);
         const decision = this.decideChunkWrite(row.page_id, row.lang, chunks);
         if (decision === 'skip') {
           skippedPages++;

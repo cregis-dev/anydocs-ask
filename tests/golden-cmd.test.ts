@@ -10,7 +10,7 @@ import { promises as fs } from 'node:fs';
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runGoldenGenerate, runGoldenReview } from '../src/commands/golden.ts';
+import { runGoldenGenerate, runGoldenImport, runGoldenReview } from '../src/commands/golden.ts';
 import { goldenPaths, readApproved, readCandidates } from '../src/golden/store.ts';
 
 async function buildProject(): Promise<{ root: string; cleanup: () => Promise<void> }> {
@@ -52,6 +52,26 @@ async function buildProject(): Promise<{ root: string; cleanup: () => Promise<vo
     JSON.stringify({ llm: { provider: 'mock', model: 'mock-llm', apiKeyEnv: 'NONE' } }),
   );
   return { root, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
+}
+
+function manualCase(id: string, query: string) {
+  return {
+    id,
+    query,
+    filters: {},
+    context_pageId: null,
+    expected: {
+      must_cite_pages: ['jwt'],
+      must_contain: ['JWT'],
+      forbid_contain: [],
+      expected_kind: 'answer',
+    },
+    tags: ['manual'],
+    created_by: 'manual',
+    reviewed_at: '2026-05-21T00:00:00.000Z',
+    reviewer: 'test',
+    lang: 'zh',
+  };
 }
 
 function captureIo<T>(fn: () => Promise<T> | T): {
@@ -391,6 +411,68 @@ test('golden generate --from runs --include-console: pulls in console-origin run
     assert.doesNotMatch(out, /excluded.*console-origin/);
     const candidates = readCandidates(root).rows;
     assert.equal(candidates.length, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('golden import --replace syncs a source-controlled jsonl into cases.jsonl', async () => {
+  const { root, cleanup } = await buildProject();
+  try {
+    await fs.mkdir(join(root, 'eval'), { recursive: true });
+    await fs.writeFile(
+      join(root, 'eval', 'cases.jsonl'),
+      [manualCase('manual-1', 'JWT 怎么续期？'), manualCase('manual-2', 'JWT 怎么鉴权？')]
+        .map((r) => JSON.stringify(r))
+        .join('\n') + '\n',
+    );
+
+    const { promise, reset } = captureIo(() =>
+      runGoldenImport({
+        projectRoot: root,
+        stateRoot: root,
+        file: 'eval/cases.jsonl',
+        replace: true,
+      }),
+    );
+    const code = await promise;
+    const { out } = reset();
+    assert.equal(code, 0);
+    assert.match(out, /replaced 2 cases/);
+
+    const approved = readApproved(root);
+    assert.equal(approved.rows.length, 2);
+    assert.equal(approved.rows[0]!.id, 'manual-1');
+    assert.equal(approved.rows[1]!.id, 'manual-2');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('golden import rejects malformed or invalid jsonl', async () => {
+  const { root, cleanup } = await buildProject();
+  try {
+    await fs.mkdir(join(root, 'eval'), { recursive: true });
+    await fs.writeFile(
+      join(root, 'eval', 'bad.jsonl'),
+      JSON.stringify(manualCase('manual-1', 'JWT 怎么续期？')) + '\n' +
+        '{"id":"bad"}\n' +
+        '{not-json}\n',
+    );
+
+    const { promise, reset } = captureIo(() =>
+      runGoldenImport({
+        projectRoot: root,
+        stateRoot: root,
+        file: 'eval/bad.jsonl',
+        replace: true,
+      }),
+    );
+    const code = await promise;
+    const { err } = reset();
+    assert.equal(code, 1);
+    assert.match(err, /malformed JSON line/);
+    assert.equal(readApproved(root).rows.length, 0);
   } finally {
     await cleanup();
   }

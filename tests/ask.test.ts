@@ -337,6 +337,503 @@ test('ask: first call succeeds → no retry, trace count is 0', async () => {
   }
 });
 
+test('ask: API-intent questions promote API reference snippets into the prompt', async () => {
+  const ctx = await bootstrap(async (root) => {
+    const guideItems: Array<{ type: 'page'; pageId: string }> = [];
+    for (let i = 0; i < 12; i++) {
+      const id = `checkout-guide-${i}`;
+      guideItems.push({ type: 'page', pageId: id });
+      await writePage(root, 'zh', {
+        id,
+        title: `创建订单指南 ${i}`,
+        body: '创建订单接口 checkout 返回字段 checkout checkout checkout guide 快速接入说明。',
+      });
+    }
+    await writePage(root, 'zh', {
+      id: 'api-payment-engine-api-post-api-v2-checkout',
+      title: 'POST /api/v2/checkout — 创建订单',
+      body: 'API reference: Payment Engine API. HTTP Request POST /api/v2/checkout. Response fields: checkout_url, cregis_id.',
+    });
+    await writeNav(root, 'zh', {
+      version: 1,
+      items: [
+        { type: 'section', id: 'payment-engine', title: '支付引擎', children: guideItems },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API 参考',
+          children: [{ type: 'page', pageId: 'api-payment-engine-api-post-api-v2-checkout' }],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.systemPrompt, /API reference/);
+      assert.match(input.systemPrompt, /完整接口路径/);
+      assert.match(input.userPrompt, /POST \/api\/v2\/checkout/);
+      const markers = input.userPrompt.match(/\[cit_\d+\]/g) ?? [];
+      return `调用 /api/v2/checkout 后保存 checkout_url 和 cregis_id ${markers[0] ?? ''}.`;
+    });
+    const r = await ask(ctx, { question: '创建订单接口 checkout 返回哪些字段？' });
+    assert.equal(r.type, 'answer');
+    if (r.type === 'answer') {
+      assert.ok(
+        r.citations.some((c) => c.page_id === 'api-payment-engine-api-post-api-v2-checkout'),
+        'answer should cite the API reference page',
+      );
+    }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: API-intent questions keep same-product API reference snippets in prompt context', async () => {
+  const ctx = await bootstrap(async (root) => {
+    const guideItems: Array<{ type: 'page'; pageId: string }> = [];
+    for (let i = 0; i < 12; i++) {
+      const id = `payment-engine-callback-guide-${i}`;
+      guideItems.push({ type: 'page', pageId: id });
+      await writePage(root, 'zh', {
+        id,
+        title: `支付引擎回调指南 ${i}`,
+        body: '支付引擎回调 event_type data.status 查询订单状态 状态映射 幂等 处理说明。',
+      });
+    }
+    await writePage(root, 'zh', {
+      id: 'api-payment-engine-api-post-api-v2-order-info',
+      title: 'POST /api/v2/order/info — 查询订单信息',
+      body: 'API reference: Payment Engine API. HTTP Request POST /api/v2/order/info. Response fields: data.status, order_amount.',
+    });
+    await writePage(root, 'zh', {
+      id: 'api-waas-api-post-api-v1-address-update',
+      title: 'POST /api/v1/address/update — 更新子地址信息',
+      body: 'API reference: WaaS API. HTTP Request POST /api/v1/address/update. Response fields: data.status.',
+    });
+    await writeNav(root, 'zh', {
+      version: 1,
+      items: [
+        { type: 'section', id: 'payment-engine', title: '支付引擎', children: guideItems },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API 参考',
+          children: [
+            { type: 'page', pageId: 'api-payment-engine-api-post-api-v2-order-info' },
+            { type: 'page', pageId: 'api-waas-api-post-api-v1-address-update' },
+          ],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.userPrompt, /POST \/api\/v2\/order\/info/, input.userPrompt);
+      assert.doesNotMatch(input.userPrompt, /POST \/api\/v1\/address\/update/, input.userPrompt);
+      const markers = input.userPrompt.match(/\[cit_\d+\]/g) ?? [];
+      return `查询订单终态看 /api/v2/order/info 的 data.status ${markers[0] ?? ''}.`;
+    });
+    const r = await ask(ctx, {
+      question: '支付引擎回调里的 event_type 和查询订单返回的 data.status 为什么名字不一样？',
+      context: { current_page_id: 'payment-engine-callback-guide-0' },
+    });
+    assert.equal(r.type, 'answer', JSON.stringify(r));
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: API-intent answers append matching API reference citation when the model cites only guide chunks', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', {
+      id: 'payment-engine-quickstart-30min',
+      title: '支付引擎 30 分钟接入实战',
+      body: '状态口径对照：回调的 event_type 是事件类型，并需要做状态映射；查询接口返回 data.status 表示当前状态；处理重复回调要做好幂等。',
+    });
+    await writePage(root, 'zh', {
+      id: 'api-payment-engine-api-post-api-v2-order-info',
+      title: 'POST /api/v2/order/info — 查询订单信息',
+      body: 'API reference: Payment Engine API. HTTP Request POST /api/v2/order/info. Response fields: data.status.',
+    });
+    await writeNav(root, 'zh', {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'payment-engine',
+          title: '支付引擎',
+          children: [{ type: 'page', pageId: 'payment-engine-quickstart-30min' }],
+        },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API 参考',
+          children: [{ type: 'page', pageId: 'api-payment-engine-api-post-api-v2-order-info' }],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.userPrompt, /POST \/api\/v2\/order\/info/);
+      const guideMarker = input.userPrompt.match(/\[(cit_\d+)\][^\n]*支付引擎 30 分钟接入实战/)?.[1] ?? 'cit_2';
+      return `回调事件类型 event_type 需要做状态映射，查询看 data.status，并且重复回调要做好幂等 [${guideMarker}]。`;
+    });
+    const r = await ask(ctx, {
+      question: '支付引擎回调里的 event_type 和查询订单返回的 data.status 为什么名字不一样？应该怎么处理？',
+      context: { current_page_id: 'payment-engine-quickstart-30min' },
+    });
+    assert.equal(r.type, 'answer', JSON.stringify(r));
+    if (r.type === 'answer') {
+      assert.ok(r.answer_md.includes('/api/v2/order/info'));
+      assert.ok(r.citations.some((c) => c.page_id === 'api-payment-engine-api-post-api-v2-order-info'));
+      assert.ok(r.citations.some((c) => c.page_id === 'payment-engine-quickstart-30min'));
+    }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: WaaS payout flow defaults API reference context to v1 when no v2 is requested', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', {
+      id: 'waas-quickstart-30min',
+      title: 'WaaS 30 分钟接入实战',
+      body: 'WaaS API 出款流程：发起提币后保存 cid，并通过回调 callback 接收结果，也可以查询最终状态。',
+    });
+    await writePage(root, 'zh', {
+      id: 'api-waas-api-post-api-v1-payout',
+      title: 'POST /api/v1/payout — 发起钱包提币',
+      body: 'API reference: WaaS API. HTTP Request POST /api/v1/payout. Response fields: cid.',
+    });
+    await writePage(root, 'zh', {
+      id: 'api-waas-api-post-api-v1-payout-query',
+      title: 'POST /api/v1/payout/query — 查询钱包提币信息',
+      body: 'API reference: WaaS API. HTTP Request POST /api/v1/payout/query. Request field cid. Response fields: status.',
+    });
+    await writePage(root, 'zh', {
+      id: 'api-waas-api-post-api-v2-payout',
+      title: 'POST /api/v2/payout — 发起钱包提币（v2）',
+      body: 'API reference: WaaS API. HTTP Request POST /api/v2/payout. Response fields: request_id.',
+    });
+    const decoyApiPages = [
+      ['api-waas-api-post-api-v1-coins', 'POST /api/v1/coins — 查询项目支持币种', 'API reference: WaaS API. HTTP Request POST /api/v1/coins.'],
+      ['api-waas-api-post-api-v1-collection', 'POST /api/v1/collection — 发起资金归集', 'API reference: WaaS API. HTTP Request POST /api/v1/collection.'],
+      ['api-waas-api-post-api-v1-address-create', 'POST /api/v1/address/create — 创建子地址', 'API reference: WaaS API. HTTP Request POST /api/v1/address/create.'],
+      ['api-waas-api-post-api-v1-batch-address-create', 'POST /api/v1/batch/address/create — 批量创建子地址', 'API reference: WaaS API. HTTP Request POST /api/v1/batch/address/create.'],
+    ] as const;
+    for (const [id, title, body] of decoyApiPages) {
+      await writePage(root, 'zh', { id, title, body });
+    }
+    await writeNav(root, 'zh', {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'waas',
+          title: 'WaaS 钱包',
+          children: [{ type: 'page', pageId: 'waas-quickstart-30min' }],
+        },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API 参考',
+          children: [
+            { type: 'page', pageId: 'api-waas-api-post-api-v1-payout' },
+            { type: 'page', pageId: 'api-waas-api-post-api-v1-payout-query' },
+            { type: 'page', pageId: 'api-waas-api-post-api-v2-payout' },
+            ...decoyApiPages.map(([id]) => ({ type: 'page' as const, pageId: id })),
+          ],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.userPrompt, /POST \/api\/v1\/payout/);
+      assert.match(input.userPrompt, /POST \/api\/v1\/payout\/query/);
+      assert.doesNotMatch(input.userPrompt, /POST \/api\/v2\/payout/);
+      assert.doesNotMatch(input.userPrompt, /POST \/api\/v1\/coins/);
+      assert.match(input.userPrompt, /cid/);
+      assert.match(input.userPrompt, /callback/);
+      assert.match(input.userPrompt, /WaaS API 出款流程/);
+      const markers = input.userPrompt.match(/\[cit_\d+\]/g) ?? [];
+      return `先调用 /api/v1/payout 保存 cid，再用 /api/v1/payout/query 查询最终状态，回调 callback 也要做幂等 ${markers[0] ?? ''}.`;
+    });
+    const { result: r, trace } = await askWithTrace(ctx, {
+      question: 'WaaS API 出款最小流程是什么？发起后用哪个接口查询最终状态？',
+      context: { current_page_id: 'waas-quickstart-30min' },
+    });
+    assert.equal(r.type, 'answer', JSON.stringify(r));
+    const top5Pages = [...new Set(trace.fused.slice(0, 5).map((c) => c.page_id))];
+    assert.ok(
+      top5Pages.includes('waas-quickstart-30min'),
+      `current page guide should survive API-heavy retrieval top5; got ${top5Pages.join(', ')}`,
+    );
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: non-API signature questions keep unrelated API reference chunks out of prompt', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', {
+      id: 'authentication',
+      title: '认证与签名',
+      body: 'Cregis API 签名规则：将参数按字典序升序排列，sign 字段不参与签名计算，最后追加 API Key 做 MD5。',
+    });
+    await writePage(root, 'zh', {
+      id: 'api-payment-engine-api-post-api-v2-order-info',
+      title: 'POST /api/v2/order/info — 查询订单信息',
+      body: 'API reference: Payment Engine API. HTTP Request POST /api/v2/order/info. Request field sign is required.',
+    });
+    await writePage(root, 'zh', {
+      id: 'api-waas-api-post-api-v1-payout-query',
+      title: 'POST /api/v1/payout/query — 查询提币',
+      body: 'API reference: WaaS API. HTTP Request POST /api/v1/payout/query. Request field sign is required.',
+    });
+    await writeNav(root, 'zh', {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'get-started',
+          title: '快速入门',
+          children: [{ type: 'page', pageId: 'authentication' }],
+        },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API 参考',
+          children: [
+            { type: 'page', pageId: 'api-payment-engine-api-post-api-v2-order-info' },
+            { type: 'page', pageId: 'api-waas-api-post-api-v1-payout-query' },
+          ],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.userPrompt, /认证与签名/);
+      assert.match(input.userPrompt, /API Key/);
+      assert.doesNotMatch(input.userPrompt, /\/api\/v2\/order\/info/);
+      assert.doesNotMatch(input.userPrompt, /\/api\/v1\/payout\/query/);
+      return '签名时按字典序升序排列参数，排除 sign 字段，最后追加 API Key 做 MD5 [cit_1]。';
+    });
+    const r = await ask(ctx, {
+      question: 'Cregis API 签名应该怎么拼接参数？sign 字段本身要不要参与签名？',
+      context: { current_page_id: 'authentication' },
+    });
+    assert.equal(r.type, 'answer', JSON.stringify(r));
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: short signature questions answer from authentication without current-page context', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', {
+      id: 'authentication',
+      title: '认证与签名',
+      body: 'Cregis API 签名规则：将参数按字典序升序排列，sign 字段不参与签名计算，最后追加 API Key 做 MD5。',
+    });
+    await writePage(root, 'zh', {
+      id: 'webhook-mechanism',
+      title: 'Webhook 回调机制',
+      body: 'Webhook 回调需要验签，并返回 HTTP 200 和 success。',
+    });
+    await writePage(root, 'zh', {
+      id: 'waas-setup',
+      title: 'WaaS 接入准备',
+      body: 'WaaS API 项目需要准备 API Key、Base URL 和 Project ID。',
+    });
+    await writePage(root, 'zh', {
+      id: 'payment-engine-setup',
+      title: '支付引擎接入准备',
+      body: '支付引擎项目需要准备 API Key、Base URL 和 Project ID。',
+    });
+    await writePage(root, 'zh', {
+      id: 'api-payment-engine-api-post-api-v2-order-info',
+      title: 'POST /api/v2/order/info — 查询订单信息',
+      body: 'API reference: Payment Engine API. HTTP Request POST /api/v2/order/info. Request field sign is required.',
+    });
+    await writePage(root, 'zh', {
+      id: 'api-waas-api-post-api-v1-payout-query',
+      title: 'POST /api/v1/payout/query — 查询提币',
+      body: 'API reference: WaaS API. HTTP Request POST /api/v1/payout/query. Request field sign is required.',
+    });
+    await writeNav(root, 'zh', {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'quickstart',
+          title: '快速入门',
+          children: [
+            { type: 'page', pageId: 'authentication' },
+            { type: 'page', pageId: 'webhook-mechanism' },
+          ],
+        },
+        {
+          type: 'section',
+          id: 'waas',
+          title: 'WaaS 钱包',
+          children: [{ type: 'page', pageId: 'waas-setup' }],
+        },
+        {
+          type: 'section',
+          id: 'payment-engine',
+          title: '支付引擎',
+          children: [{ type: 'page', pageId: 'payment-engine-setup' }],
+        },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API 参考',
+          children: [
+            { type: 'page', pageId: 'api-payment-engine-api-post-api-v2-order-info' },
+            { type: 'page', pageId: 'api-waas-api-post-api-v1-payout-query' },
+          ],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.userPrompt, /认证与签名/);
+      assert.match(input.userPrompt, /字典序升序排列/);
+      assert.doesNotMatch(input.userPrompt, /\/api\/v2\/order\/info/);
+      assert.doesNotMatch(input.userPrompt, /\/api\/v1\/payout\/query/);
+      return 'Cregis API 签名参数需要按字典序升序排列，排除 sign 字段，最后追加 API Key 做 MD5 [cit_1]。';
+    });
+    const { result: r, trace } = await askWithTrace(ctx, {
+      question: 'Cregis API 签名应该怎么拼接参数？',
+    });
+    assert.equal(r.type, 'answer', JSON.stringify(r));
+    assert.equal(trace.subtree_ask_triggered, false);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: English crypto order questions promote checkout API reference snippets', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'en', {
+      id: 'supported-currencies',
+      title: 'Supported Currencies',
+      body: 'Order currencies: crypto can be used directly as the order currency. Set order_currency to USDT and order_amount to the crypto amount. CoinMarketCap conversion is not needed when the amount is already denominated in crypto.',
+    });
+    for (let i = 0; i < 10; i++) {
+      await writePage(root, 'en', {
+        id: `payment-engine-guide-${i}`,
+        title: `Payment Engine Guide ${i}`,
+        body: 'Payment Engine guide content about callbacks, checkout, order status, and common troubleshooting.',
+      });
+    }
+    await writePage(root, 'en', {
+      id: 'api-payment-engine-api-post-api-v2-checkout',
+      title: 'POST /api/v2/checkout — Create Order',
+      body: 'API reference: Payment Engine API. HTTP Request POST /api/v2/checkout. Request fields: order_currency, order_amount, tokens.',
+    });
+    await writeNav(root, 'en', {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'payment-engine',
+          title: 'Payment Engine',
+          children: [
+            { type: 'page', pageId: 'supported-currencies' },
+            ...Array.from({ length: 10 }, (_, i) => ({ type: 'page' as const, pageId: `payment-engine-guide-${i}` })),
+          ],
+        },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API Reference',
+          children: [{ type: 'page', pageId: 'api-payment-engine-api-post-api-v2-checkout' }],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.systemPrompt, /API reference/);
+      assert.match(input.userPrompt, /POST \/api\/v2\/checkout/);
+      assert.match(input.userPrompt, /order_currency/);
+      assert.match(input.userPrompt, /order_amount/);
+      const apiMarker = input.userPrompt.match(/\[(cit_\d+)\][^\n]*Create Order/)?.[1] ?? 'cit_1';
+      return `Yes. Set order_currency to USDT and order_amount to the crypto amount when calling /api/v2/checkout [${apiMarker}].`;
+    });
+    const r = await ask(ctx, {
+      question: 'Can I create a Payment Engine order directly in USDT if my system already calculated the FX price?',
+      context: { current_page_id: 'supported-currencies' },
+    });
+    assert.equal(r.type, 'answer', JSON.stringify(r));
+    if (r.type === 'answer') {
+      assert.ok(r.citations.some((c) => c.page_id === 'api-payment-engine-api-post-api-v2-checkout'));
+    }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: project setup questions avoid quickstart citations when setup pages answer directly', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'en', {
+      id: 'payment-engine-setup',
+      title: 'Payment Engine Integration Setup',
+      body: 'A Payment Engine project is mainly used for collections, orders, checkout, and payment callbacks. If your integration also includes API payouts, withdrawals, addresses, or wallet operations, create a WaaS API project and retrieve its API Key and project parameters as well.',
+    });
+    await writePage(root, 'en', {
+      id: 'waas-setup',
+      title: 'WaaS Wallet Integration Setup',
+      body: 'Create a WaaS API project for payout, withdrawal, address, and wallet operations.',
+    });
+    await writePage(root, 'en', {
+      id: 'payment-engine-quickstart-30min',
+      title: 'Payment Engine 30-Minute Quickstart',
+      body: 'Quickstart callback_url setup for Payment Engine orders and checkout flow.',
+    });
+    await writeNav(root, 'en', {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'payment-engine',
+          title: 'Payment Engine',
+          children: [
+            { type: 'page', pageId: 'payment-engine-setup' },
+            { type: 'page', pageId: 'payment-engine-quickstart-30min' },
+          ],
+        },
+        {
+          type: 'section',
+          id: 'waas',
+          title: 'WaaS',
+          children: [{ type: 'page', pageId: 'waas-setup' }],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.userPrompt, /Payment Engine Integration Setup/);
+      assert.match(input.userPrompt, /WaaS Wallet Integration Setup/);
+      assert.doesNotMatch(input.userPrompt, /Payment Engine 30-Minute Quickstart/);
+      return 'Use Payment Engine for orders and checkout, and also create a WaaS API project for payout or withdrawals [cit_1].';
+    });
+    const r = await ask(ctx, {
+      question: 'For API payout or withdrawals, do I only need a Payment Engine project, or should I also create a WaaS API project?',
+      context: { current_page_id: 'payment-engine-setup' },
+    });
+    assert.equal(r.type, 'answer', JSON.stringify(r));
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // PRD §8 #11 — cross-lang translation fallback
 // ---------------------------------------------------------------------------

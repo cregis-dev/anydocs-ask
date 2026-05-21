@@ -31,6 +31,16 @@ import { sanitizeFtsQuery } from './sanitize.ts';
 import { retrieveWithTrace, type RetrievalTrace, type RetrievedChunk } from './retrieval.ts';
 import { computeTitleMatches } from './rerank.ts';
 import { rerank, lookupSubtreeRoot, type RerankedChunk } from './rerank.ts';
+import {
+  apiReferenceChunkMatchesVersion,
+  apiReferencePagePrefixFor,
+  apiReferenceSearchHints,
+  apiReferenceVersionPreferences,
+  detectProjectSetupIntent,
+  detectApiIntent,
+  detectSignatureAuthIntent,
+  isApiReferenceChunk,
+} from './api-intent.ts';
 import { aggregate, TOP_K_FOR_AGGREGATION, type AggregateOutcome, type SubtreeShare } from './aggregate.ts';
 import { buildPrompt, detectFormatHint } from './prompt.ts';
 import { postprocess } from './postprocess.ts';
@@ -196,26 +206,48 @@ async function askWithTraceInternal(
   // 3. Hybrid retrieve.
   throwIfAborted(hooks.signal);
   await hooks.onStatus?.('retrieving');
+  const apiIntent = detectApiIntent(question);
+  const signatureAuthIntent = detectSignatureAuthIntent(question);
+  const currentSubtreeRoot = req.context?.current_page_id
+    ? lookupSubtreeRoot(deps.db, req.context.current_page_id, queryLang)
+    : null;
   const queryVector = (await deps.embedder.embed([question]))[0]!.vector;
   throwIfAborted(hooks.signal);
   const ftsQuery = sanitizeFtsQuery(question);
   const entityTerms = extractEntityTerms(question);
+  const projectSetupIntent = detectProjectSetupIntent(question);
+  const apiReferenceHints = apiReferenceSearchHints(question);
+  const apiReferenceVersionPrefs = apiReferenceVersionPreferences(question);
+  const apiReferenceHintTerms = apiReferenceHints
+    .flatMap((hint) => hint.toLowerCase().split(/\s+/))
+    .filter(Boolean);
+  const apiReferenceFtsQueries = apiReferenceHints
+    .map((hint) => sanitizeFtsQuery(hint))
+    .filter((hint): hint is string => !!hint);
+  const apiReferencePagePrefix = apiReferencePagePrefixFor(currentSubtreeRoot);
   const { chunks: retrieved, trace: retrievalTrace } = retrieveWithTrace(deps.db, {
     queryVector,
     ftsQuery,
     scopeId,
     entityTerms,
+    currentPageId: req.context?.current_page_id ?? null,
+    currentPageLang: queryLang,
+    apiIntent,
+    apiReferenceFtsQueries,
+    apiReferencePagePrefix,
   });
 
   // 4. Rerank.
-  const currentSubtreeRoot = req.context?.current_page_id
-    ? lookupSubtreeRoot(deps.db, req.context.current_page_id, queryLang)
-    : null;
   const reranked = rerank(retrieved, {
     queryLang,
     currentSubtreeRoot,
+    currentPageId: req.context?.current_page_id ?? null,
     query: question,
     entityTerms,
+    apiIntent,
+    apiReferenceHintTerms,
+    apiReferenceVersionPrefs,
+    apiReferencePagePrefix,
   });
 
   const fusedTrace = buildFusedTrace(reranked, retrievalTrace);
@@ -225,14 +257,18 @@ async function askWithTraceInternal(
   // 5. Aggregate.
   // Derive title-match subtrees so aggregate can skip clarify when the user's
   // query explicitly names a page.
+  const aggregationCandidates = pickAggregationCandidates(reranked, {
+    apiIntent,
+    signatureAuthIntent,
+  });
   const titleMatchedPageIds = computeTitleMatches(retrieved, question);
   const titleMatchedSubtrees = new Set<string>();
-  for (const c of reranked) {
+  for (const c of aggregationCandidates) {
     if (titleMatchedPageIds.has(c.page_id) && c.subtree_root) {
       titleMatchedSubtrees.add(c.subtree_root);
     }
   }
-  const outcome = aggregate(reranked, { queryLang, currentSubtreeRoot, titleMatchedSubtrees });
+  const outcome = aggregate(aggregationCandidates, { queryLang, currentSubtreeRoot, titleMatchedSubtrees });
 
   if (outcome.kind === 'clarify') {
     return {
@@ -251,7 +287,16 @@ async function askWithTraceInternal(
 
   // 6 + 7. Generate + postprocess.
   const isCrossLang = outcome.kind === 'translate-fallback';
-  const pickedChunks = pickContextChunks(outcome, req.options?.max_chunks, entityTerms);
+  const pickedChunks = pickContextChunks(outcome, req.options?.max_chunks, entityTerms, {
+    apiIntent,
+    apiReferenceCandidates: reranked,
+    apiReferenceHintTerms,
+    apiReferencePagePrefix,
+    apiReferenceVersionPrefs,
+    currentPageId: req.context?.current_page_id ?? null,
+    projectSetupIntent,
+    queryLang,
+  });
   const formatHint = detectFormatHint(question);
   const prompt = buildPrompt({
     question,
@@ -306,7 +351,11 @@ async function askWithTraceInternal(
 
   let post = postprocess({
     answerLang: queryLang,
-    rawAnswer: llmOutput.text,
+    rawAnswer: withMandatoryApiReferenceCitation(llmOutput.text, prompt.chunkById, {
+      apiIntent,
+      apiReferenceHintTerms,
+      answerLang: queryLang,
+    }),
     chunkById: prompt.chunkById,
     question,
   });
@@ -334,7 +383,11 @@ async function askWithTraceInternal(
         const retryOutput = await deps.llm.generate(retryInput);
         const retryPost = postprocess({
           answerLang: queryLang,
-          rawAnswer: retryOutput.text,
+          rawAnswer: withMandatoryApiReferenceCitation(retryOutput.text, prompt.chunkById, {
+            apiIntent,
+            apiReferenceHintTerms,
+            answerLang: queryLang,
+          }),
           chunkById: prompt.chunkById,
           question,
         });
@@ -474,6 +527,32 @@ function navIndexBoostForTrace(navIndex: number | null): number {
   return 0.1 * (1 / Math.log(navIndex + 2));
 }
 
+function preferNonApiContext(chunks: RerankedChunk[]): RerankedChunk[] {
+  const nonApi = chunks.filter((c) => !isApiReferenceChunk(c));
+  return nonApi.length > 0 ? nonApi : chunks;
+}
+
+function pickAggregationCandidates(
+  chunks: RerankedChunk[],
+  opts: { apiIntent: boolean; signatureAuthIntent: boolean },
+): RerankedChunk[] {
+  const allowApiReference = opts.apiIntent;
+  const pool = allowApiReference ? chunks : preferNonApiContext(chunks);
+  if (allowApiReference) return pool;
+  const nonApi = pool;
+  if (!opts.signatureAuthIntent) return nonApi;
+  const signatureContext = nonApi.filter(isSignatureAuthContext);
+  return signatureContext.length > 0 ? signatureContext : nonApi;
+}
+
+function isSignatureAuthContext(c: RerankedChunk): boolean {
+  const haystack = `${c.page_id} ${c.page_title} ${c.text}`.toLowerCase();
+  return (
+    /signature|sign field|md5|authentication|authenticate|auth|webhook/.test(haystack) ||
+    /签名|验签|认证|鉴权|字典序|升序/.test(haystack)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Step helpers
 // ---------------------------------------------------------------------------
@@ -501,6 +580,62 @@ function resolveQueryLang(db: DbHandle, question: string, req: AskRequest): Docs
   return detectLangFromText(question);
 }
 
+const CITATION_MARKER_IN_ANSWER = /\[(cit_\d+)\]/g;
+
+function withMandatoryApiReferenceCitation(
+  rawAnswer: string,
+  chunkById: Map<string, RerankedChunk>,
+  opts: {
+    apiIntent: boolean;
+    apiReferenceHintTerms: string[];
+    answerLang: DocsLang;
+  },
+): string {
+  if (!opts.apiIntent) return rawAnswer;
+  const citedIds = new Set([...rawAnswer.matchAll(CITATION_MARKER_IN_ANSWER)].map((m) => m[1]!));
+  const matchingApiRefs = [...chunkById.entries()]
+    .filter(([, chunk]) => isApiReferenceChunk(chunk))
+    .filter(([, chunk]) => apiReferenceMatchesHints(chunk, opts.apiReferenceHintTerms));
+  if (matchingApiRefs.length === 0) return rawAnswer;
+  if (matchingApiRefs.some(([id]) => citedIds.has(id))) return rawAnswer;
+  if (!rawAnswerHasApiAnswerSubstance(rawAnswer, opts.apiReferenceHintTerms)) return rawAnswer;
+
+  const [id, chunk] = matchingApiRefs[0]!;
+  const endpoint = extractEndpointForMandatoryCitation(chunk);
+  const suffix = opts.answerLang === 'zh'
+    ? `\n\nAPI reference：${endpoint ? `\`${endpoint}\` ` : ''}[${id}]。`
+    : `\n\nAPI reference: ${endpoint ? `\`${endpoint}\` ` : ''}[${id}].`;
+  return rawAnswer.trimEnd() + suffix;
+}
+
+function extractEndpointForMandatoryCitation(chunk: RerankedChunk): string | null {
+  const text = `${chunk.page_title}\n${chunk.text}`;
+  const match = text.match(/\b(GET|POST|PUT|PATCH|DELETE)\b\s+`?(\/api\/[A-Za-z0-9_./{}:-]+)/i);
+  if (!match) return null;
+  return `${match[1]!.toUpperCase()} ${match[2]!}`;
+}
+
+function rawAnswerHasApiAnswerSubstance(rawAnswer: string, terms: string[]): boolean {
+  const text = rawAnswer.toLowerCase();
+  if (terms.includes('checkout')) {
+    return /\border_currency\b/i.test(rawAnswer) ||
+      /\border_amount\b/i.test(rawAnswer) ||
+      /\busdt\b/i.test(rawAnswer) ||
+      /\bcrypto(?:currency)?\b/i.test(rawAnswer) ||
+      /\b(?:coinmarketcap|cmc)\b/i.test(rawAnswer);
+  }
+  if (terms.includes('order') && terms.includes('info') && terms.includes('status')) {
+    return (
+      /\bevent_type\b/i.test(rawAnswer) &&
+      (/\bdata\.status\b/i.test(rawAnswer) || /状态映射|当前状态/.test(rawAnswer))
+    );
+  }
+  if (terms.includes('payout')) {
+    return /\bpayout\b|\bwithdrawal\b|\bcid\b|提币|出款|提现/i.test(rawAnswer);
+  }
+  return text.trim().length >= 80;
+}
+
 function isValidScopeId(db: DbHandle, scopeId: string): boolean {
   const row = db
     .prepare(`SELECT 1 AS hit FROM pages WHERE subtree_root = ? AND status = 'published' LIMIT 1`)
@@ -512,6 +647,16 @@ function pickContextChunks(
   outcome: AggregateOutcome,
   clientMax: number | undefined,
   entityTerms: string[] | undefined,
+  opts: {
+    apiIntent?: boolean;
+    apiReferenceCandidates?: RerankedChunk[];
+    apiReferenceHintTerms?: string[];
+    apiReferencePagePrefix?: string | null;
+    apiReferenceVersionPrefs?: string[];
+    currentPageId?: string | null;
+    projectSetupIntent?: boolean;
+    queryLang?: DocsLang;
+  } = {},
 ): RerankedChunk[] {
   // Multi-entity queries need more headroom in the prompt context — each
   // named concept must have at least one supporting chunk reach the LLM,
@@ -530,6 +675,73 @@ function pickContextChunks(
     outcome.kind === 'translate-fallback'
       ? outcome.pick.slice(0, cap)
       : outcome.pick.slice(0, cap);
+
+  if (!opts.apiIntent) {
+    const nonApiPicked = picked.filter((c) => !isApiReferenceChunk(c));
+    if (nonApiPicked.length > 0) {
+      picked = nonApiPicked;
+    }
+  }
+
+  if (opts.projectSetupIntent) {
+    picked = preferProjectSetupContext(picked, opts.apiReferenceCandidates, opts.queryLang, cap);
+  }
+
+  if (opts.apiIntent && opts.apiReferenceCandidates?.length) {
+    const apiContextLimit = apiReferenceContextLimit(opts.apiReferenceHintTerms);
+    const allApiRefs = [...opts.apiReferenceCandidates]
+      .filter((c) => c.lang === opts.queryLang && isApiReferenceChunk(c))
+      .filter((c) => !opts.apiReferencePagePrefix || c.page_id.startsWith(opts.apiReferencePagePrefix));
+    const hasVersionPreferredApiRef = allApiRefs.some((c) =>
+      apiReferenceChunkMatchesVersion(c, opts.apiReferenceVersionPrefs),
+    );
+    if (hasVersionPreferredApiRef) {
+      picked = picked.filter(
+        (c) =>
+          !isApiReferenceChunk(c) ||
+          apiReferenceChunkMatchesVersion(c, opts.apiReferenceVersionPrefs),
+      );
+    }
+    picked = picked.filter(
+      (c) => !isApiReferenceChunk(c) || apiReferenceMatchesHints(c, opts.apiReferenceHintTerms),
+    );
+    const seen = new Set(picked.map((c) => c.chunk_id));
+    const apiRefs = allApiRefs
+      .filter(
+        (c) =>
+          !hasVersionPreferredApiRef ||
+          apiReferenceChunkMatchesVersion(c, opts.apiReferenceVersionPrefs),
+      )
+      .filter((c) => apiReferenceMatchesHints(c, opts.apiReferenceHintTerms))
+      .sort(
+        (a, b) =>
+          apiReferenceHintScore(b, opts.apiReferenceHintTerms) -
+            apiReferenceHintScore(a, opts.apiReferenceHintTerms) ||
+          b.final_score - a.final_score,
+      )
+      .filter((c) => !seen.has(c.chunk_id))
+      .slice(0, apiContextLimit);
+    const currentPageContext = opts.currentPageId
+      ? opts.apiReferenceCandidates
+          .filter((c) => c.page_id === opts.currentPageId && !isApiReferenceChunk(c))
+          .filter((c) => !seen.has(c.chunk_id))
+          .slice(0, 2)
+      : [];
+    if (apiRefs.length > 0) {
+      const ordered = reorderApiReferenceContext(
+        [...apiRefs, ...currentPageContext, ...picked].filter(
+          (c, idx, arr) => arr.findIndex((x) => x.chunk_id === c.chunk_id) === idx,
+        ),
+        opts,
+      );
+      picked = limitApiReferenceContext(ordered, apiContextLimit).slice(0, cap);
+    } else {
+      picked = limitApiReferenceContext(
+        reorderApiReferenceContext(picked, opts),
+        apiContextLimit,
+      ).slice(0, cap);
+    }
+  }
 
   if (entityTerms && entityTerms.length >= 2) {
     // Entity-coverage reorder: hoist the highest-ranked chunk matching each
@@ -559,6 +771,108 @@ function pickContextChunks(
     }
   }
   return picked;
+}
+
+function preferProjectSetupContext(
+  picked: RerankedChunk[],
+  candidates: RerankedChunk[] | undefined,
+  queryLang: DocsLang | undefined,
+  cap: number,
+): RerankedChunk[] {
+  const setupCandidates = (candidates ?? [])
+    .filter((c) => !queryLang || c.lang === queryLang)
+    .filter((c) => !isApiReferenceChunk(c))
+    .filter(isProjectSetupChunk)
+    .slice(0, 4);
+  const merged = [...setupCandidates, ...picked].filter(
+    (c, idx, arr) => arr.findIndex((x) => x.chunk_id === c.chunk_id) === idx,
+  );
+  const withoutQuickstart = merged.filter((c) => !isQuickstartChunk(c));
+  if (withoutQuickstart.some(isProjectSetupChunk)) {
+    return withoutQuickstart.slice(0, cap);
+  }
+  return merged.slice(0, cap);
+}
+
+function isProjectSetupChunk(c: RerankedChunk): boolean {
+  const haystack = `${c.page_id} ${c.page_title} ${c.text}`.toLowerCase();
+  return (
+    /\bsetup\b|\bintegration setup\b|\bintroduction\b|\boverview\b/.test(haystack) ||
+    /接入准备|集成准备|平台概览|概览/.test(haystack)
+  );
+}
+
+function isQuickstartChunk(c: RerankedChunk): boolean {
+  const haystack = `${c.page_id} ${c.page_title}`.toLowerCase();
+  return /quickstart|30[- ]?minute|30 分钟|30分鐘/.test(haystack);
+}
+
+function isPreferredApiReference(c: RerankedChunk, pagePrefix: string | null | undefined): boolean {
+  return isApiReferenceChunk(c) && (!pagePrefix || c.page_id.startsWith(pagePrefix));
+}
+
+function reorderApiReferenceContext(
+  chunks: RerankedChunk[],
+  opts: {
+    apiReferenceHintTerms?: string[];
+    apiReferencePagePrefix?: string | null;
+  },
+): RerankedChunk[] {
+  return chunks.sort(
+    (a, b) =>
+      Number(isPreferredApiReference(b, opts.apiReferencePagePrefix)) -
+        Number(isPreferredApiReference(a, opts.apiReferencePagePrefix)) ||
+      apiReferenceHintScore(b, opts.apiReferenceHintTerms) -
+        apiReferenceHintScore(a, opts.apiReferenceHintTerms) ||
+      b.final_score - a.final_score,
+  );
+}
+
+function apiReferenceHintScore(c: RerankedChunk, terms: string[] | undefined): number {
+  if (!terms?.length) return 0;
+  const haystack = `${c.page_id} ${c.page_title} ${c.text}`.toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    if (term && haystack.includes(term)) score += 1;
+  }
+  return score;
+}
+
+function apiReferenceMatchesHints(c: RerankedChunk, terms: string[] | undefined): boolean {
+  if (!terms?.length) return true;
+  const haystack = `${c.page_id} ${c.page_title} ${c.text}`.toLowerCase();
+  if (terms.includes('checkout')) {
+    return haystack.includes('checkout') || haystack.includes('/api/v2/checkout');
+  }
+  if (terms.includes('payout')) {
+    return haystack.includes('payout') || haystack.includes('提币') || haystack.includes('出款');
+  }
+  if (terms.includes('order') && terms.includes('info') && terms.includes('status')) {
+    return (
+      haystack.includes('/order/info') ||
+      haystack.includes('order info') ||
+      haystack.includes('查询订单信息')
+    );
+  }
+  return apiReferenceHintScore(c, terms) > 0;
+}
+
+function apiReferenceContextLimit(terms: string[] | undefined): number {
+  if (terms?.includes('checkout')) return 1;
+  return terms?.includes('payout') ? 2 : 3;
+}
+
+function limitApiReferenceContext(chunks: RerankedChunk[], maxApiRefs: number): RerankedChunk[] {
+  const out: RerankedChunk[] = [];
+  let apiRefs = 0;
+  for (const chunk of chunks) {
+    if (isApiReferenceChunk(chunk)) {
+      if (apiRefs >= maxApiRefs) continue;
+      apiRefs += 1;
+    }
+    out.push(chunk);
+  }
+  return out;
 }
 
 function translationNoticeFor(lang: DocsLang): string {

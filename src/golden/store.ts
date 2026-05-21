@@ -7,7 +7,7 @@
  * crashed writes don't break tooling.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { GoldenCase, GoldenCaseCandidate } from './types.ts';
 
@@ -85,5 +85,16 @@ export function appendCases(stateRoot: string, rows: GoldenCase[]): string {
   if (rows.length === 0) return paths.cases;
   const body = rows.map((r) => JSON.stringify(r)).join('\n') + '\n';
   appendFileSync(paths.cases, body, 'utf8');
+  return paths.cases;
+}
+
+/**
+ * Replace cases.jsonl with exactly `rows`. Used by curated, source-controlled
+ * eval sets that should be synced into runtime state.
+ */
+export function writeCases(stateRoot: string, rows: GoldenCase[]): string {
+  const paths = ensureGoldenDir(stateRoot);
+  const body = rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length > 0 ? '\n' : '');
+  writeFileSync(paths.cases, body, 'utf8');
   return paths.cases;
 }

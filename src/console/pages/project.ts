@@ -496,7 +496,6 @@ function feedbackSection(ctx: SettingsCtx): Html {
 function indexingSection(ctx: SettingsCtx): Html {
   return fieldGroup('Indexing', 'Chunk size + watch debounce for the local index.', [
     intField(ctx, { path: 'indexing.chunkMaxTokens', label: 'Chunk max tokens', min: 1 }),
-    intField(ctx, { path: 'indexing.chunkHardCap', label: 'Chunk hard cap (tokens)', min: 1 }),
     intField(ctx, { path: 'indexing.debounceMs', label: 'Watch debounce (ms)', min: 0 }),
   ]);
 }

@@ -7,24 +7,32 @@
  *                                 [--no-llm-rewrite]
  *                                 [--force]
  *   golden review   <projectRoot> [--reviewer <name>]
+ *   golden import   <projectRoot> --file <jsonl> [--replace]
  *
  * v1 ships only `--from structure`; the runs / inbox sources are stubbed
  * with a clear "next phase" error so the CLI surface is final.
  */
 
-import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
 import { loadConfig } from '../config.ts';
 import { loadProject } from '../anydocs/loader.ts';
 import { generateFromStructure } from '../golden/generator.ts';
 import { generateFromRuns } from '../golden/generator-from-runs.ts';
 import { rewriteCandidatesWithLLM } from '../golden/llm-rewrite.ts';
 import { reviewCandidates } from '../golden/reviewer.ts';
-import { goldenPaths, readApproved, writeCandidates } from '../golden/store.ts';
+import {
+  appendCases,
+  goldenPaths,
+  readApproved,
+  writeCandidates,
+  writeCases,
+} from '../golden/store.ts';
 import { buildDefaultLLM } from '../llm/factory.ts';
 import { iterateRunsSince } from '../runs/writer.ts';
 import { parseSince } from './runs.ts';
 import { runSource, type RunRecord, type RunsLine } from '../runs/types.ts';
+import type { GoldenCase } from '../golden/types.ts';
 
 export type GoldenGenerateOptions = {
   projectRoot: string;
@@ -297,4 +305,81 @@ export function runGoldenReview(opts: GoldenReviewOptions): number {
       (summary.malformed > 0 ? `  malformed: ${summary.malformed} (skipped)\n` : ''),
   );
   return 0;
+}
+
+export type GoldenImportOptions = {
+  projectRoot: string;
+  stateRoot: string;
+  file: string;
+  replace?: boolean;
+};
+
+export function runGoldenImport(opts: GoldenImportOptions): number {
+  const projectRoot = resolve(opts.projectRoot);
+  const stateRoot = resolve(opts.stateRoot);
+  const importPath = isAbsolute(opts.file) ? opts.file : resolve(projectRoot, opts.file);
+  if (!existsSync(importPath)) {
+    process.stderr.write(`error: import file does not exist: ${importPath}\n`);
+    return 1;
+  }
+
+  const { rows, malformed, invalid } = readGoldenCasesFile(importPath);
+  if (malformed > 0 || invalid > 0) {
+    process.stderr.write(
+      `error: ${importPath} has ${malformed} malformed JSON line(s) and ${invalid} invalid golden case line(s)\n`,
+    );
+    return 1;
+  }
+  if (rows.length === 0) {
+    process.stderr.write(`error: import file has no cases: ${importPath}\n`);
+    return 1;
+  }
+
+  const written = opts.replace ? writeCases(stateRoot, rows) : appendCases(stateRoot, rows);
+  process.stdout.write(
+    `anydocs-ask golden import: ${opts.replace ? 'replaced' : 'appended'} ${rows.length} cases in ${written}\n`,
+  );
+  return 0;
+}
+
+function readGoldenCasesFile(path: string): {
+  rows: GoldenCase[];
+  malformed: number;
+  invalid: number;
+} {
+  const rows: GoldenCase[] = [];
+  let malformed = 0;
+  let invalid = 0;
+  const raw = readFileSync(path, 'utf8');
+  for (const line of raw.split(/\r?\n/)) {
+    if (line.trim().length === 0) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      malformed++;
+      continue;
+    }
+    if (!isGoldenCaseLike(parsed)) {
+      invalid++;
+      continue;
+    }
+    rows.push(parsed);
+  }
+  return { rows, malformed, invalid };
+}
+
+function isGoldenCaseLike(v: unknown): v is GoldenCase {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+  const o = v as Record<string, unknown>;
+  if (typeof o.id !== 'string' || o.id.length === 0) return false;
+  if (typeof o.query !== 'string' || o.query.length === 0) return false;
+  if (o.lang !== 'zh' && o.lang !== 'en') return false;
+  if (!o.expected || typeof o.expected !== 'object' || Array.isArray(o.expected)) return false;
+  const expected = o.expected as Record<string, unknown>;
+  return (
+    Array.isArray(expected.must_cite_pages) &&
+    Array.isArray(expected.must_contain) &&
+    Array.isArray(expected.forbid_contain)
+  );
 }

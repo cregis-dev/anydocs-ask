@@ -54,6 +54,16 @@ export type RetrieveOptions = {
    * even if the combined OR query demoted those chunks below perPathK.
    */
   entityTerms?: string[];
+  /** Current page id from the client context. Used to keep page-local context in the candidate pool. */
+  currentPageId?: string | null;
+  /** Language to use when resolving currentPageId, usually the resolved query language. */
+  currentPageLang?: DocsLang | null;
+  /** API-intent questions get an extra API reference candidate pass. */
+  apiIntent?: boolean;
+  /** Additional sanitized FTS queries used only for API reference candidate injection. */
+  apiReferenceFtsQueries?: string[];
+  /** Optional page_id prefix for API reference pages that belong to the active product area. */
+  apiReferencePagePrefix?: string | null;
 };
 
 const DEFAULT_PER_PATH_K = 20;
@@ -73,6 +83,18 @@ const ENTITY_K = 5;
  * coverage gaps without displacing strong hits.
  */
 const ENTITY_INJECT_RANK = DEFAULT_PER_PATH_K;
+/** Max chunks to inject from the exact current page. */
+const CURRENT_PAGE_K = 3;
+/**
+ * Current-page context is a UI signal, not a retrieval path, so give it a
+ * modest synthetic rank: strong enough to survive finalK trimming, weaker
+ * than top vector/BM25 matches.
+ */
+const CURRENT_PAGE_INJECT_RANK = 8;
+/** Max API reference chunks to inject for endpoint/field/status questions. */
+const API_REFERENCE_K = 6;
+/** API reference injection should survive trimming but not dominate top dual-path hits. */
+const API_REFERENCE_INJECT_RANK = 6;
 
 /**
  * Trace metadata from the retrieve step — exposed by retrieveWithTrace() for
@@ -84,6 +106,10 @@ export type RetrievalTrace = {
   bm25Ranks: Map<number, number>;
   /** chunk_ids that entered the pool via the per-entity injection pass. */
   entityInjected: Set<number>;
+  /** chunk_ids that entered the pool because they belong to context.current_page_id. */
+  currentPageInjected: Set<number>;
+  /** chunk_ids that entered the pool via the API-reference-only retrieval pass. */
+  apiReferenceInjected: Set<number>;
 };
 
 export function retrieve(db: DbHandle, opts: RetrieveOptions): RetrievedChunk[] {
@@ -145,11 +171,71 @@ export function retrieveWithTrace(
     }
   }
 
-  const ranked = [...rrfScores.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, finalK);
+  const currentPageInjected = new Set<number>();
+  if (opts.currentPageId && opts.currentPageLang) {
+    const currentPageInjectScore = 1 / (RRF_K + CURRENT_PAGE_INJECT_RANK);
+    const currentPageQueries = [
+      ...(opts.apiReferenceFtsQueries ?? []),
+      ...(opts.ftsQuery ? [opts.ftsQuery] : []),
+    ];
+    const currentPageIds = currentPagePath(
+      db,
+      opts.currentPageId,
+      opts.currentPageLang,
+      CURRENT_PAGE_K,
+      opts.scopeId,
+      currentPageQueries,
+    );
+    for (const id of currentPageIds) {
+      currentPageInjected.add(id);
+      const cur = rrfScores.get(id);
+      if (cur === undefined) {
+        rrfScores.set(id, currentPageInjectScore);
+      } else {
+        rrfScores.set(id, cur + currentPageInjectScore);
+      }
+    }
+  }
 
-  if (ranked.length === 0) return { chunks: [], trace: { vecRanks, bm25Ranks, entityInjected } };
+  const apiReferenceInjected = new Set<number>();
+  if (opts.apiIntent && opts.ftsQuery) {
+    const apiReferenceInjectScore = 1 / (RRF_K + API_REFERENCE_INJECT_RANK);
+    const queries = [...new Set(
+      opts.apiReferenceFtsQueries?.length ? opts.apiReferenceFtsQueries : [opts.ftsQuery],
+    )];
+    for (const query of queries) {
+      const apiReferenceIds = apiReferencePath(
+        db,
+        query,
+        API_REFERENCE_K,
+        opts.scopeId,
+        opts.currentPageLang ?? null,
+        opts.apiReferencePagePrefix ?? null,
+      );
+      for (const id of apiReferenceIds) {
+        const cur = rrfScores.get(id);
+        if (cur === undefined) {
+          rrfScores.set(id, apiReferenceInjectScore);
+          apiReferenceInjected.add(id);
+        } else {
+          rrfScores.set(id, cur + apiReferenceInjectScore);
+        }
+      }
+    }
+  }
+
+  const ranked = keepProtectedIds(
+    [...rrfScores.entries()].sort((a, b) => b[1] - a[1]),
+    finalK,
+    currentPageInjected,
+  );
+
+  if (ranked.length === 0) {
+    return {
+      chunks: [],
+      trace: { vecRanks, bm25Ranks, entityInjected, currentPageInjected, apiReferenceInjected },
+    };
+  }
 
   const idList = ranked.map(([id]) => id);
   const rows = fetchChunkRows(db, idList);
@@ -161,7 +247,27 @@ export function retrieveWithTrace(
     if (!r) continue; // boundary check kicked it; shouldn't happen since we already filtered
     out.push({ ...r, rrf_score: score });
   }
-  return { chunks: out, trace: { vecRanks, bm25Ranks, entityInjected } };
+  return {
+    chunks: out,
+    trace: { vecRanks, bm25Ranks, entityInjected, currentPageInjected, apiReferenceInjected },
+  };
+}
+
+function keepProtectedIds(
+  ranked: Array<[number, number]>,
+  finalK: number,
+  protectedIds: Set<number>,
+): Array<[number, number]> {
+  const top = ranked.slice(0, finalK);
+  if (protectedIds.size === 0) return top;
+  const seen = new Set(top.map(([id]) => id));
+  for (const row of ranked) {
+    const id = row[0];
+    if (!protectedIds.has(id) || seen.has(id)) continue;
+    top.push(row);
+    seen.add(id);
+  }
+  return top;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +325,94 @@ function bm25Path(
         LIMIT ?`,
     )
     .all(ftsQuery, scopeId, scopeId, perPathK) as Array<{ chunk_id: number }>;
+  return rows.map((r) => r.chunk_id);
+}
+
+function currentPagePath(
+  db: DbHandle,
+  pageId: string,
+  lang: DocsLang,
+  limit: number,
+  scopeId: string | null,
+  ftsQueries: string[],
+): number[] {
+  const out: number[] = [];
+  const seen = new Set<number>();
+  for (const ftsQuery of [...new Set(ftsQueries)]) {
+    if (out.length >= limit) break;
+    const rows = db
+      .prepare(
+        `SELECT f.rowid AS chunk_id
+           FROM chunks_fts f
+           JOIN chunks c ON c.chunk_id = f.rowid
+           JOIN pages p ON p.page_id = c.page_id AND p.lang = c.lang
+          WHERE chunks_fts MATCH ?
+            AND c.page_id = ?
+            AND c.lang = ?
+            AND p.status = 'published'
+            AND (? IS NULL OR p.subtree_root = ?)
+          ORDER BY rank
+          LIMIT ?`,
+      )
+      .all(ftsQuery, pageId, lang, scopeId, scopeId, limit) as Array<{ chunk_id: number }>;
+    for (const row of rows) {
+      if (seen.has(row.chunk_id)) continue;
+      out.push(row.chunk_id);
+      seen.add(row.chunk_id);
+      if (out.length >= limit) break;
+    }
+  }
+  if (out.length >= limit) return out;
+  const rows = db
+    .prepare(
+      `SELECT c.chunk_id
+         FROM chunks c
+         JOIN pages p ON p.page_id = c.page_id AND p.lang = c.lang
+        WHERE c.page_id = ?
+          AND c.lang = ?
+          AND p.status = 'published'
+          AND (? IS NULL OR p.subtree_root = ?)
+        ORDER BY c.chunk_id ASC
+        LIMIT ?`,
+    )
+    .all(pageId, lang, scopeId, scopeId, limit) as Array<{ chunk_id: number }>;
+  for (const row of rows) {
+    if (seen.has(row.chunk_id)) continue;
+    out.push(row.chunk_id);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function apiReferencePath(
+  db: DbHandle,
+  ftsQuery: string,
+  limit: number,
+  scopeId: string | null,
+  lang: DocsLang | null,
+  pagePrefix: string | null,
+): number[] {
+  const likePrefix = pagePrefix ? `${pagePrefix}%` : null;
+  const rows = db
+    .prepare(
+      `SELECT f.rowid AS chunk_id
+         FROM chunks_fts f
+         JOIN chunks c ON c.chunk_id = f.rowid
+         JOIN pages p ON p.page_id = c.page_id AND p.lang = c.lang
+        WHERE chunks_fts MATCH ?
+          AND p.status = 'published'
+          AND (? IS NULL OR p.lang = ?)
+          AND (? IS NULL OR p.subtree_root = ?)
+          AND (? IS NULL OR p.page_id LIKE ?)
+          AND (
+            p.page_id LIKE 'api-%'
+            OR p.url LIKE '%/reference/%'
+            OR c.text LIKE '%API reference:%'
+          )
+        ORDER BY rank
+        LIMIT ?`,
+    )
+    .all(ftsQuery, lang, lang, scopeId, scopeId, likePrefix, likePrefix, limit) as Array<{ chunk_id: number }>;
   return rows.map((r) => r.chunk_id);
 }
 

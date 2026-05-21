@@ -35,6 +35,52 @@ test('AnthropicLLM: non-object response (undefined) → message names "undefined
   );
 });
 
+test('AnthropicLLM: retries one transient non-object gateway response', async () => {
+  const llm = new AnthropicLLM({ model: 'm', apiKey: 'k' });
+  let calls = 0;
+  withFakeClient(llm, () => {
+    calls += 1;
+    if (calls === 1) return undefined;
+    return { model: 'm', content: [{ type: 'text', text: 'ok after retry' }] };
+  });
+
+  const result = await llm.generate(PROMPT);
+
+  assert.equal(calls, 2);
+  assert.equal(result.text, 'ok after retry');
+  assert.equal(result.modelUsed, 'm');
+});
+
+test('AnthropicLLM: retries two transient non-object gateway responses', async () => {
+  const llm = new AnthropicLLM({ model: 'm', apiKey: 'k' });
+  let calls = 0;
+  withFakeClient(llm, () => {
+    calls += 1;
+    if (calls <= 2) return undefined;
+    return { model: 'm', content: [{ type: 'text', text: 'ok after two retries' }] };
+  });
+
+  const result = await llm.generate(PROMPT);
+
+  assert.equal(calls, 3);
+  assert.equal(result.text, 'ok after two retries');
+});
+
+test('AnthropicLLM: retries one transient timeout error', async () => {
+  const llm = new AnthropicLLM({ model: 'm', apiKey: 'k' });
+  let calls = 0;
+  withFakeClient(llm, () => {
+    calls += 1;
+    if (calls === 1) throw new Error('Request timed out.');
+    return { model: 'm', content: [{ type: 'text', text: 'ok after timeout' }] };
+  });
+
+  const result = await llm.generate(PROMPT);
+
+  assert.equal(calls, 2);
+  assert.equal(result.text, 'ok after timeout');
+});
+
 test('AnthropicLLM: non-object response (null) → message names "null"', async () => {
   const llm = new AnthropicLLM({ model: 'm', apiKey: 'k' });
   withFakeClient(llm, () => null);

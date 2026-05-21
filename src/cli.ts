@@ -42,7 +42,7 @@ import { runReindex } from './commands/reindex.ts';
 import { runStatus } from './commands/status.ts';
 import { runWorkspaceInit, runWorkspaceLs, runWorkspaceAdd, runWorkspaceRm } from './commands/workspace.ts';
 import { runRunsExport, runRunsTail } from './commands/runs.ts';
-import { runGoldenGenerate, runGoldenReview } from './commands/golden.ts';
+import { runGoldenGenerate, runGoldenImport, runGoldenReview } from './commands/golden.ts';
 import { runEval } from './commands/eval.ts';
 import { runAnalyzeRuns } from './commands/analyze.ts';
 import { runConsole } from './commands/console.ts';
@@ -136,6 +136,7 @@ Usage:
                                              [--since 14d] [--no-llm-rewrite] [--force]
                                              [--include-console]
   anydocs-ask golden review    <projectRoot> [--reviewer <name>]
+  anydocs-ask golden import    <projectRoot> --file <jsonl> [--replace]
   anydocs-ask eval             <projectRoot> [--baseline <path>]
   anydocs-ask analyze runs     <projectRoot> [--since 7d] [--include-console]
   anydocs-ask feedback export  <projectRoot>
@@ -253,7 +254,7 @@ async function main(): Promise<number> {
   // `runs <action> <projectRoot> ...` and `golden <action> <projectRoot>...`
   // both shift positional indices by 1.
   let runsAction: 'tail' | 'export' | null = null;
-  let goldenAction: 'generate' | 'review' | null = null;
+  let goldenAction: 'generate' | 'review' | 'import' | null = null;
   let analyzeAction: 'runs' | null = null;
   let feedbackAction: 'export' | 'import' | 'status' | null = null;
   let projectArg: string | undefined;
@@ -277,8 +278,8 @@ async function main(): Promise<number> {
     projectArg = positional[1];
   } else if (command === 'golden') {
     const action = positional[0];
-    if (action !== 'generate' && action !== 'review') {
-      process.stderr.write(`error: 'golden' requires an action (generate | review)\n\n`);
+    if (action !== 'generate' && action !== 'review' && action !== 'import') {
+      process.stderr.write(`error: 'golden' requires an action (generate | review | import)\n\n`);
       printHelp();
       return 2;
     }
@@ -420,10 +421,24 @@ async function main(): Promise<number> {
       }
       // golden review
       const reviewer = typeof flags.reviewer === 'string' ? flags.reviewer : undefined;
-      return runGoldenReview({
+      if (goldenAction === 'review') {
+        return runGoldenReview({
+          projectRoot,
+          stateRoot,
+          ...(reviewer !== undefined ? { reviewer } : {}),
+        });
+      }
+      const file = typeof flags.file === 'string' ? flags.file : undefined;
+      if (!file) {
+        process.stderr.write(`error: 'golden import' requires --file <jsonl>\n\n`);
+        printHelp();
+        return 2;
+      }
+      return runGoldenImport({
         projectRoot,
         stateRoot,
-        ...(reviewer !== undefined ? { reviewer } : {}),
+        file,
+        ...(flags.replace === true ? { replace: true } : {}),
       });
     }
     case 'eval': {
