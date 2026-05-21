@@ -40,6 +40,7 @@
 import type { RetrievedChunk } from './retrieval.ts';
 import type { DbHandle } from '../db/index.ts';
 import type { DocsLang } from '../anydocs/types.ts';
+import { apiReferenceChunkMatchesVersion, isApiReferenceChunk } from './api-intent.ts';
 
 export type RerankedChunk = RetrievedChunk & {
   final_score: number;
@@ -62,14 +63,23 @@ export type RerankOptions = {
    * prompt-context cap. Codex round-9 follow-up.
    */
   entityTerms?: string[];
+  /** Whether the question is asking about concrete API endpoints/fields/statuses. */
+  apiIntent?: boolean;
+  /** Terms from API-specific retrieval hints; used to avoid boosting unrelated API pages. */
+  apiReferenceHintTerms?: string[];
+  /** Preferred API versions inferred from the query. */
+  apiReferenceVersionPrefs?: string[];
+  /** Optional page_id prefix for API reference pages belonging to the active product area. */
+  apiReferencePagePrefix?: string | null;
 };
 
 const LANG_BOOST = 0.3;
 const SAME_SUBTREE_BOOST = 0.2;
-const CURRENT_PAGE_BOOST = 0.45;
+const CURRENT_PAGE_BOOST = 1.1;
 const NAV_INDEX_BOOST = 0.1;
 const TITLE_MATCH_BOOST = 0.3;
 const ENTITY_MATCH_BOOST = 0.2;
+const API_REFERENCE_BOOST = 0.35;
 /** Page titles below this length don't get title-match boost — they're too
  *  short to discriminate ("TTS", "Skins", common 3-4 letter tokens). */
 const TITLE_MATCH_MIN_LEN = 5;
@@ -94,12 +104,38 @@ export function rerank(
       const navIdxBoost = navIndexBoostFor(c.nav_index);
       const titleBoost = titleMatchedPageIds.has(c.page_id) ? TITLE_MATCH_BOOST : 0;
       const entityBoost = entityMatchedPageIds.has(c.page_id) ? ENTITY_MATCH_BOOST : 0;
+      const apiReferenceBoost =
+        opts.apiIntent &&
+        isApiReferenceChunk(c) &&
+        (!opts.apiReferencePagePrefix || c.page_id.startsWith(opts.apiReferencePagePrefix)) &&
+        apiReferenceChunkMatchesVersion(c, opts.apiReferenceVersionPrefs) &&
+        apiReferenceMatchesHint(c, opts.apiReferenceHintTerms)
+          ? API_REFERENCE_BOOST
+          : 0;
       const final_score =
         c.rrf_score *
-        (1 + langBoost + sameSubtreeBoost + currentPageBoost + navIdxBoost + titleBoost + entityBoost);
+        (1 +
+          langBoost +
+          sameSubtreeBoost +
+          currentPageBoost +
+          navIdxBoost +
+          titleBoost +
+          entityBoost +
+          apiReferenceBoost);
       return { ...c, final_score };
     })
     .sort((a, b) => b.final_score - a.final_score);
+}
+
+const API_HINT_STOP_WORDS = new Set(['api', 'v1', 'v2', 'v3', 'http', 'post', 'get']);
+
+function apiReferenceMatchesHint(c: RetrievedChunk, terms: string[] | undefined): boolean {
+  const significant = (terms ?? [])
+    .map((t) => t.toLowerCase())
+    .filter((t) => t.length > 1 && !API_HINT_STOP_WORDS.has(t));
+  if (significant.length === 0) return true;
+  const haystack = `${c.page_id} ${c.page_title} ${c.text}`.toLowerCase();
+  return significant.some((term) => haystack.includes(term));
 }
 
 /**

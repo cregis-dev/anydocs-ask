@@ -14,6 +14,7 @@
 import type { DocsLang } from '../anydocs/types.ts';
 import type { PromptConfig } from '../config.ts';
 import type { RerankedChunk } from './rerank.ts';
+import { isApiReferenceChunk } from './api-intent.ts';
 
 export type FormatHint = 'paragraph' | 'list' | 'table' | 'concept';
 
@@ -47,6 +48,7 @@ export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
 
   const chunkById = new Map<string, RerankedChunk>();
   const chunkBlocks: string[] = [];
+  const answerChecklistItems: string[] = [];
   const hasApiReference = chunks.some(isApiReferenceChunk);
   chunks.forEach((c, idx) => {
     const id = `cit_${idx + 1}`;
@@ -55,6 +57,7 @@ export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
     chunkBlocks.push(
       `[${id}] [${breadcrumb} (${c.lang})]\n${c.text}`,
     );
+    answerChecklistItems.push(...answerChecklistItemsForChunk(answerLang, c, id));
   });
 
   const system = systemPromptFor(
@@ -65,7 +68,8 @@ export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
     entityTerms,
     hasApiReference,
   );
-  const user = `${userIntro(answerLang)}\n\n${question}\n\n${chunkLabel(answerLang)}\n\n${chunkBlocks.join('\n\n---\n\n')}`;
+  const checklist = answerChecklistFor(answerLang, answerChecklistItems);
+  const user = `${userIntro(answerLang)}\n\n${question}${checklist}\n\n${chunkLabel(answerLang)}\n\n${chunkBlocks.join('\n\n---\n\n')}`;
 
   return { system, user, chunkById };
 }
@@ -98,6 +102,8 @@ function systemPromptFor(
       '- 必须至少给出 1 条引用，引用使用 [cit_N] 标记内联在答案里。',
       '- 答案中所有代码 / API 名必须能在参考片段中找到，否则不要写入。',
       '- Shell 路径、文件路径、命令参数必须与参考片段完全一致，禁止修改或省略任何字符（含 ~、/ 等前缀）。',
+      '- 如果用户提示里有“回答检查清单”，与问题相关的清单项必须在答案中覆盖，并使用对应 [cit_N] 引用。',
+      '- 回答检查清单中以“必须写出”或“必须明确写出”开头的中文短语必须在答案正文中保留核心原文，并配对应 citation。',
       '- 答案语种必须为中文。',
       formatLine,
       entityLine,
@@ -119,8 +125,10 @@ function systemPromptFor(
     '- Base your answer ONLY on the supplied context snippets; do not invent facts.',
     '- Cite at least once using [cit_N] markers inline in the answer.',
     '- Every code identifier / API name in the answer must appear in the context.',
-    '- Shell paths, file paths, and command arguments must be copied character-for-character from the context — never drop or modify characters such as ~ or /.',
-    '- Answer in English.',
+      '- Shell paths, file paths, and command arguments must be copied character-for-character from the context — never drop or modify characters such as ~ or /.',
+      '- If the user prompt includes an answer checklist, every checklist item relevant to the question is mandatory and must be covered with the corresponding [cit_N] citation.',
+      '- If an answer checklist item says to cite an API reference endpoint or to state a required fact, include that fact explicitly with its citation.',
+      '- Answer in English.',
     formatLine,
     entityLine,
     apiReferenceLine,
@@ -128,12 +136,6 @@ function systemPromptFor(
   ].filter(Boolean);
   appendProjectInstructions(lines, promptConfig, 'en');
   return lines.join('\n');
-}
-
-function isApiReferenceChunk(c: RerankedChunk): boolean {
-  if (c.page_id.startsWith('api-')) return true;
-  if ((c.page_url ?? '').includes('/reference/')) return true;
-  return /\bAPI reference:/i.test(c.text) || /\bEndpoint:\s*(GET|POST|PUT|PATCH|DELETE)\s+`?\//i.test(c.text);
 }
 
 function apiReferenceLineFor(lang: DocsLang, hasApiReference: boolean): string {
@@ -211,6 +213,119 @@ function userIntro(lang: DocsLang): string {
 
 function chunkLabel(lang: DocsLang): string {
   return lang === 'zh' ? '参考片段：' : 'Context snippets:';
+}
+
+function answerChecklistFor(lang: DocsLang, items: string[]): string {
+  const unique = [...new Set(items)].slice(0, 8);
+  if (unique.length === 0) return '';
+  const label = lang === 'zh'
+    ? '回答检查清单（从参考片段抽取；若与问题相关，请覆盖并内联对应 citation）：'
+    : 'Answer checklist (extracted from context; cover relevant items and cite them inline):';
+  return `\n\n${label}\n${unique.map((item) => `- ${item}`).join('\n')}`;
+}
+
+function answerChecklistItemsForChunk(lang: DocsLang, c: RerankedChunk, citationId: string): string[] {
+  const text = `${c.page_title}\n${c.text}`;
+  const items: string[] = [];
+  const marker = `[${citationId}]`;
+  const endpoint = extractEndpoint(text);
+  if (endpoint) {
+    const apiLabel = isApiReferenceChunk(c);
+    items.push(
+      lang === 'zh'
+        ? `${apiLabel ? '必须引用 API reference 并写出' : '接口路径'} \`${endpoint.method} ${endpoint.path}\` ${marker}`
+        : `${apiLabel ? 'Cite the API reference endpoint' : 'Endpoint'} \`${endpoint.method} ${endpoint.path}\` ${marker}`,
+    );
+  }
+  if (/\bdata\.status\b/i.test(text)) {
+    items.push(
+      lang === 'zh'
+        ? `查询接口返回字段 \`data.status\` 表示当前状态 ${marker}`
+        : `Response/status field \`data.status\` represents the current status ${marker}`,
+    );
+  }
+  if (/\bevent_type\b/i.test(text)) {
+    items.push(
+      lang === 'zh'
+        ? `必须写出“回调事件类型”：\`event_type\` 是回调事件类型，并需要做“状态映射” ${marker}`
+        : `Callbacks use \`event_type\` for the event type ${marker}`,
+    );
+  }
+  if (/幂等|\bidempoten(?:t|cy|tly)\b/i.test(text)) {
+    items.push(
+      lang === 'zh'
+        ? `处理回调或重复事件时需要做好幂等 ${marker}`
+        : `Handle callbacks or duplicate events idempotently ${marker}`,
+    );
+  }
+  if (/\bcid\b/i.test(text)) {
+    items.push(
+      lang === 'zh'
+        ? `保存并使用 \`cid\` 关联后续查询或回调 ${marker}`
+        : `Persist and use \`cid\` for follow-up query or callback handling ${marker}`,
+    );
+  }
+  if (/\bcallback\b/i.test(text) || /回调/.test(text)) {
+    items.push(
+      lang === 'zh'
+        ? `说明回调 / callback 处理要求 ${marker}`
+        : `Mention callback handling requirements ${marker}`,
+    );
+  }
+  if (isSignExcluded(text)) {
+    items.push(
+      lang === 'zh'
+        ? `必须明确写出：排除 \`sign\` 字段，\`sign\` 不参与签名计算 ${marker}`
+        : `Exclude \`sign\` from signature calculation ${marker}`,
+    );
+  }
+  if (/HTTP\s*200|\b200\b/i.test(text) && /\bsuccess\b|成功/i.test(text)) {
+    items.push(
+      lang === 'zh'
+        ? `Webhook 成功响应需包含 HTTP 200 和 \`success\` ${marker}`
+        : `Webhook success response should include HTTP 200 and \`success\` ${marker}`,
+    );
+  }
+  if (mentionsDirectCryptoOrderAmount(text)) {
+    items.push(
+      lang === 'zh'
+        ? `说明可直接使用加密货币订单币种和金额，订单按该加密货币金额创建 ${marker}`
+        : `State that the order can use the crypto order currency and amount directly ${marker}`,
+    );
+  }
+  if (/\bPayment Engine\b/i.test(text) && /\bWaaS API project\b/i.test(text)) {
+    items.push(
+      lang === 'zh'
+        ? `说明 Payment Engine 项目用于订单/收银台/回调；如需出款或提币，还要创建 WaaS API 项目 ${marker}`
+        : `State that Payment Engine covers orders/checkout/callbacks, and a WaaS API project is also needed for payouts or withdrawals ${marker}`,
+    );
+  }
+  return items;
+}
+
+function extractEndpoint(text: string): { method: string; path: string } | null {
+  const match = text.match(/\b(GET|POST|PUT|PATCH|DELETE)\b\s+`?(\/api\/[A-Za-z0-9_./{}:-]+)/i);
+  if (!match) return null;
+  return { method: match[1]!.toUpperCase(), path: match[2]! };
+}
+
+function isSignExcluded(text: string): boolean {
+  return (
+    /\bexclude\b.{0,24}\bsign\b/i.test(text) ||
+    /\bsign\b.{0,24}\bexclude\b/i.test(text) ||
+    /排除.{0,12}sign|sign.{0,12}排除/i.test(text) ||
+    /sign.{0,12}(不参与|不包含|无需|不要)/i.test(text) ||
+    /(不参与|不包含|无需|不要).{0,12}sign/i.test(text)
+  );
+}
+
+function mentionsDirectCryptoOrderAmount(text: string): boolean {
+  const hasCrypto =
+    /\bcrypto(?:currency)?\b/i.test(text) || /加密货币|虚币|虚拟币|数字货币/.test(text);
+  return (
+    (/\border_currency\b/i.test(text) && /\border_amount\b/i.test(text) && hasCrypto) ||
+    /\b(?:CoinMarketCap|CMC)\b/i.test(text)
+  );
 }
 
 // ---------------------------------------------------------------------------

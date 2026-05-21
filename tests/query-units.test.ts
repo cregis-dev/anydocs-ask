@@ -14,6 +14,11 @@ import { rerank, computeTitleMatches } from '../src/query/rerank.ts';
 import { aggregate } from '../src/query/aggregate.ts';
 import { postprocess } from '../src/query/postprocess.ts';
 import { buildPrompt, detectFormatHint } from '../src/query/prompt.ts';
+import {
+  apiReferenceSearchHints,
+  apiReferenceVersionPreferences,
+  detectApiIntent,
+} from '../src/query/api-intent.ts';
 import type { RerankedChunk } from '../src/query/rerank.ts';
 import type { RetrievedChunk } from '../src/query/retrieval.ts';
 
@@ -244,6 +249,60 @@ test('detectFormatHint: default paragraph', () => {
 });
 
 // ---------------------------------------------------------------------------
+// api-intent.ts
+// ---------------------------------------------------------------------------
+
+test('detectApiIntent: endpoint, parameter, response, and status questions are API-intent', () => {
+  assert.equal(detectApiIntent('POST /api/v2/checkout 返回哪些字段？'), true);
+  assert.equal(detectApiIntent('创建订单接口需要传哪些参数？'), true);
+  assert.equal(detectApiIntent('event_type 和 data.status 怎么映射？'), true);
+  assert.equal(detectApiIntent('Webhook 回调里的 data.status 是什么？'), true);
+  assert.equal(detectApiIntent('What response fields does /api/v1/payout/query return?'), true);
+  assert.equal(detectApiIntent('可以直接用 USDT 金额创建支付引擎订单吗？'), true);
+  assert.equal(
+    detectApiIntent('Can I create a Payment Engine order directly in USDT if my system already calculated the FX price?'),
+    true,
+  );
+});
+
+test('detectApiIntent: broad concept questions are not API-intent', () => {
+  assert.equal(detectApiIntent('支付引擎是什么？'), false);
+  assert.equal(detectApiIntent('What is WaaS?'), false);
+  assert.equal(detectApiIntent('Cregis API 签名应该怎么拼接参数？sign 字段本身要不要参与签名？'), false);
+  assert.equal(
+    detectApiIntent('What should my WaaS webhook return after processing successfully, and how should I handle duplicate callbacks?'),
+    false,
+  );
+  assert.equal(
+    detectApiIntent('For API payout or withdrawals, do I only need a Payment Engine project, or should I also create a WaaS API project?'),
+    false,
+  );
+});
+
+test('apiReferenceSearchHints: adds endpoint-oriented terms for common order and payout tasks', () => {
+  assert.deepEqual(
+    apiReferenceSearchHints('可以直接用 USDT 金额创建支付引擎订单吗？'),
+    ['checkout order_currency order_amount'],
+  );
+  assert.deepEqual(
+    apiReferenceSearchHints('WaaS API 出款最小流程是什么？发起后用哪个接口查询最终状态？'),
+    ['api v1 payout cid callback', 'api v1 payout query'],
+  );
+  assert.deepEqual(
+    apiReferenceSearchHints('event_type 和查询订单返回的 data.status 为什么名字不一样？'),
+    ['order info data status'],
+  );
+});
+
+test('apiReferenceVersionPreferences: defaults WaaS payout flow to v1 unless user asks for v2', () => {
+  assert.deepEqual(
+    apiReferenceVersionPreferences('WaaS API 出款最小流程是什么？发起后用哪个接口查询最终状态？'),
+    ['v1'],
+  );
+  assert.deepEqual(apiReferenceVersionPreferences('v2 payout 接口怎么用？'), ['v2']);
+});
+
+// ---------------------------------------------------------------------------
 // rerank.ts
 // ---------------------------------------------------------------------------
 
@@ -322,6 +381,137 @@ test('buildPrompt: adds API reference citation rule when context contains API re
 
   assert.match(prompt.system, /API reference/);
   assert.match(prompt.system, /完整接口路径/);
+  assert.match(prompt.system, /回答检查清单/);
+});
+
+test('buildPrompt: adds grounded answer checklist for API status and callback facts', () => {
+  const prompt = buildPrompt({
+    question: 'event_type 和 data.status 怎么映射？',
+    chunks: [
+      {
+        ...fakeRetrieved({
+          chunk_id: 1,
+          page_id: 'api-payment-engine-api-post-api-v2-order-info',
+          page_title: 'POST /api/v2/order/info — 查询订单信息',
+          page_url: '/zh/reference/payment-engine-api/post-api-v2-order-info',
+          text: 'API reference: Payment Engine API\nHTTP Request POST /api/v2/order/info\nResponse fields: data.status',
+          breadcrumb: [{ id: 'api', title: 'API Reference', type: 'section' }],
+        }),
+        final_score: 0.2,
+      },
+      {
+        ...fakeRetrieved({
+          chunk_id: 2,
+          page_id: 'payment-engine-quickstart-30min',
+          page_title: '支付引擎 30 分钟接入实战',
+          text: '回调外层关键字段：event_name 固定为 order，event_type 表示订单回调事件类型。请按事件流转处理并做好幂等。',
+          breadcrumb: [{ id: 'payment-engine', title: '支付引擎', type: 'section' }],
+        }),
+        final_score: 0.18,
+      },
+    ],
+    answerLang: 'zh',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+  });
+
+  assert.match(prompt.user, /回答检查清单/);
+  assert.match(prompt.user, /\/api\/v2\/order\/info/);
+  assert.match(prompt.user, /data\.status/);
+  assert.match(prompt.user, /event_type/);
+  assert.match(prompt.user, /必须写出“回调事件类型”/);
+  assert.match(prompt.user, /状态映射/);
+  assert.match(prompt.user, /幂等/);
+  assert.match(prompt.user, /\[cit_1\]/);
+  assert.match(prompt.user, /\[cit_2\]/);
+});
+
+test('buildPrompt: zh signature checklist says sign is excluded explicitly', () => {
+  const prompt = buildPrompt({
+    question: 'Cregis API 签名应该怎么拼接参数？sign 字段本身要不要参与签名？',
+    chunks: [
+      {
+        ...fakeRetrieved({
+          chunk_id: 1,
+          page_id: 'authentication',
+          page_title: '认证与签名',
+          text: '签名规则：将参数按字典序升序排列，sign 字段不参与签名计算，最后追加 API Key 做 MD5。',
+          breadcrumb: [{ id: 'get-started', title: '快速入门', type: 'section' }],
+        }),
+        final_score: 0.2,
+      },
+    ],
+    answerLang: 'zh',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+  });
+
+  assert.match(prompt.user, /必须明确写出：排除 `sign` 字段/);
+  assert.match(prompt.user, /`sign` 不参与签名计算/);
+});
+
+test('buildPrompt: adds grounded answer checklist for signature and webhook success facts', () => {
+  const prompt = buildPrompt({
+    question: 'How should I verify webhook retries and signature?',
+    chunks: [
+      {
+        ...fakeRetrieved({
+          chunk_id: 1,
+          lang: 'en',
+          page_id: 'authentication',
+          page_title: 'Authentication & Signature',
+          text: 'Signature rules: exclude the sign field before calculating the signature.',
+          breadcrumb: [{ id: 'get-started', title: 'Get Started', type: 'section' }],
+        }),
+        final_score: 0.2,
+      },
+      {
+        ...fakeRetrieved({
+          chunk_id: 2,
+          lang: 'en',
+          page_id: 'webhook-mechanism',
+          page_title: 'Webhook Callback Mechanism',
+          text: 'Webhook handler must return HTTP 200 and the plain text success after processing idempotently.',
+          breadcrumb: [{ id: 'get-started', title: 'Get Started', type: 'section' }],
+        }),
+        final_score: 0.18,
+      },
+    ],
+    answerLang: 'en',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+  });
+
+  assert.match(prompt.user, /Answer checklist/);
+  assert.match(prompt.user, /exclude `sign`/i);
+  assert.match(prompt.user, /HTTP 200/);
+  assert.match(prompt.user, /`success`/);
+});
+
+test('buildPrompt: adds grounded answer checklist for direct crypto order amount behavior', () => {
+  const prompt = buildPrompt({
+    question: 'Can I create an order directly in USDT after calculating FX myself?',
+    chunks: [
+      {
+        ...fakeRetrieved({
+          chunk_id: 1,
+          lang: 'en',
+          page_id: 'supported-currencies',
+          page_title: 'Supported Currencies',
+          text: 'If the merchant passes a cryptocurrency order_currency and order_amount, the order can use that crypto amount directly instead of relying on the CoinMarketCap exchange rate.',
+          breadcrumb: [{ id: 'payment-engine', title: 'Payment Engine', type: 'section' }],
+        }),
+        final_score: 0.2,
+      },
+    ],
+    answerLang: 'en',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+  });
+
+  assert.match(prompt.user, /Answer checklist/);
+  assert.match(prompt.user, /crypto order currency and amount directly/);
+  assert.doesNotMatch(prompt.user, /Mention the CoinMarketCap \/ CMC exchange-rate behavior/);
 });
 
 test('rerank: lang_boost +0.30 applied when chunk.lang == query_lang', () => {
@@ -381,6 +571,84 @@ test('rerank: current_page_boost prefers exact current page over same-subtree si
   );
 
   assert.equal(out[0]?.page_id, 'authentication');
+});
+
+test('rerank: api_reference_boost prefers API reference chunks for API-intent questions', () => {
+  const out = rerank(
+    [
+      fakeRetrieved({
+        chunk_id: 1,
+        page_id: 'payment-engine-quickstart-30min',
+        page_title: '支付引擎 30 分钟接入实战',
+        page_url: '/zh/payment-engine-quickstart-30min',
+        text: '创建订单后跳转托管收银台。',
+        rrf_score: 0.12,
+        nav_index: 1000,
+      }),
+      fakeRetrieved({
+        chunk_id: 2,
+        page_id: 'api-payment-engine-api-post-api-v2-checkout',
+        page_title: 'POST /api/v2/checkout — 创建订单',
+        page_url: '/zh/reference/payment-engine-api/post-api-v2-checkout',
+        text: 'API reference: Payment Engine API\nEndpoint: POST `/api/v2/checkout`',
+        rrf_score: 0.1,
+        nav_index: 1000,
+      }),
+    ],
+    {
+      queryLang: 'zh',
+      currentSubtreeRoot: null,
+      query: '创建订单接口 POST /api/v2/checkout 返回哪些字段？',
+      apiIntent: true,
+    },
+  );
+
+  assert.equal(out[0]?.page_id, 'api-payment-engine-api-post-api-v2-checkout');
+});
+
+test('rerank: api_reference_boost skips API chunks that miss hint terms or preferred version', () => {
+  const out = rerank(
+    [
+      fakeRetrieved({
+        chunk_id: 1,
+        page_id: 'api-waas-api-post-api-v1-payout',
+        page_title: 'POST /api/v1/payout — 发起钱包提币',
+        text: 'API reference: WaaS API. HTTP Request POST /api/v1/payout.',
+        rrf_score: 0.1,
+        nav_index: 1000,
+      }),
+      fakeRetrieved({
+        chunk_id: 2,
+        page_id: 'api-waas-api-post-api-v2-payout',
+        page_title: 'POST /api/v2/payout — 发起钱包提币',
+        text: 'API reference: WaaS API. HTTP Request POST /api/v2/payout.',
+        rrf_score: 0.1,
+        nav_index: 1000,
+      }),
+      fakeRetrieved({
+        chunk_id: 3,
+        page_id: 'api-waas-api-post-api-v1-coins',
+        page_title: 'POST /api/v1/coins — 查询币种',
+        text: 'API reference: WaaS API. HTTP Request POST /api/v1/coins.',
+        rrf_score: 0.1,
+        nav_index: 1000,
+      }),
+    ],
+    {
+      queryLang: 'zh',
+      currentSubtreeRoot: null,
+      query: 'WaaS API 出款流程',
+      apiIntent: true,
+      apiReferenceHintTerms: ['api', 'v1', 'payout'],
+      apiReferenceVersionPrefs: ['v1'],
+      apiReferencePagePrefix: 'api-waas-',
+    },
+  );
+  const v1 = out.find((c) => c.page_id === 'api-waas-api-post-api-v1-payout')!;
+  const v2 = out.find((c) => c.page_id === 'api-waas-api-post-api-v2-payout')!;
+  const coins = out.find((c) => c.page_id === 'api-waas-api-post-api-v1-coins')!;
+  assert.ok(v1.final_score > v2.final_score);
+  assert.ok(v1.final_score > coins.final_score);
 });
 
 test('rerank: nav_index_boost decays with depth', () => {
@@ -949,6 +1217,18 @@ test('postprocess: leading-slash API paths are direct-allow', () => {
     answerLang: 'en',
     rawAnswer:
       'Call `/v1/models`, `/api/v2/users`, and `/health/ready` to verify [cit_1]',
+    chunkById,
+  });
+  assert.doesNotMatch(out.answer_md, /⚠/);
+});
+
+test('postprocess: HTTP method plus API path is direct-allow', () => {
+  const chunkById = new Map<string, RerankedChunk>([
+    ['cit_1', fakeReranked({ text: 'HTTP Request POST /api/v2/checkout' })],
+  ]);
+  const out = postprocess({
+    answerLang: 'en',
+    rawAnswer: 'Call `POST /api/v2/checkout` to create the order [cit_1]',
     chunkById,
   });
   assert.doesNotMatch(out.answer_md, /⚠/);

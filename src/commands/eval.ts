@@ -22,7 +22,7 @@ import { join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { Runtime } from '../server/runtime.ts';
 import { loadConfig } from '../config.ts';
-import { askWithTrace } from '../query/answer.ts';
+import { askWithTrace, askWithTraceStream, type AskDeps, type AskWithTraceResult } from '../query/answer.ts';
 import { readApproved } from '../golden/store.ts';
 import {
   failedCase,
@@ -32,7 +32,7 @@ import {
   type EvalSummary,
 } from '../eval/scoring.ts';
 import type { GoldenCase } from '../golden/types.ts';
-import type { AskRequest } from '../query/types.ts';
+import type { AskRequest, AskResult } from '../query/types.ts';
 
 export type EvalOptions = {
   projectRoot: string;
@@ -54,6 +54,9 @@ export type EvalProgressEvent =
   | { type: 'case-start'; i: number; total: number; caseId: string; query: string; lang: string }
   | { type: 'case-done'; i: number; total: number; caseId: string; latencyMs: number; kind: CaseResult['kind']; r_at_5: boolean; citation_pass: boolean; answer_rule_pass: boolean }
   | { type: 'done'; reportPath: string; totalMs: number; summary: EvalSummary };
+
+const EVAL_CASE_ATTEMPTS = 2;
+const EVAL_RETRY_DELAY_MS = 1500;
 
 export async function runEval(opts: EvalOptions): Promise<number> {
   const projectRoot = resolve(opts.projectRoot);
@@ -88,7 +91,7 @@ export async function runEval(opts: EvalOptions): Promise<number> {
   opts.onProgress?.({ type: 'warm', bootMs: start.boot_ms, chunks: start.initialIndex.chunks.totalChunks });
 
   // 3. Run cases.
-  const deps = { db: runtime.db, embedder: runtime.embedder, llm: runtime.llm };
+  const deps = askDepsForEval(runtime);
   const results: CaseResult[] = [];
   for (let i = 0; i < cases.length; i++) {
     const c = cases[i]!;
@@ -97,12 +100,11 @@ export async function runEval(opts: EvalOptions): Promise<number> {
       i, total: cases.length,
       caseId: c.id, query: c.query, lang: c.lang,
     });
-    const req = goldenToAskRequest(c);
     const t1 = performance.now();
     let traced;
     let caseResult: CaseResult;
     try {
-      traced = await askWithTrace(deps, req);
+      traced = await runEvalCaseWithRetries(c, deps);
       caseResult = scoreCase(c, traced.result, traced.trace);
       caseResult.latency_ms = Math.round(performance.now() - t1);
     } catch (err) {
@@ -141,6 +143,61 @@ export async function runEval(opts: EvalOptions): Promise<number> {
   );
   opts.onProgress?.({ type: 'done', reportPath, totalMs, summary });
   return 0;
+}
+
+export type EvalAskFn = (deps: AskDeps, req: AskRequest) => Promise<AskWithTraceResult>;
+
+export function evalAskModeForDeps(deps: Pick<AskDeps, 'llm'>): 'stream' | 'json' {
+  return deps.llm.streamGenerate ? 'stream' : 'json';
+}
+
+export async function askWithTraceForEval(
+  deps: AskDeps,
+  req: AskRequest,
+): Promise<AskWithTraceResult> {
+  if (evalAskModeForDeps(deps) === 'stream') {
+    return askWithTraceStream(deps, req, { onDelta: () => {} });
+  }
+  return askWithTrace(deps, req);
+}
+
+export async function runEvalCaseWithRetries(
+  c: GoldenCase,
+  deps: AskDeps,
+  askOnce: EvalAskFn = askWithTraceForEval,
+  opts: { maxAttempts?: number; retryDelayMs?: number } = {},
+): Promise<AskWithTraceResult> {
+  const maxAttempts = Math.max(1, opts.maxAttempts ?? EVAL_CASE_ATTEMPTS);
+  const retryDelayMs = Math.max(0, opts.retryDelayMs ?? EVAL_RETRY_DELAY_MS);
+  const req = goldenToAskRequest(c);
+  for (let attempt = 1; ; attempt++) {
+    const traced = await askOnce(deps, req);
+    if (attempt >= maxAttempts || !shouldRetryEvalResult(traced.result)) {
+      return traced;
+    }
+    if (retryDelayMs > 0) {
+      await delay(retryDelayMs);
+    }
+  }
+}
+
+export function shouldRetryEvalResult(result: AskResult): boolean {
+  return result.type === 'error' && (result.code === 'llm_failed' || result.code === 'no_citations');
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
+export function askDepsForEval(
+  runtime: Pick<Runtime, 'db' | 'embedder' | 'llm' | 'config'>,
+): AskDeps {
+  return {
+    db: runtime.db,
+    embedder: runtime.embedder,
+    llm: runtime.llm,
+    promptConfig: runtime.config.prompt,
+  };
 }
 
 function goldenToAskRequest(c: GoldenCase): AskRequest {
