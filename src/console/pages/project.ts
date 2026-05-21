@@ -1259,7 +1259,14 @@ function setProjectTab(name) {
       el.hidden = el.dataset.projectTab !== name;
     }
   });
-  if (location.hash !== '#' + name) {
+  // Only normalise the hash when the tab portion is wrong. We must keep
+  // any \`?query=string\` suffix (RFC 0002 cross-journey jumps like
+  // \`#index?focus=<id>\` + Eval pagination \`#eval?gp=N\`). The previous
+  // strict-equality check silently stripped those query strings whenever
+  // a hashchange triggered tab-switching.
+  const current = location.hash || '';
+  const expected = '#' + name;
+  if (current !== expected && !current.startsWith(expected + '?')) {
     history.replaceState({}, '', location.pathname + '#' + name);
   }
 }
