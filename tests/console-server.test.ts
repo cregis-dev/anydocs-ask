@@ -314,6 +314,42 @@ test('GET /p/:name: every nav tab is in the hashchange whitelist (URL-anchor jum
   }
 });
 
+test('GET /p/:name: setProjectTab preserves ?query suffix (jump-to-doc dogfood regression)', async () => {
+  // Live dogfood on hermes-docs caught this: the Feedback drawer's
+  // jump-to-doc chip sets `location.hash = '#index?focus=<id>'`, which
+  // fires hashchange. The hashchange listener called setProjectTab('index'),
+  // and the pre-fix setProjectTab did:
+  //
+  //   if (location.hash !== '#' + name) {
+  //     history.replaceState({}, '', location.pathname + '#' + name);
+  //   }
+  //
+  // That strict-equality check force-stripped any `?query=string`, so the
+  // hash flipped to `#index` and the Index-tab focus receiver never saw
+  // the page id. Static-source assertion that the fixed shape is emitted.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+    // The fixed check uses `startsWith(expected + '?')` to keep the suffix.
+    assert.match(body, /const expected = '#' \+ name;/);
+    assert.match(body, /current\.startsWith\(expected \+ '\?'\)/);
+    // And the pre-fix shape MUST be gone — guard against re-introduction.
+    assert.equal(
+      /if \(location\.hash !== '#' \+ name\)/.test(body),
+      false,
+      'pre-fix strict equality check would silently strip ?query suffix',
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test('GET /p/:name: Feedback tab — disabled state when feedback.enabled is false (RFC 0002 T1-a)', async () => {
   // PRD §11.4 #6 makes feedback.enabled=false the default. The tab must
   // still register (so URL/anchor jumps work), but render the disabled
