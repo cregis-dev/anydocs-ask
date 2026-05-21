@@ -38,7 +38,8 @@ export type SearchSection = {
 
 /**
  * Strip markdown to plain-ish text. Diverges from anydocs by preserving the
- * insides of fenced + inline code blocks.
+ * insides of fenced + inline code blocks — *including their newlines*, so
+ * OpenAPI parameter tables and JSON schemas stay multi-line after stripping.
  */
 export function stripMarkdown(markdown: string): string {
   // Stash author-written placeholders (`<lang>`, `<pageId>`, …) before any
@@ -55,12 +56,15 @@ export function stripMarkdown(markdown: string): string {
   };
 
   const stripped = markdown
-    // Fenced code: keep the inner code, drop the fence + language tag.
-    // Match either ``` or ~~~, optional language, body, then matching close.
-    .replace(/```[a-zA-Z0-9_-]*\n?([\s\S]*?)```/g, '$1')
-    .replace(/~~~[a-zA-Z0-9_-]*\n?([\s\S]*?)~~~/g, '$1')
-    // Inline code: keep code text.
-    .replace(/`([^`]*)`/g, '$1')
+    // Fenced code: stash the inner code (preserving newlines), drop the fence.
+    // Without stashing, the `\s+ → ' '` collapse below would linearize multi-
+    // line code — losing structure for OpenAPI parameter tables, JSON schemas,
+    // and error-code listings. Restore at the end puts the original back.
+    .replace(/```[a-zA-Z0-9_-]*\n?([\s\S]*?)```/g, (_m, code: string) => stash(code))
+    .replace(/~~~[a-zA-Z0-9_-]*\n?([\s\S]*?)~~~/g, (_m, code: string) => stash(code))
+    // Inline code: stash too — protects e.g. `data.status` even though it's
+    // single-line, so later strip passes can't mangle it.
+    .replace(/`([^`]*)`/g, (_m, code: string) => stash(code))
     // Images: keep alt text.
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     // Links: keep link text.

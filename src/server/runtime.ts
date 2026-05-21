@@ -100,6 +100,9 @@ export class Runtime {
       db: this.db,
       embedder: this.embedder,
       projectRoot: this.projectRoot,
+      chunkOptions: {
+        maxChars: opts.config.indexing.chunkMaxTokens * 4,
+      },
     });
     this.runs = new RunsWriter({
       stateRoot: this.stateRoot,
@@ -214,4 +217,3 @@ function buildDefaultEmbedder(config: ResolvedConfig): Embedder {
   );
   return new MockEmbedder();
 }
-

@@ -62,7 +62,6 @@ export type ServerConfig = {
 
 export type IndexingConfig = {
   chunkMaxTokens: number;
-  chunkHardCap: number;
   debounceMs: number;
 };
 
@@ -179,7 +178,6 @@ const DEFAULTS: ResolvedConfig = {
   },
   indexing: {
     chunkMaxTokens: 500,
-    chunkHardCap: 1000,
     debounceMs: 200,
   },
   runs: {
