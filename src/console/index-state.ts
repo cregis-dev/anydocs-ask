@@ -14,6 +14,8 @@ import { join } from 'node:path';
 import { loadProject } from '../anydocs/loader.ts';
 import type { LoadedProject } from '../anydocs/loader.ts';
 import type { DocsLang } from '../anydocs/types.ts';
+import { iterateRunsSince } from '../runs/writer.ts';
+import type { RunRecord, RunsLine } from '../runs/types.ts';
 
 export type IndexPageInfo = {
   id: string;
@@ -26,7 +28,38 @@ export type IndexPageInfo = {
   breadcrumb: string[];
   /** True when nav references this page but the page file is missing. */
   missingFile?: true;
+  /** Reverse mark (RFC 0002 T4): how often this page contributed to an
+   *  answer in the past N days + the median confidence across those
+   *  hits. Absent when no runs touched the page, OR when count is below
+   *  the noise threshold (kept undefined so the renderer can skip without
+   *  hard-coding the threshold twice). */
+  askStats?: AskUsageEntry;
 };
+
+/** Aggregate ask-usage stats per page (RFC 0002 T4). Only populated when
+ *  the page accumulated ≥ ASK_STATS_MIN_COUNT hits in the window. */
+export type AskUsageEntry = {
+  /** Number of distinct runs whose `retrieval.fused` cited this page. */
+  count: number;
+  /** Median of those runs' `answer.confidence`. null when every run had
+   *  null confidence (rare — usually only on errors). */
+  medianConfidence: number | null;
+};
+
+export type AskUsageStats = {
+  /** Rolling window length in days. */
+  days: number;
+  /** ISO date (UTC) marking the start of the window. */
+  sinceISO: string;
+  /** Per-page entries — only includes pages that crossed the noise floor. */
+  byPageId: Map<string, AskUsageEntry>;
+};
+
+/** RFC 0002 §5.3 + decision Q4: ≥ 3 hits before we show a mark. Below
+ *  that the signal is too noisy to gripe at the author. */
+export const ASK_STATS_MIN_COUNT = 3;
+/** RFC 0002 §5.3: confidence median below this means "warn" tinting. */
+export const ASK_STATS_LOW_CONFIDENCE = 0.5;
 
 export type IndexLangSummary = {
   lang: DocsLang;
@@ -48,6 +81,10 @@ export type IndexSnapshot = {
    * when the child is running. null when offline or not warmed up yet.
    */
   dbStatus: ChildIndexStatus | null;
+  /** Ask-usage reverse marks (RFC 0002 T4). null when stateRoot wasn't
+   *  provided (e.g. invalid project / no projectId) or when runs.jsonl
+   *  is absent. Per-page entries already gated on the noise floor. */
+  askStats: AskUsageStats | null;
 };
 
 export type ChildIndexStatus = {
@@ -60,7 +97,20 @@ export type ChildIndexStatus = {
   last_indexed_at: number | null;
 };
 
-export async function loadIndexSnapshot(projectRoot: string): Promise<IndexSnapshot> {
+export type LoadIndexOpts = {
+  /** Runtime state root (<workspace>/state/<projectId>/). When supplied
+   *  we compute RFC 0002 T4 reverse marks from runs.jsonl. Omit to skip
+   *  the scan (e.g. invalid projects / no projectId / unit tests). */
+  stateRoot?: string;
+  /** Rolling-window length for the ask-usage scan. Default 7 days per
+   *  RFC 0002 §5.3. */
+  askStatsDays?: number;
+};
+
+export async function loadIndexSnapshot(
+  projectRoot: string,
+  opts: LoadIndexOpts = {},
+): Promise<IndexSnapshot> {
   let project: LoadedProject;
   try {
     project = await loadProject(projectRoot);
@@ -73,6 +123,7 @@ export async function loadIndexSnapshot(projectRoot: string): Promise<IndexSnaps
       warnings: [(err as Error).message],
       totalPages: 0,
       dbStatus: null,
+      askStats: null,
     };
   }
 
@@ -153,13 +204,91 @@ export async function loadIndexSnapshot(projectRoot: string): Promise<IndexSnaps
     }
   }
 
+  // RFC 0002 T4 — reverse marks. Tagged onto the page summaries before
+  // the snapshot returns, so the renderer just reads `p.askStats` and
+  // doesn't need to do its own JOIN.
+  const askStats = opts.stateRoot
+    ? loadAskUsageStats(opts.stateRoot, opts.askStatsDays ?? 7)
+    : null;
+  if (askStats) {
+    for (const l of langs) {
+      for (const p of l.pages) {
+        const e = askStats.byPageId.get(p.id);
+        if (e) p.askStats = e;
+      }
+      for (const p of l.orphans) {
+        const e = askStats.byPageId.get(p.id);
+        if (e) p.askStats = e;
+      }
+    }
+  }
+
   return {
     projectRoot,
     langs,
     warnings,
     totalPages,
     dbStatus: null,
+    askStats,
   };
+}
+
+/**
+ * Walk runs.jsonl in [now-days, now) and bucket "which pages did each ask
+ * surface in retrieval.fused?". One ask hitting the same page across
+ * multiple fused chunks still counts as 1 hit (deduped per request). We
+ * track confidence per hitting run so the renderer can show median-style
+ * tinting per RFC 0002 §5.3.
+ *
+ * The scan is read-on-render — same cost class as Traffic / Feedback —
+ * so we don't cache between requests. Pages below ASK_STATS_MIN_COUNT
+ * are dropped to keep the renderer's branch logic simple.
+ */
+export function loadAskUsageStats(stateRoot: string, days: number): AskUsageStats {
+  const safeDays = Math.max(1, days);
+  const sinceMs = Date.now() - safeDays * 86_400_000;
+  const acc: Map<string, { count: number; confs: number[] }> = new Map();
+  for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
+    if ('type' in line && line.type === 'feedback-update') continue;
+    const rec = line as RunRecord;
+    const fused = rec.retrieval?.fused;
+    if (!Array.isArray(fused) || fused.length === 0) continue;
+    const seenPages = new Set<string>();
+    for (const f of fused) {
+      if (!f || typeof f.page !== 'string' || f.page.length === 0) continue;
+      seenPages.add(f.page);
+    }
+    if (seenPages.size === 0) continue;
+    const conf = typeof rec.answer?.confidence === 'number' ? rec.answer.confidence : null;
+    for (const pageId of seenPages) {
+      const bucket = acc.get(pageId) ?? { count: 0, confs: [] };
+      bucket.count++;
+      if (conf !== null) bucket.confs.push(conf);
+      acc.set(pageId, bucket);
+    }
+  }
+
+  const byPageId: Map<string, AskUsageEntry> = new Map();
+  for (const [pageId, bucket] of acc) {
+    if (bucket.count < ASK_STATS_MIN_COUNT) continue;
+    byPageId.set(pageId, {
+      count: bucket.count,
+      medianConfidence: bucket.confs.length > 0 ? median(bucket.confs) : null,
+    });
+  }
+  return {
+    days: safeDays,
+    sinceISO: new Date(sinceMs).toISOString().slice(0, 10),
+    byPageId,
+  };
+}
+
+function median(xs: number[]): number {
+  const sorted = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1]! + sorted[mid]!) / 2
+    : sorted[mid]!;
 }
 
 function walkNav(

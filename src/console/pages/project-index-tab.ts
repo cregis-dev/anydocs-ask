@@ -13,7 +13,14 @@
 
 import { html, raw } from 'hono/html';
 import type { Html } from './layout.ts';
-import type { IndexSnapshot, IndexLangSummary, IndexPageInfo } from '../index-state.ts';
+import {
+  ASK_STATS_LOW_CONFIDENCE,
+  ASK_STATS_MIN_COUNT,
+  type IndexSnapshot,
+  type IndexLangSummary,
+  type IndexPageInfo,
+  type AskUsageEntry,
+} from '../index-state.ts';
 
 export type IndexTabViewModel = {
   projectName: string;
@@ -249,6 +256,7 @@ function groupByBreadcrumb(pages: IndexPageInfo[]): Html {
             <svg style="width: 12px; height: 12px;"><use href="#i-chev-d"/></svg>
             ${b.trail.length > 0 ? b.trail.join(' › ') : '(root)'}
             <span style="color: var(--fg-mute); font-weight: 400;">· ${b.pages.length}</span>
+            ${sectionAskBadge(b.pages)}
           </div>
           ${b.pages.map((p) => pageRow(p, false))}
         </div>
@@ -257,17 +265,76 @@ function groupByBreadcrumb(pages: IndexPageInfo[]): Html {
   `;
 }
 
+/**
+ * Aggregate ask-usage across all pages in a section block, rendered next
+ * to the section header. Reuses the same `< MIN_COUNT` noise floor as
+ * per-page marks. Median confidence aggregation here is "median of the
+ * pages' medians" — an approximation, but cheap and aligned enough with
+ * "is this section healthy?" for an at-a-glance dev tool.
+ */
+function sectionAskBadge(pages: IndexPageInfo[]): Html {
+  let count = 0;
+  const medians: number[] = [];
+  for (const p of pages) {
+    if (!p.askStats) continue;
+    count += p.askStats.count;
+    if (p.askStats.medianConfidence !== null) medians.push(p.askStats.medianConfidence);
+  }
+  if (count < ASK_STATS_MIN_COUNT) return html``;
+  const median = medians.length > 0 ? medianOf(medians) : null;
+  const warn = median !== null && median < ASK_STATS_LOW_CONFIDENCE;
+  return askMark({ count, medianConfidence: median }, warn, '7d');
+}
+
+/**
+ * Per-row reverse mark. `medianConfidence === null` happens when every
+ * hitting run had `confidence === null` (rare; usually only on errored
+ * answers), so we treat that as warn — null confidence is itself a
+ * weak signal.
+ */
+function pageAskBadge(p: IndexPageInfo): Html {
+  if (!p.askStats) return html``;
+  const m = p.askStats.medianConfidence;
+  const warn = m === null || m < ASK_STATS_LOW_CONFIDENCE;
+  return askMark(p.askStats, warn, '7d');
+}
+
+function askMark(entry: AskUsageEntry, warn: boolean, windowLabel: string): Html {
+  const conf =
+    entry.medianConfidence === null ? '—' : entry.medianConfidence.toFixed(2);
+  const title = `Past ${windowLabel}: ${entry.count} ask${entry.count === 1 ? '' : 's'} hit this node · median confidence ${conf}`;
+  // `.tag.warn` already exists in layout.ts — reuse for the dot tinting.
+  return html`<span
+    class="tag${warn ? ' warn' : ''}"
+    title="${title}"
+    data-ask-mark="${warn ? 'warn' : 'ok'}"
+    data-ask-count="${entry.count}"
+    style="margin-left: 6px; font-size: 11px;"
+  >
+    ${warn ? '⚠' : '◷'} ${entry.count} ask${entry.count === 1 ? '' : 's'}
+  </span>`;
+}
+
+function medianOf(xs: number[]): number {
+  const sorted = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1]! + sorted[mid]!) / 2
+    : sorted[mid]!;
+}
+
 function pageRow(p: IndexPageInfo, isOrphan: boolean): Html {
   const cls = p.missingFile ? 'err' : p.status === 'published' ? 'ok' : '';
   const tagText = p.missingFile ? 'missing file' : isOrphan ? 'orphan' : p.status;
   return html`
-    <div class="tree-row" data-search="${(p.title + ' ' + p.id).toLowerCase()}">
+    <div class="tree-row" data-page-id="${p.id}" data-search="${(p.title + ' ' + p.id).toLowerCase()}">
       <span class="t-ti">
         <svg style="width: 12px; height: 12px; color: var(--fg-mute);"><use href="#i-doc"/></svg>
         <span>${p.title}</span>
       </span>
       <span class="t-slug">${p.slug ?? p.id}</span>
       <span class="tag ${cls}">${tagText}</span>
+      ${pageAskBadge(p)}
     </div>
   `;
 }

@@ -1081,6 +1081,151 @@ test('GET /api/projects/:name/feedback/:id: row with no linked run → run=null,
   }
 });
 
+// ---------------------------------------------------------------------------
+// T4 — Index tab reverse marks (per-page + per-section)
+// ---------------------------------------------------------------------------
+
+test('GET /p/:name: Index tab — per-page ask-usage badge renders when ≥3 hits (RFC 0002 T4)', async () => {
+  // Set up: a project with nav→page=auth-jwt, 4 fresh runs all hitting
+  // that page with high confidence. The badge should render with the
+  // neutral (◷) glyph and a count of 4.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const projectRoot = join(ws, 'projects', 'docs-zh');
+    // Wire navigation so the page actually surfaces in the content
+    // explorer; the loader needs both files.
+    await fs.writeFile(
+      join(projectRoot, 'navigation', 'zh.json'),
+      JSON.stringify({ version: 1, items: [{ type: 'page', pageId: 'auth-jwt' }] }),
+    );
+    await fs.mkdir(join(projectRoot, 'pages', 'zh'), { recursive: true });
+    await fs.writeFile(
+      join(projectRoot, 'pages', 'zh', 'auth-jwt.json'),
+      JSON.stringify({
+        id: 'auth-jwt',
+        lang: 'zh',
+        slug: 'auth-jwt',
+        title: 'JWT auth',
+        status: 'published',
+        content: { version: 1, blocks: [] },
+      }),
+    );
+    const stateRoot = ensureStateRoot(ws, 'docs-zh');
+    await seedRunsFile(stateRoot, [
+      makeRunRecord({ answer_id: 'a1', confidence: 0.8 }),
+      makeRunRecord({ answer_id: 'a2', confidence: 0.8 }),
+      makeRunRecord({ answer_id: 'a3', confidence: 0.8 }),
+      makeRunRecord({ answer_id: 'a4', confidence: 0.8 }),
+    ].map((r, i) => ({
+      ...r,
+      retrieval: { fused: [{ chunk_id: i + 1, page: 'auth-jwt', rrf_score: 0.5, final_score: 0.5, vec_rank: 1, bm25_rank: 1, nav_index: null, nav_index_boost: 0 }], subtree_ask_triggered: false },
+    })));
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+    // Badge present with neutral glyph + count + ask-count attribute.
+    assert.match(body, /data-page-id="auth-jwt"[\s\S]*?data-ask-mark="ok"/);
+    assert.match(body, /data-ask-count="4"/);
+    assert.match(body, /◷\s*4 asks/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Index tab — warn tint when median confidence < 0.5 (RFC 0002 T4)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const projectRoot = join(ws, 'projects', 'docs-zh');
+    await fs.writeFile(
+      join(projectRoot, 'navigation', 'zh.json'),
+      JSON.stringify({ version: 1, items: [{ type: 'page', pageId: 'shaky-page' }] }),
+    );
+    await fs.mkdir(join(projectRoot, 'pages', 'zh'), { recursive: true });
+    await fs.writeFile(
+      join(projectRoot, 'pages', 'zh', 'shaky-page.json'),
+      JSON.stringify({
+        id: 'shaky-page',
+        lang: 'zh',
+        slug: 'shaky-page',
+        title: 'Shaky',
+        status: 'published',
+        content: { version: 1, blocks: [] },
+      }),
+    );
+    const stateRoot = ensureStateRoot(ws, 'docs-zh');
+    await seedRunsFile(stateRoot, [
+      makeRunRecord({ answer_id: 'a1', confidence: 0.2 }),
+      makeRunRecord({ answer_id: 'a2', confidence: 0.3 }),
+      makeRunRecord({ answer_id: 'a3', confidence: 0.4 }),
+    ].map((r, i) => ({
+      ...r,
+      retrieval: { fused: [{ chunk_id: i + 1, page: 'shaky-page', rrf_score: 0.5, final_score: 0.5, vec_rank: 1, bm25_rank: 1, nav_index: null, nav_index_boost: 0 }], subtree_ask_triggered: false },
+    })));
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+    assert.match(body, /data-page-id="shaky-page"[\s\S]*?data-ask-mark="warn"/);
+    assert.match(body, /⚠\s*3 asks/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Index tab — no badge when hit count < 3 (RFC 0002 T4 noise floor)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const projectRoot = join(ws, 'projects', 'docs-zh');
+    await fs.writeFile(
+      join(projectRoot, 'navigation', 'zh.json'),
+      JSON.stringify({ version: 1, items: [{ type: 'page', pageId: 'quiet-page' }] }),
+    );
+    await fs.mkdir(join(projectRoot, 'pages', 'zh'), { recursive: true });
+    await fs.writeFile(
+      join(projectRoot, 'pages', 'zh', 'quiet-page.json'),
+      JSON.stringify({
+        id: 'quiet-page',
+        lang: 'zh',
+        slug: 'quiet-page',
+        title: 'Quiet',
+        status: 'published',
+        content: { version: 1, blocks: [] },
+      }),
+    );
+    const stateRoot = ensureStateRoot(ws, 'docs-zh');
+    await seedRunsFile(stateRoot, [
+      makeRunRecord({ answer_id: 'a1', confidence: 0.9 }),
+      makeRunRecord({ answer_id: 'a2', confidence: 0.9 }),
+    ].map((r, i) => ({
+      ...r,
+      retrieval: { fused: [{ chunk_id: i + 1, page: 'quiet-page', rrf_score: 0.5, final_score: 0.5, vec_rank: 1, bm25_rank: 1, nav_index: null, nav_index_boost: 0 }], subtree_ask_triggered: false },
+    })));
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+    // Row exists, but no badge attribute should appear for it.
+    assert.match(body, /data-page-id="quiet-page"/);
+    // Tighter assertion: the badge data-attrs don't co-occur with this page.
+    assert.equal(/data-page-id="quiet-page"[^>]*>[^<]*<[^<]*data-ask-mark/.test(body), false);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('GET /p/:name: renders Settings tab with prompt + LLM + retrieval + feedback fields', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {

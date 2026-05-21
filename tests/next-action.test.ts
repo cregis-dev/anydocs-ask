@@ -51,6 +51,7 @@ function snapshot(opts: {
     warnings: opts.warnings ?? [],
     totalPages,
     dbStatus: opts.dbStatus ?? null,
+    askStats: null,
   };
 }
 

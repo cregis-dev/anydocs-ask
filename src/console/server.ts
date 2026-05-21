@@ -323,7 +323,9 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         : null;
     let indexSnapshot;
     if (project.valid) {
-      indexSnapshot = await loadIndexSnapshot(project.path);
+      indexSnapshot = await loadIndexSnapshot(project.path, {
+        ...(stateRoot ? { stateRoot } : {}),
+      });
       // Best-effort: ask the child for DB-side counts when it's running.
       const port = deps.registry.getPort(name);
       if (port !== null) {
