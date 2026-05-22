@@ -241,6 +241,7 @@ chunks           = RRF([vec_retrieve(embedding_query), bm25_retrieve(bm25_query)
 | 2026-05-21 | **方向修订：方案 A → 方案 B.2 大模型一次消化**。删除小模型 reformulation pipeline / OpenAI-compatible 客户端 / 双路 RRF / post-validation / 运行时准备示例；schema 简化为 `enabled` + `historyTurns` 两字段；§2.3 第 2 条改为禁止"裸拼"而非禁止"拼"；新增 Appendix A 保留 smoke 实证依据 | @shawndslee |
 | 2026-05-22 | alpha.0 M1 落地（PR #57）：history-aware retrieve query 接通；`context.history` 仅承载 question 串，BM25 / entity injection 保持单轮 | @shawndslee |
 | 2026-05-22 | **alpha.1 落地 M2+M3+M4 + 默认 flip**：M2 system prompt 加 5 条多轮约束 + user prompt 加"对话历史"段；M3 SessionEntry 增 `answer_md_summary`（200 字截断）；M4 `AskAnswer.history_window` 接口字段 + runs.jsonl 透出；`multiTurn.enabled` 默认 `false → true`。同步把 γ 相似度比较的 vector 与 retrieve vector 拆开（避免 multi-turn 注入污染 γ implicit-negative 信号）— 多算一次 raw question embedding，每轮多轮 ask cost +1 embed 调用 | @shawndslee |
+| 2026-05-22 | **M6 落地（Console Studio 对话级分组）**：Feedback tab snapshot 引入 sessionId/historyWindow/turnIndex/sessionTurnCount 维度（runs.jsonl JOIN 兜底 β 行的空 session_id 列）；SSR + 内嵌 JS 双路径把连续同 session 行折叠成一个 dialogue 块，行内带 `T<N>/<M>` 徽章，header 带 history_window 标签；drawer 增 SESSION 段，列同 session 其它 turn 并支持 jump。RFC 0003 0.4 in-scope 全部接通；后续 M5 配置开关 + Reader 暴露归到 0.4 release 收尾 | @shawndslee |
 
 ---
 

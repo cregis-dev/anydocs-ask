@@ -442,12 +442,15 @@ function insertFeedback(
     signal_source?: 'explicit' | 'implicit' | 'curated';
     current_page_id?: string | null;
     created_at?: number;
+    /** RFC 0003 M6 — populated by γ + curated inserts; β path persists null
+     *  today (see app.ts:308). Tests use this to seed multi-turn dialogues. */
+    session_id?: string | null;
   },
 ): void {
   db.prepare(
     `INSERT INTO feedback
-       (answer_id, question, generated, rating, signal_source, current_page_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (answer_id, question, generated, rating, signal_source, current_page_id, created_at, session_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     args.answer_id,
     args.question ?? 'q',
@@ -456,6 +459,7 @@ function insertFeedback(
     args.signal_source ?? 'explicit',
     args.current_page_id ?? null,
     args.created_at ?? Date.now(),
+    args.session_id ?? null,
   );
 }
 
@@ -755,28 +759,37 @@ function makeRunRecord(args: {
   kind?: 'answer' | 'clarify' | 'error';
   confidence?: number;
   citations?: Array<{ chunk_id: number | null; page: string; quote: string }>;
+  /** RFC 0003 — populated by the multi-turn pipeline (alpha.0+). M6 tests
+   *  use this to exercise the runs.jsonl fallback for β rows whose
+   *  feedback.session_id column is null. */
+  session_id?: string | null;
+  history_window?: number;
 }): Record<string, unknown> {
+  const answerCore: Record<string, unknown> = {
+    kind: args.kind ?? 'answer',
+    answer_id: args.answer_id,
+    md: 'a',
+    citations: args.citations ?? [{ chunk_id: 1, page: 'p', quote: 'q' }],
+    confidence: args.confidence ?? 0.7,
+    latency_ms: 100,
+    tokens_in: null,
+    tokens_out: null,
+    model: 'mock',
+    error_code: null,
+  };
+  if (typeof args.history_window === 'number') {
+    answerCore.history_window = args.history_window;
+  }
   return {
     ts: args.ts ?? new Date().toISOString(),
     request_id: 'req_' + args.answer_id,
-    session_id: null,
+    session_id: args.session_id ?? null,
     query: 'q',
     filters: {},
     context_pageId: null,
     source: 'reader',
     retrieval: { fused: [], subtree_ask_triggered: false },
-    answer: {
-      kind: args.kind ?? 'answer',
-      answer_id: args.answer_id,
-      md: 'a',
-      citations: args.citations ?? [{ chunk_id: 1, page: 'p', quote: 'q' }],
-      confidence: args.confidence ?? 0.7,
-      latency_ms: 100,
-      tokens_in: null,
-      tokens_out: null,
-      model: 'mock',
-      error_code: null,
-    },
+    answer: answerCore,
     feedback: { beta: null, gamma: null },
   };
 }
@@ -1112,6 +1125,200 @@ test('GET /api/projects/:name/feedback/:id: row with no linked run → run=null,
     assert.equal(body.detail.run, null);
     assert.equal(body.detail.confidence, null);
     assert.equal(body.detail.breadcrumb, null);
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// RFC 0003 M6 — Feedback tab session grouping
+// ---------------------------------------------------------------------------
+
+test('GET /p/:name: Feedback tab — contiguous same-session rows fold into one block (RFC 0003 M6)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    const t0 = Date.now() - 60_000;
+    // 3-turn dialogue (session_id sess-a) interleaved on the timeline with
+    // a standalone row (no session). The SSR list is newest-first; the
+    // session block should still render in chronological order inside.
+    insertFeedback(db, {
+      answer_id: 'a-turn-1', question: 'Q1', rating: 1,
+      session_id: 'sess-a', created_at: t0,
+    });
+    insertFeedback(db, {
+      answer_id: 'standalone', question: 'standalone q', rating: -1,
+      session_id: null, created_at: t0 + 1_000,
+    });
+    insertFeedback(db, {
+      answer_id: 'a-turn-2', question: 'Q2', signal_source: 'implicit', rating: null,
+      session_id: 'sess-a', created_at: t0 + 2_000,
+    });
+    insertFeedback(db, {
+      answer_id: 'a-turn-3', question: 'Q3', rating: 1,
+      session_id: 'sess-a', created_at: t0 + 3_000,
+    });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+
+    // Session header carries the dialogue count + truncated session_id.
+    // Match on data-session-id="sess-a" — the literal value only appears
+    // in SSR output, not in the inline JS template (the JS escapes from
+    // a variable, leaving `data-session-id="` as a partial literal).
+    assert.match(body, /data-session-id="sess-a"/);
+    assert.match(body, /3-turn dialogue/);
+    // The 3-turn session emits exactly one SSR header — count unique
+    // session id attrs to avoid hitting the inline JS template's literal
+    // `class="feedback-session-hd"` substring.
+    const headerMatches = body.match(/data-session-id="sess-a"/g) ?? [];
+    assert.equal(headerMatches.length, 1, 'expected 1 session header for 3-turn dialogue');
+    // Each turn row has the grouped variant. Grouped rows also carry a
+    // matching data-feedback-session-id attribute on each <li>; count
+    // those to avoid the JS template noise.
+    const groupedSessionRows = body.match(/data-feedback-session-id="sess-a"/g) ?? [];
+    assert.equal(groupedSessionRows.length, 3, 'expected 3 turn rows for sess-a');
+    assert.match(body, /T1\/3/);
+    assert.match(body, /T2\/3/);
+    assert.match(body, /T3\/3/);
+
+    // Standalone row stays ungrouped + carries an empty session id attr.
+    assert.match(body, /data-feedback-session-id=""/);
+
+    // Inside the rendered HTML, the order of turns Q1 → Q2 → Q3 (chronological)
+    // must hold even though the global list is newest-first. The questions
+    // appear once each in the SSR (drawer is lazy-loaded, JS template noise
+    // doesn't contain these literal strings).
+    const q1 = body.indexOf('Q1');
+    const q2 = body.indexOf('Q2');
+    const q3 = body.indexOf('Q3');
+    assert.ok(q1 > 0, 'Q1 must appear in SSR body');
+    assert.ok(q2 > q1, 'Q2 must follow Q1 (chronological order inside group)');
+    assert.ok(q3 > q2, 'Q3 must follow Q2 (chronological order inside group)');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab — single-turn session does not render a session header (RFC 0003 M6)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'lone-1', rating: 1, session_id: 'sess-x' });
+    insertFeedback(db, { answer_id: 'lone-2', rating: -1, session_id: 'sess-y' });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+    // No SSR session header — sessionTurnCount=1 for each row. We match on
+    // data-session-id="sess-x"/"sess-y" because the inline JS template
+    // contains the literal `class="feedback-session-hd"` substring.
+    assert.equal(body.includes('data-session-id="sess-x"'), false);
+    assert.equal(body.includes('data-session-id="sess-y"'), false);
+    // Standalone rows carry their session id on the row li (for replay /
+    // future linking) but never the `grouped` modifier class.
+    assert.match(body, /data-feedback-session-id="sess-x"/);
+    assert.match(body, /data-feedback-session-id="sess-y"/);
+    // The grouped marker only ever lands in SSR if a header was emitted;
+    // count distinct `data-feedback-session-id="sess-x"` to ensure no
+    // duplicate / grouped row was rendered.
+    const sessXRows = body.match(/data-feedback-session-id="sess-x"/g) ?? [];
+    assert.equal(sessXRows.length, 1, 'expected exactly one ungrouped sess-x row');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback: rows carry sessionId / turnIndex / sessionTurnCount / historyWindow (RFC 0003 M6)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    const t0 = Date.now() - 60_000;
+    // β explicit rows leave session_id NULL in the column (see app.ts:308);
+    // the runs.jsonl fallback must backfill them for the M6 grouping to
+    // work on real β data.
+    insertFeedback(db, {
+      answer_id: 'b1', rating: 1, session_id: null, created_at: t0,
+    });
+    insertFeedback(db, {
+      answer_id: 'b2', rating: -1, session_id: null, created_at: t0 + 1_000,
+    });
+    db.close();
+    await seedRunsFile(stateRoot, [
+      makeRunRecord({ answer_id: 'b1', session_id: 'sess-beta', history_window: 0 }),
+      makeRunRecord({ answer_id: 'b2', session_id: 'sess-beta', history_window: 1 }),
+    ]);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const json = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      rows: Array<{
+        sessionId: string | null;
+        turnIndex: number;
+        sessionTurnCount: number;
+        historyWindow: number | null;
+      }>;
+    };
+    assert.equal(json.rows.length, 2);
+    // Newest-first ordering — b2 is row 0.
+    const [row0, row1] = json.rows;
+    assert.equal(row0.sessionId, 'sess-beta');
+    assert.equal(row1.sessionId, 'sess-beta');
+    assert.equal(row0.sessionTurnCount, 2);
+    assert.equal(row1.sessionTurnCount, 2);
+    assert.equal(row0.turnIndex, 2);
+    assert.equal(row1.turnIndex, 1);
+    assert.equal(row0.historyWindow, 1);
+    assert.equal(row1.historyWindow, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback/:id: drawer detail carries peer sessionTurns (RFC 0003 M6)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    const t0 = Date.now() - 60_000;
+    insertFeedback(db, { answer_id: 't1', question: 'first',  rating: 1, session_id: 'sess-d', created_at: t0 });
+    insertFeedback(db, { answer_id: 't2', question: 'second', rating: -1, session_id: 'sess-d', created_at: t0 + 1_000 });
+    insertFeedback(db, { answer_id: 't3', question: 'third', signal_source: 'implicit', session_id: 'sess-d', created_at: t0 + 2_000 });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    // The middle row is feedback_id=2 (autoincrement; matches insert order).
+    const json = (await (await app.request('/api/projects/docs-zh/feedback/2')).json()) as {
+      detail: {
+        sessionId: string | null;
+        turnIndex: number;
+        sessionTurnCount: number;
+        sessionTurns: Array<{ feedback_id: number; turnIndex: number; question: string }>;
+      };
+    };
+    assert.equal(json.detail.sessionId, 'sess-d');
+    assert.equal(json.detail.sessionTurnCount, 3);
+    assert.equal(json.detail.turnIndex, 2);
+    // sessionTurns excludes the current row, ordered by turnIndex ASC.
+    assert.equal(json.detail.sessionTurns.length, 2);
+    assert.deepEqual(
+      json.detail.sessionTurns.map((t) => [t.turnIndex, t.question]),
+      [
+        [1, 'first'],
+        [3, 'third'],
+      ],
+    );
   } finally {
     await cleanup();
   }
