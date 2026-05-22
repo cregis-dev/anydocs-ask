@@ -89,6 +89,24 @@ export type FeedbackRowVM = {
    *  matching run line. Drives the `no_citations` chip badge + per-row
    *  warn affordance. */
   hadNoCitations: boolean | null;
+  /** RFC 0003 M6 — session_id of the linked run (preferred) or the feedback
+   *  row's stored column (fallback). null when neither source has it —
+   *  pre-multi-turn rows, or runs.jsonl rolled out of the window. The
+   *  Feedback tab uses this to fold contiguous same-session rows into one
+   *  conversation block. */
+  sessionId: string | null;
+  /** RFC 0003 M6 — number of prior turns this answer consumed (from
+   *  `RunAnswer.history_window`). null on single-turn calls / pre-M4 rows
+   *  / multiTurn.enabled=false. Drives the "history N" badge on grouped
+   *  rows. */
+  historyWindow: number | null;
+  /** RFC 0003 M6 — 1-based position of this row inside its session, ordered
+   *  by `created_at` ASC. Always 1 when `sessionId` is null (the row is
+   *  treated as a standalone 1-turn session). */
+  turnIndex: number;
+  /** RFC 0003 M6 — total feedback rows observed for the same `sessionId`
+   *  inside the same window. 1 when `sessionId` is null. */
+  sessionTurnCount: number;
 };
 
 export type FilterCounts = Record<FeedbackFilter, number>;
@@ -263,8 +281,23 @@ function computeSnapshot(
     rowsRaw.map((r) => r.current_page_id).filter((id): id is string => id !== null),
   );
 
+  // Window-wide session turn counts: position each feedback_id inside its
+  // session, ordered by created_at ASC (feedback_id tiebreak) across the
+  // whole window — not just the current filter / page — so a row's
+  // "turn 2 of 3" label stays stable across chip switches. Includes
+  // 'curated' rows: they share the session and should count toward the
+  // dialogue length when present.
+  const sessionTurnIndex = buildSessionTurnIndex(db, sinceMs, runIndex);
+
   const rows: FeedbackRowVM[] = rowsRaw.map((r) => {
     const runMeta = runIndex.get(r.answer_id);
+    // Prefer runs.jsonl session_id (always populated by the ask pipeline);
+    // fall back to feedback.session_id (γ rows write it, β explicit path
+    // currently does not — see app.ts:308). Either source produces a
+    // groupable sessionId for M6.
+    const sessionId = runMeta?.sessionId ?? r.session_id ?? null;
+    const meta = sessionId ? sessionTurnIndex.get(sessionId) : undefined;
+    const turnIndex = meta ? meta.orderedIds.indexOf(r.feedback_id) + 1 : 1;
     return {
       feedback_id: r.feedback_id,
       ts: new Date(r.created_at).toISOString(),
@@ -276,6 +309,10 @@ function computeSnapshot(
       breadcrumb: r.current_page_id ? breadcrumbs.get(r.current_page_id) ?? null : null,
       confidence: runMeta?.confidence ?? null,
       hadNoCitations: runMeta?.citationsEmpty ?? null,
+      sessionId,
+      historyWindow: runMeta?.historyWindow ?? null,
+      turnIndex: turnIndex > 0 ? turnIndex : 1,
+      sessionTurnCount: meta ? meta.orderedIds.length : 1,
     };
   });
 
@@ -445,6 +482,14 @@ type RunIndexEntry = {
   /** True when the run produced zero citations (error or empty list).
    *  Drives the no_citations chip + per-row warn affordance. */
   citationsEmpty: boolean;
+  /** RFC 0003 M6 — session_id from the linked run line. Always present on
+   *  the run record (legacy rows may be null pre-RFC 0001 S5). Used by the
+   *  Feedback tab to fold same-session rows even when the feedback table
+   *  column is null (e.g. β explicit insert path which never wrote it). */
+  sessionId: string | null;
+  /** RFC 0003 M6 — `RunAnswer.history_window`. null on single-turn / legacy
+   *  rows / multiTurn.enabled=false. */
+  historyWindow: number | null;
 };
 
 /**
@@ -472,7 +517,64 @@ function buildRunIndex(
       confidence: rec.answer.confidence ?? null,
       kind: rec.answer.kind,
       citationsEmpty: citations.length === 0,
+      sessionId: rec.session_id ?? null,
+      historyWindow:
+        typeof rec.answer.history_window === 'number' ? rec.answer.history_window : null,
     });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Session turn index (RFC 0003 M6)
+// ---------------------------------------------------------------------------
+
+type SessionTurnMeta = {
+  /** feedback_ids ordered by (created_at ASC, feedback_id ASC) within the
+   *  session. Position +1 = turnIndex. Length = sessionTurnCount. */
+  orderedIds: number[];
+};
+
+/**
+ * Build a window-wide session_id → turn-ordered feedback_ids map. Used by
+ * the Feedback tab's M6 grouping so a row's "turn N of M" label is stable
+ * regardless of which chip filter is active or how the list is paged.
+ *
+ * Sources `session_id` from the feedback column when present (γ + curated
+ * rows write it directly) and falls back to runs.jsonl JOIN for β explicit
+ * rows whose insert path never persisted it (see app.ts:308).
+ *
+ * Rows whose effective session_id is null are not included — they render
+ * as standalone 1-turn entries.
+ */
+function buildSessionTurnIndex(
+  db: ReturnType<typeof openDatabase>,
+  sinceMs: number,
+  runIndex: Map<string, RunIndexEntry>,
+): Map<string, SessionTurnMeta> {
+  const rows = db
+    .prepare(
+      `SELECT feedback_id, answer_id, session_id, created_at
+         FROM feedback
+        WHERE created_at >= ?
+        ORDER BY created_at ASC, feedback_id ASC`,
+    )
+    .all(sinceMs) as Array<{
+      feedback_id: number;
+      answer_id: string;
+      session_id: string | null;
+      created_at: number;
+    }>;
+  const out: Map<string, SessionTurnMeta> = new Map();
+  for (const r of rows) {
+    const sid = r.session_id ?? runIndex.get(r.answer_id)?.sessionId ?? null;
+    if (!sid) continue;
+    let meta = out.get(sid);
+    if (!meta) {
+      meta = { orderedIds: [] };
+      out.set(sid, meta);
+    }
+    meta.orderedIds.push(r.feedback_id);
   }
   return out;
 }
@@ -562,6 +664,25 @@ export type FeedbackRowDetail = {
     model: string | null;
     errorCode: string | null;
   } | null;
+  /** RFC 0003 M6 — same fields as `FeedbackRowVM`. The drawer surfaces
+   *  these in the META row + a "session turns" panel when sessionTurnCount > 1. */
+  sessionId: string | null;
+  historyWindow: number | null;
+  turnIndex: number;
+  sessionTurnCount: number;
+  /** RFC 0003 M6 — peer turns inside the same session (within the lookup
+   *  window). Excludes the current row. Empty when sessionTurnCount ≤ 1.
+   *  Ordered by created_at ASC. Lets the drawer render a "jump to turn N"
+   *  strip without re-fetching the full list. */
+  sessionTurns: Array<{
+    feedback_id: number;
+    turnIndex: number;
+    ts: string;
+    question: string;
+    rating: number | null;
+    signal_source: 'explicit' | 'implicit' | 'curated';
+    historyWindow: number | null;
+  }>;
 };
 
 export function loadFeedbackRowDetail(
@@ -600,6 +721,11 @@ export function loadFeedbackRowDetail(
 
     const citations = parseRunCitations(row.retrieved);
 
+    const sessionId = runMeta?.sessionId ?? row.session_id ?? null;
+    const { turnIndex, sessionTurnCount, sessionTurns } = sessionId
+      ? loadSessionTurns(db, stateRoot, sinceMs, sessionId, row.feedback_id, runIndex)
+      : { turnIndex: 1, sessionTurnCount: 1, sessionTurns: [] };
+
     return {
       feedback_id: row.feedback_id,
       ts: new Date(row.created_at).toISOString(),
@@ -632,6 +758,11 @@ export function loadFeedbackRowDetail(
             errorCode: runRecord.answer.error_code,
           }
         : null,
+      sessionId,
+      historyWindow: runMeta?.historyWindow ?? null,
+      turnIndex,
+      sessionTurnCount,
+      sessionTurns,
     };
   } catch {
     return null;
@@ -642,6 +773,124 @@ export function loadFeedbackRowDetail(
       /* ignore */
     }
   }
+}
+
+/**
+ * Pull all feedback rows in the window for a given session_id and assemble
+ * the drawer's "session turns" panel + the current row's `turnIndex` within
+ * that session. Falls back to runs.jsonl JOIN to pick up β explicit rows
+ * whose feedback.session_id column is null.
+ *
+ * The runs JOIN scan is bounded — the drawer's window default is 30d (vs
+ * the list's 7d), so we cap it the same way as `buildRunIndex`.
+ */
+function loadSessionTurns(
+  db: ReturnType<typeof openDatabase>,
+  stateRoot: string,
+  sinceMs: number,
+  sessionId: string,
+  currentFeedbackId: number,
+  currentRunIndex: Map<string, RunIndexEntry>,
+): {
+  turnIndex: number;
+  sessionTurnCount: number;
+  sessionTurns: FeedbackRowDetail['sessionTurns'];
+} {
+  // Pull rows whose feedback.session_id column already matches. β explicit
+  // rows with a null column show up via the runs JOIN below.
+  const direct = db
+    .prepare(
+      `SELECT feedback_id, answer_id, session_id, created_at, question, rating, signal_source
+         FROM feedback
+        WHERE created_at >= ? AND session_id = ?
+        ORDER BY created_at ASC, feedback_id ASC`,
+    )
+    .all(sinceMs, sessionId) as Array<{
+      feedback_id: number;
+      answer_id: string;
+      session_id: string;
+      created_at: number;
+      question: string;
+      rating: number | null;
+      signal_source: 'explicit' | 'implicit' | 'curated';
+    }>;
+  const seen = new Set<number>(direct.map((r) => r.feedback_id));
+
+  // Collect candidate session_id values from runs.jsonl (filter by session
+  // first to avoid scanning the whole window's answer_ids). Then look up
+  // their feedback rows by answer_id.
+  const sessionAnswerIds: Set<string> = new Set();
+  for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
+    if ('type' in line && line.type === 'feedback-update') continue;
+    const rec = line as RunRecord;
+    if (rec.session_id !== sessionId) continue;
+    if (rec.answer.answer_id) sessionAnswerIds.add(rec.answer.answer_id);
+  }
+  let indirect: Array<{
+    feedback_id: number;
+    answer_id: string;
+    created_at: number;
+    question: string;
+    rating: number | null;
+    signal_source: 'explicit' | 'implicit' | 'curated';
+  }> = [];
+  if (sessionAnswerIds.size > 0) {
+    const placeholders = Array(sessionAnswerIds.size).fill('?').join(',');
+    indirect = db
+      .prepare(
+        `SELECT feedback_id, answer_id, created_at, question, rating, signal_source
+           FROM feedback
+          WHERE created_at >= ? AND answer_id IN (${placeholders})`,
+      )
+      .all(sinceMs, ...sessionAnswerIds) as typeof indirect;
+  }
+
+  // Need history_window per answer_id — pull from runs JOIN for all
+  // referenced answer_ids in one walk (re-use buildRunIndex on the merged
+  // answer set so a row's metadata is consistent with the list view).
+  const allAnswerIds = new Set<string>([
+    ...direct.map((r) => r.answer_id),
+    ...indirect.map((r) => r.answer_id),
+  ]);
+  const runIndex =
+    allAnswerIds.size <= currentRunIndex.size && [...allAnswerIds].every((a) => currentRunIndex.has(a))
+      ? currentRunIndex
+      : buildRunIndex(stateRoot, sinceMs, allAnswerIds);
+
+  type Row = {
+    feedback_id: number;
+    answer_id: string;
+    created_at: number;
+    question: string;
+    rating: number | null;
+    signal_source: 'explicit' | 'implicit' | 'curated';
+  };
+  const merged: Row[] = [...direct];
+  for (const r of indirect) {
+    if (seen.has(r.feedback_id)) continue;
+    seen.add(r.feedback_id);
+    merged.push(r);
+  }
+  merged.sort((a, b) => a.created_at - b.created_at || a.feedback_id - b.feedback_id);
+
+  const turnIndex =
+    merged.findIndex((r) => r.feedback_id === currentFeedbackId) + 1 || 1;
+  const sessionTurns = merged
+    .filter((r) => r.feedback_id !== currentFeedbackId)
+    .map((r) => ({
+      feedback_id: r.feedback_id,
+      turnIndex: merged.findIndex((m) => m.feedback_id === r.feedback_id) + 1,
+      ts: new Date(r.created_at).toISOString(),
+      question: r.question.length > 0 ? r.question : QUESTION_FALLBACK,
+      rating: r.rating,
+      signal_source: r.signal_source,
+      historyWindow: runIndex.get(r.answer_id)?.historyWindow ?? null,
+    }));
+  return {
+    turnIndex,
+    sessionTurnCount: merged.length || 1,
+    sessionTurns,
+  };
 }
 
 function readRunRecord(
