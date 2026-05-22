@@ -100,6 +100,7 @@ export function createApp(deps: AppDeps): Hono {
     if (!prepared.ok) {
       return c.json(prepared.result, prepared.status);
     }
+    injectMultiTurnHistory(runtime, prepared.req, prepared.requestedSessionId);
     const t0 = performance.now();
     let ask: Awaited<ReturnType<typeof askWithTrace>>;
     try {
@@ -182,6 +183,7 @@ export function createApp(deps: AppDeps): Hono {
         await write('done', { ok: true });
         return;
       }
+      injectMultiTurnHistory(runtime, prepared.req, prepared.requestedSessionId);
 
       const abortController = new AbortController();
       stream.onAbort(() => {
@@ -443,6 +445,44 @@ async function prepareAskCall(runtime: Runtime, c: Context): Promise<PreparedAsk
     llm,
     requestedSessionId,
   };
+}
+
+/**
+ * Multi-turn history injection (RFC 0003 M1). When `multiTurn.enabled` and
+ * the caller passed a `session_id` that the session table still knows about,
+ * pull the most recent `historyTurns` prior question strings and stuff them
+ * into `req.context.history`. The query pipeline ([src/query/answer.ts])
+ * then splices them into the embedding query.
+ *
+ * Order: chronological (oldest → newest, current question implicit at the
+ * tail). `getRecentEntries` hands back newest-first, so we reverse here.
+ *
+ * No-ops on:
+ *   - multiTurn.enabled === false (default; byte-equivalent to 0.1.x)
+ *   - no requested session_id (first ask in a session)
+ *   - unknown / expired session_id (treated as a fresh session)
+ *   - empty entry list (session minted but no prior `record()` yet)
+ *
+ * Mutates `req.context` in place — the caller passed us a `body as AskRequest`
+ * we parsed from JSON, so a direct mutation is safe and avoids a copy on the
+ * hot path.
+ */
+function injectMultiTurnHistory(
+  runtime: Runtime,
+  req: AskRequest,
+  requestedSessionId: string | null,
+): void {
+  if (!runtime.config.multiTurn.enabled) return;
+  if (!requestedSessionId) return;
+  const entries = runtime.sessions.getRecentEntries(
+    requestedSessionId,
+    runtime.config.multiTurn.historyTurns,
+  );
+  if (entries.length === 0) return;
+  // getRecentEntries returns newest → oldest; reverse for chronological order
+  // so the embedding sees the dialogue as it happened.
+  const questions = entries.map((e) => e.question).reverse();
+  req.context = { ...(req.context ?? {}), history: questions };
 }
 
 function finalizeAskCall(args: {

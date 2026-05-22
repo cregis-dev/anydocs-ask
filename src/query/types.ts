@@ -14,6 +14,20 @@ export type AskRequest = {
   context?: {
     current_page_id?: string | null;
     scope_id?: string | null;
+    /**
+     * RFC 0003 M1 (multi-turn). Most-recent-N prior question strings from
+     * the same session, oldest → newest. Populated by the server layer
+     * when `multiTurn.enabled === true` and a valid session_id is in play
+     * (see [src/server/app.ts](../server/app.ts)). The query pipeline
+     * splices these into the embedding query so vector retrieval inherits
+     * dialogue context (RFC 0003 §4.2). BM25 / entity injection paths
+     * remain on the current question only — splicing old keywords would
+     * dilute the present query's term focus.
+     *
+     * `undefined` (default) is the single-turn path and is byte-equivalent
+     * to 0.1.x behaviour; an empty array `[]` is treated identically.
+     */
+    history?: string[];
   };
   options?: {
     /** Cap chunks injected into the prompt. Server applies a hard ceiling. */
