@@ -181,8 +181,10 @@ function extractUsedChunkIds(result: AskResult): number[] {
 }
 
 /** Per RFC 0003 §4.3 hard cap. Higher and prompt input tokens balloon; lower
- *  and pronoun anchors get truncated mid-entity. Not config-exposed. */
-const ANSWER_SUMMARY_MAX_CHARS = 200;
+ *  and pronoun anchors get truncated mid-entity. Not config-exposed. Exported
+ *  so the prompt builder can reference the same number when describing the
+ *  truncation rule to the LLM (single source of truth). */
+export const ANSWER_SUMMARY_MAX_CHARS = 200;
 
 function extractAnswerMdSummary(result: AskResult): string {
   if (result.type === 'answer') return result.answer_md.slice(0, ANSWER_SUMMARY_MAX_CHARS);

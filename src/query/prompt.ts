@@ -13,6 +13,7 @@
 
 import type { DocsLang } from '../anydocs/types.ts';
 import type { PromptConfig } from '../config.ts';
+import { ANSWER_SUMMARY_MAX_CHARS } from '../feedback/gamma.ts';
 import type { RerankedChunk } from './rerank.ts';
 import { isApiReferenceChunk } from './api-intent.ts';
 
@@ -158,35 +159,35 @@ function systemPromptFor(
  * history is being injected. Verbatim from the RFC so the prompt and the
  * design doc stay in sync; do NOT rephrase without updating both.
  *
- * Single block (intro + bullets) rather than separate `- ...` lines because
- * the intro explains the relationship between the bullets and the "对话历史"
- * block in the user prompt — splitting them across `.filter(Boolean)` lines
- * would lose that grouping.
+ * Pre-resolved at module load (pure function of language) — every /v1/ask
+ * on the multi-turn path otherwise paid an array-of-strings + join cost
+ * just to produce the same bytes.
  */
+const MULTI_TURN_BLOCK_ZH = [
+  '',
+  '本次问题可能依赖前面的对话。下方"对话历史"段提供最近 N 轮的问题与答案摘要，仅用于解析代词（它/这个/那个/那）和未明确说出的实体。',
+  '约束：',
+  '- 把当前问题里的指代解析为对话历史中最贴近的具体实体。',
+  '- 答案必须基于检索到的 chunks（既有引用约束完全不变）。',
+  '- 不要在答案里重述历史里已答过的内容。',
+  '- 如果对话历史与当前问题语义无关，忽略历史，按单轮处理。',
+  '- 答案语言与"当前问题"一致。',
+].join('\n');
+
+const MULTI_TURN_BLOCK_EN = [
+  '',
+  'This question may depend on prior turns. The "Conversation history" block in the user prompt contains the last N turns\' questions and answer summaries, intended ONLY for resolving pronouns ("it" / "this" / "that") and entities the user did not name explicitly.',
+  'Constraints:',
+  '- Resolve any pronoun in the current question to the closest concrete entity in the conversation history.',
+  '- The answer must still be grounded in the retrieved chunks (existing citation rules are unchanged).',
+  '- Do not repeat content already covered by earlier answers in the history.',
+  '- If the conversation history is unrelated to the current question, ignore it and answer single-turn.',
+  '- The answer language must match the current question, not the history.',
+].join('\n');
+
 function multiTurnConstraintsFor(lang: DocsLang, hasHistory: boolean): string {
   if (!hasHistory) return '';
-  if (lang === 'zh') {
-    return [
-      '',
-      '本次问题可能依赖前面的对话。下方"对话历史"段提供最近 N 轮的问题与答案摘要，仅用于解析代词（它/这个/那个/那）和未明确说出的实体。',
-      '约束：',
-      '- 把当前问题里的指代解析为对话历史中最贴近的具体实体。',
-      '- 答案必须基于检索到的 chunks（既有引用约束完全不变）。',
-      '- 不要在答案里重述历史里已答过的内容。',
-      '- 如果对话历史与当前问题语义无关，忽略历史，按单轮处理。',
-      '- 答案语言与"当前问题"一致。',
-    ].join('\n');
-  }
-  return [
-    '',
-    'This question may depend on prior turns. The "Conversation history" block in the user prompt contains the last N turns\' questions and answer summaries, intended ONLY for resolving pronouns ("it" / "this" / "that") and entities the user did not name explicitly.',
-    'Constraints:',
-    '- Resolve any pronoun in the current question to the closest concrete entity in the conversation history.',
-    '- The answer must still be grounded in the retrieved chunks (existing citation rules are unchanged).',
-    '- Do not repeat content already covered by earlier answers in the history.',
-    '- If the conversation history is unrelated to the current question, ignore it and answer single-turn.',
-    '- The answer language must match the current question, not the history.',
-  ].join('\n');
+  return lang === 'zh' ? MULTI_TURN_BLOCK_ZH : MULTI_TURN_BLOCK_EN;
 }
 
 function apiReferenceLineFor(lang: DocsLang, hasApiReference: boolean): string {
@@ -267,35 +268,26 @@ function chunkLabel(lang: DocsLang): string {
 }
 
 /**
- * RFC 0003 §4.1 user-prompt history block. Format mirrors the RFC verbatim:
- *
- *   对话历史（最近 N 轮，每轮答案截断到前 200 字）：
- *   Q1: ...
- *   A1: ...
- *
- * Each turn's `answer_summary` is whatever the writer (gamma.ts) persisted —
- * already capped at 200 chars per [[ANSWER_SUMMARY_MAX_CHARS]]. We do NOT
- * re-truncate here; if the writer ever drifts above the cap the resulting
- * token bloat should surface in trace.tokens_in rather than be silently
- * absorbed.
- *
- * Prior turns whose `answer_summary` is empty (clarify / error / no-citation
- * paths) emit just the `Qn:` line with an empty `An:` so the numbering stays
- * stable — Claude can still use the question for pronoun resolution even
- * when the prior answer is empty.
+ * RFC 0003 §4.1 user-prompt history block. Header substitutes the concrete
+ * turn count and char cap so the LLM doesn't have to count Qs and guesses
+ * about truncation aren't possible. Empty `answer_summary` (clarify / error
+ * prior turns) still emits the `An:` line so numbering stays stable — the
+ * question side remains useful for pronoun resolution.
  */
 function historyBlockFor(
   lang: DocsLang,
   history: Array<{ question: string; answer_summary: string }>,
 ): string {
+  const n = history.length;
+  const cap = ANSWER_SUMMARY_MAX_CHARS;
   const header = lang === 'zh'
-    ? '对话历史（最近 N 轮，每轮答案截断到前 200 字）：'
-    : 'Conversation history (last N turns, each answer truncated to 200 chars):';
+    ? `对话历史（最近 ${n} 轮，每轮答案截断到前 ${cap} 字）：`
+    : `Conversation history (last ${n} turn${n === 1 ? '' : 's'}, each answer truncated to ${cap} chars):`;
   const lines: string[] = [header];
   history.forEach((turn, i) => {
-    const n = i + 1;
-    lines.push(`Q${n}: ${turn.question}`);
-    lines.push(`A${n}: ${turn.answer_summary}`);
+    const idx = i + 1;
+    lines.push(`Q${idx}: ${turn.question}`);
+    lines.push(`A${idx}: ${turn.answer_summary}`);
   });
   return lines.join('\n');
 }

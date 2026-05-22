@@ -1381,7 +1381,9 @@ test('buildPrompt zh: history populated → all 5 RFC §4.1 constraints in syste
   assert.match(prompt.system, /答案语言与"当前问题"一致/);
 
   // User prompt: numbered Q/A block precedes the user question.
-  assert.match(prompt.user, /对话历史（最近 N 轮/);
+  // Header substitutes concrete turn count (2 turns in this test) and the
+  // 200-char cap from ANSWER_SUMMARY_MAX_CHARS.
+  assert.match(prompt.user, /对话历史（最近 2 轮，每轮答案截断到前 200 字）：/);
   assert.match(prompt.user, /Q1: 什么是配置？/);
   assert.match(prompt.user, /A1: 配置是 \.\.\./);
   assert.match(prompt.user, /Q2: 配置在哪里？/);
@@ -1419,6 +1421,11 @@ test('buildPrompt en: history populated → 5 RFC §4.1 constraints rendered in 
   assert.match(prompt.system, /Do not repeat content already covered/);
   assert.match(prompt.system, /unrelated to the current question, ignore it/);
   assert.match(prompt.system, /answer language must match the current question/);
+  // 1-turn history → singular "turn" + concrete cap from ANSWER_SUMMARY_MAX_CHARS.
+  assert.match(
+    prompt.user,
+    /Conversation history \(last 1 turn, each answer truncated to 200 chars\):/,
+  );
   assert.match(prompt.user, /Q1: What is config\?/);
   assert.match(prompt.user, /A1: Config is \.\.\./);
 });

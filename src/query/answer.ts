@@ -248,15 +248,16 @@ async function askWithTraceInternal(
   //   - `retrieveVector` (history-augmented) is what feeds the vector
   //     retrieve path. RFC §4.2 — the splice anchors retrieval in the
   //     dialogue's prior region.
-  // When historyWindow === 0 the two are the same input → embedder cache
-  // returns the same Float32Array, so the single-turn cost stays at 1 embed.
-  const queryVector = (await deps.embedder.embed([question]))[0]!.vector;
-  const retrieveVector =
+  // Batched into one embed() call so multi-turn asks pay one round-trip
+  // instead of two (Embedder contract takes a `string[]` for exactly this
+  // reason). Single-turn calls submit one input and keep the alpha.0 cost.
+  const embedInputs =
     historyWindow > 0
-      ? (await deps.embedder.embed([
-          `${history.map((h) => h.question).join('\n')}\n${question}`,
-        ]))[0]!.vector
-      : queryVector;
+      ? [question, `${history.map((h) => h.question).join('\n')}\n${question}`]
+      : [question];
+  const embedded = await deps.embedder.embed(embedInputs);
+  const queryVector = embedded[0]!.vector;
+  const retrieveVector = embedded[1]?.vector ?? queryVector;
   throwIfAborted(hooks.signal);
   const ftsQuery = sanitizeFtsQuery(question);
   const entityTerms = extractEntityTerms(question);
