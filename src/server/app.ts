@@ -303,12 +303,27 @@ export function createApp(deps: AppDeps): Hono {
       question = obj.question;
     }
 
+    // RFC 0003 M6 follow-up: persist the client's session_id on the β row
+    // so Console grouping doesn't depend on the runs.jsonl JOIN for long
+    // dialogues. γ + curated paths have always written this column (see
+    // gamma.ts and store.ts). Reader / Widget clients echo session_id in
+    // every /v1/ask request (RFC 0001 §4.1) and the same value belongs on
+    // any feedback row that follows. Accept the `sessionId` camelCase alias
+    // for symmetry with other Reader payload fields.
+    const sessionIdRaw =
+      typeof obj.session_id === 'string'
+        ? obj.session_id
+        : typeof obj.sessionId === 'string'
+          ? obj.sessionId
+          : null;
+    const sessionId = sessionIdRaw && sessionIdRaw.length > 0 ? sessionIdRaw : null;
+
     runtime.db
       .prepare(
         `INSERT INTO feedback (
            answer_id, question, current_page_id, retrieved, generated, rating,
-           correction, bad_citation_ids, tags, model_used, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           correction, bad_citation_ids, tags, model_used, created_at, session_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         answer_id,
@@ -326,6 +341,7 @@ export function createApp(deps: AppDeps): Hono {
           : null,
         model,
         Date.now(),
+        sessionId,
       );
 
     return c.json({ ok: true });
