@@ -75,6 +75,12 @@ export type RunAnswer = {
   model: string | null;
   /** Error code on kind='error'. */
   error_code: string | null;
+  /** RFC 0003 M4 — number of prior session turns consumed by this call
+   *  (embedding splice + prompt). Optional in the on-disk JSON; absent on
+   *  legacy rows and on single-turn / `multiTurn.enabled=false` paths.
+   *  Studio joins on (session_id, history_window) to fold a dialogue's
+   *  turns into one group. */
+  history_window?: number;
 };
 
 export type RunFeedback = {

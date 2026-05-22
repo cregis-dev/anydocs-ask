@@ -34,6 +34,14 @@ export type BuildPromptOptions = {
    * topic" mention even though its chunks are in context. Codex round-9.
    */
   entityTerms?: string[];
+  /**
+   * RFC 0003 M2 multi-turn — prior session turns oldest → newest. When
+   * non-empty the system prompt gains the 5 multi-turn constraints
+   * (RFC §4.1) and the user prompt gains a "history" block ahead of the
+   * context snippets. Empty / omitted = pure single-turn prompt (byte-
+   * equivalent to 0.1.x output, important for the regression diff).
+   */
+  history?: Array<{ question: string; answer_summary: string }>;
 };
 
 export type BuiltPrompt = {
@@ -44,7 +52,8 @@ export type BuiltPrompt = {
 };
 
 export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
-  const { question, chunks, answerLang, isCrossLang, formatHint, promptConfig, entityTerms } = opts;
+  const { question, chunks, answerLang, isCrossLang, formatHint, promptConfig, entityTerms, history } = opts;
+  const hasHistory = !!history && history.length > 0;
 
   const chunkById = new Map<string, RerankedChunk>();
   const chunkBlocks: string[] = [];
@@ -67,9 +76,11 @@ export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
     promptConfig,
     entityTerms,
     hasApiReference,
+    hasHistory,
   );
   const checklist = answerChecklistFor(answerLang, answerChecklistItems);
-  const user = `${userIntro(answerLang)}\n\n${question}${checklist}\n\n${chunkLabel(answerLang)}\n\n${chunkBlocks.join('\n\n---\n\n')}`;
+  const historyBlock = hasHistory ? `${historyBlockFor(answerLang, history!)}\n\n` : '';
+  const user = `${historyBlock}${userIntro(answerLang)}\n\n${question}${checklist}\n\n${chunkLabel(answerLang)}\n\n${chunkBlocks.join('\n\n---\n\n')}`;
 
   return { system, user, chunkById };
 }
@@ -85,10 +96,12 @@ function systemPromptFor(
   promptConfig: PromptConfig | undefined,
   entityTerms: string[] | undefined,
   hasApiReference: boolean,
+  hasHistory: boolean,
 ): string {
   const formatLine = formatLineFor(lang, hint);
   const entityLine = entityCoverageLine(lang, entityTerms);
   const apiReferenceLine = apiReferenceLineFor(lang, hasApiReference);
+  const multiTurnBlock = multiTurnConstraintsFor(lang, hasHistory);
   if (lang === 'zh') {
     const identity = promptConfig?.assistantName
       ? `你是 ${promptConfig.assistantName}。严格遵守以下规则：`
@@ -109,6 +122,7 @@ function systemPromptFor(
       entityLine,
       apiReferenceLine,
       crossLangLine,
+      multiTurnBlock,
     ].filter(Boolean);
     appendProjectInstructions(lines, promptConfig, 'zh');
     return lines.join('\n');
@@ -133,9 +147,46 @@ function systemPromptFor(
     entityLine,
     apiReferenceLine,
     crossLangLine,
+    multiTurnBlock,
   ].filter(Boolean);
   appendProjectInstructions(lines, promptConfig, 'en');
   return lines.join('\n');
+}
+
+/**
+ * RFC 0003 §4.1 — multi-turn constraints appended only when prior session
+ * history is being injected. Verbatim from the RFC so the prompt and the
+ * design doc stay in sync; do NOT rephrase without updating both.
+ *
+ * Single block (intro + bullets) rather than separate `- ...` lines because
+ * the intro explains the relationship between the bullets and the "对话历史"
+ * block in the user prompt — splitting them across `.filter(Boolean)` lines
+ * would lose that grouping.
+ */
+function multiTurnConstraintsFor(lang: DocsLang, hasHistory: boolean): string {
+  if (!hasHistory) return '';
+  if (lang === 'zh') {
+    return [
+      '',
+      '本次问题可能依赖前面的对话。下方"对话历史"段提供最近 N 轮的问题与答案摘要，仅用于解析代词（它/这个/那个/那）和未明确说出的实体。',
+      '约束：',
+      '- 把当前问题里的指代解析为对话历史中最贴近的具体实体。',
+      '- 答案必须基于检索到的 chunks（既有引用约束完全不变）。',
+      '- 不要在答案里重述历史里已答过的内容。',
+      '- 如果对话历史与当前问题语义无关，忽略历史，按单轮处理。',
+      '- 答案语言与"当前问题"一致。',
+    ].join('\n');
+  }
+  return [
+    '',
+    'This question may depend on prior turns. The "Conversation history" block in the user prompt contains the last N turns\' questions and answer summaries, intended ONLY for resolving pronouns ("it" / "this" / "that") and entities the user did not name explicitly.',
+    'Constraints:',
+    '- Resolve any pronoun in the current question to the closest concrete entity in the conversation history.',
+    '- The answer must still be grounded in the retrieved chunks (existing citation rules are unchanged).',
+    '- Do not repeat content already covered by earlier answers in the history.',
+    '- If the conversation history is unrelated to the current question, ignore it and answer single-turn.',
+    '- The answer language must match the current question, not the history.',
+  ].join('\n');
 }
 
 function apiReferenceLineFor(lang: DocsLang, hasApiReference: boolean): string {
@@ -213,6 +264,40 @@ function userIntro(lang: DocsLang): string {
 
 function chunkLabel(lang: DocsLang): string {
   return lang === 'zh' ? '参考片段：' : 'Context snippets:';
+}
+
+/**
+ * RFC 0003 §4.1 user-prompt history block. Format mirrors the RFC verbatim:
+ *
+ *   对话历史（最近 N 轮，每轮答案截断到前 200 字）：
+ *   Q1: ...
+ *   A1: ...
+ *
+ * Each turn's `answer_summary` is whatever the writer (gamma.ts) persisted —
+ * already capped at 200 chars per [[ANSWER_SUMMARY_MAX_CHARS]]. We do NOT
+ * re-truncate here; if the writer ever drifts above the cap the resulting
+ * token bloat should surface in trace.tokens_in rather than be silently
+ * absorbed.
+ *
+ * Prior turns whose `answer_summary` is empty (clarify / error / no-citation
+ * paths) emit just the `Qn:` line with an empty `An:` so the numbering stays
+ * stable — Claude can still use the question for pronoun resolution even
+ * when the prior answer is empty.
+ */
+function historyBlockFor(
+  lang: DocsLang,
+  history: Array<{ question: string; answer_summary: string }>,
+): string {
+  const header = lang === 'zh'
+    ? '对话历史（最近 N 轮，每轮答案截断到前 200 字）：'
+    : 'Conversation history (last N turns, each answer truncated to 200 chars):';
+  const lines: string[] = [header];
+  history.forEach((turn, i) => {
+    const n = i + 1;
+    lines.push(`Q${n}: ${turn.question}`);
+    lines.push(`A${n}: ${turn.answer_summary}`);
+  });
+  return lines.join('\n');
 }
 
 function answerChecklistFor(lang: DocsLang, items: string[]): string {

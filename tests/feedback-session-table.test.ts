@@ -66,7 +66,7 @@ test('record + findSimilarRecent: same session, in-window, high similarity → h
   const v1 = unitVec([1, 0.01, 0]);
   t.record({
     session_id: session,
-    entry: { question: 'q1', embedding: v1, answer_id: 'ans_1', used_chunk_ids: [42], asked_at: 1_000_000 },
+    entry: { question: 'q1', embedding: v1, answer_id: 'ans_1', used_chunk_ids: [42], asked_at: 1_000_000, answer_md_summary: '' },
   });
   const v2 = unitVec([1, 0.02, 0]); // ~0.999 cosine with v1
   const hits = t.findSimilarRecent({ session_id: session, embedding: v2, threshold: 0.85 });
@@ -80,7 +80,7 @@ test('findSimilarRecent: low similarity → no hit', () => {
   const session = t.getOrCreate(null);
   t.record({
     session_id: session,
-    entry: { question: 'q1', embedding: unitVec([1, 0]), answer_id: 'ans_1', used_chunk_ids: [], asked_at: 1_000_000 },
+    entry: { question: 'q1', embedding: unitVec([1, 0]), answer_id: 'ans_1', used_chunk_ids: [], asked_at: 1_000_000, answer_md_summary: '' },
   });
   const hits = t.findSimilarRecent({
     session_id: session,
@@ -97,7 +97,7 @@ test('findSimilarRecent: out-of-window (>5min) → no hit even on identical vec'
   const v = unitVec([1, 0]);
   t.record({
     session_id: session,
-    entry: { question: 'q1', embedding: v, answer_id: 'ans_1', used_chunk_ids: [], asked_at: now },
+    entry: { question: 'q1', embedding: v, answer_id: 'ans_1', used_chunk_ids: [], asked_at: now, answer_md_summary: '' },
   });
   now += 120_000; // past 60s window
   const hits = t.findSimilarRecent({ session_id: session, embedding: v, threshold: 0.85 });
@@ -120,11 +120,11 @@ test('findSimilarRecent: multiple hits returned sorted by descending similarity'
   // Entry A is much closer to target than entry B.
   t.record({
     session_id: session,
-    entry: { question: 'a', embedding: unitVec([1, 0.5]), answer_id: 'a_id', used_chunk_ids: [], asked_at: 1_000_000 },
+    entry: { question: 'a', embedding: unitVec([1, 0.5]), answer_id: 'a_id', used_chunk_ids: [], asked_at: 1_000_000, answer_md_summary: '' },
   });
   t.record({
     session_id: session,
-    entry: { question: 'b', embedding: unitVec([1, 0.05]), answer_id: 'b_id', used_chunk_ids: [], asked_at: 1_000_000 },
+    entry: { question: 'b', embedding: unitVec([1, 0.05]), answer_id: 'b_id', used_chunk_ids: [], asked_at: 1_000_000, answer_md_summary: '' },
   });
   const hits = t.findSimilarRecent({
     session_id: session,
@@ -149,6 +149,7 @@ test('record: per-session cap evicts oldest beyond N entries', () => {
         answer_id: `ans_${i}`,
         used_chunk_ids: [],
         asked_at: 1_000_000,
+        answer_md_summary: '',
       },
     });
   }
@@ -194,6 +195,7 @@ test('getRecentEntries: returns last N entries newest-first', () => {
         answer_id: null,
         used_chunk_ids: [],
         asked_at: 1_000_000,
+        answer_md_summary: `summary for ${q}`,
       },
     });
   }
@@ -210,7 +212,7 @@ test('getRecentEntries: n=0 returns empty without throwing', () => {
   const session = t.getOrCreate(null);
   t.record({
     session_id: session,
-    entry: { question: 'q', embedding: unitVec([1, 0]), answer_id: null, used_chunk_ids: [], asked_at: Date.now() },
+    entry: { question: 'q', embedding: unitVec([1, 0]), answer_id: null, used_chunk_ids: [], asked_at: Date.now(), answer_md_summary: '' },
   });
   assert.deepEqual(t.getRecentEntries(session, 0), []);
 });
@@ -220,7 +222,7 @@ test('getRecentEntries: n larger than available returns all (no error)', () => {
   const session = t.getOrCreate(null);
   t.record({
     session_id: session,
-    entry: { question: 'q0', embedding: unitVec([1, 0]), answer_id: null, used_chunk_ids: [], asked_at: 1_000_000 },
+    entry: { question: 'q0', embedding: unitVec([1, 0]), answer_id: null, used_chunk_ids: [], asked_at: 1_000_000, answer_md_summary: '' },
   });
   const recent = t.getRecentEntries(session, 99);
   assert.equal(recent.length, 1);
@@ -238,7 +240,7 @@ test('getRecentEntries: expired session → empty (multi-turn falls back to sing
   const session = t.getOrCreate(null);
   t.record({
     session_id: session,
-    entry: { question: 'q0', embedding: unitVec([1, 0]), answer_id: null, used_chunk_ids: [], asked_at: now },
+    entry: { question: 'q0', embedding: unitVec([1, 0]), answer_id: null, used_chunk_ids: [], asked_at: now, answer_md_summary: '' },
   });
   now += 200; // past TTL
   assert.deepEqual(t.getRecentEntries(session, 3), []);
@@ -251,7 +253,7 @@ test('record: touching a session refreshes its TTL', () => {
   now += 800; // not yet expired
   t.record({
     session_id: session,
-    entry: { question: 'q', embedding: unitVec([1, 0]), answer_id: 'a', used_chunk_ids: [], asked_at: now },
+    entry: { question: 'q', embedding: unitVec([1, 0]), answer_id: 'a', used_chunk_ids: [], asked_at: now, answer_md_summary: '' },
   });
   now += 800; // would expire from t=0 but record refreshed it
   const id2 = t.getOrCreate(session);

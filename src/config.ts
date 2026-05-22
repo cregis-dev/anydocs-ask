@@ -216,7 +216,15 @@ const DEFAULTS: ResolvedConfig = {
     rerankerWeight: 0.15,
   },
   multiTurn: {
-    enabled: false,
+    // RFC 0003 alpha.1 flip (2026-05-22). Default ON now that M1+M2+M3+M4
+    // are wired end-to-end — design partner queries get pronoun resolution
+    // on second turns without the operator needing to flip a knob. Per RFC
+    // §6 risk table this raises LLM input tokens by ~1–2k/query on multi-
+    // turn calls (~$0.003–0.006 on Sonnet 4.6); acceptable at design-partner
+    // volume (< 100 q/day). Operators can still pin to `false` in
+    // anydocs.ask.json to revert to the alpha.0 (M1-only) byte-equivalent
+    // single-turn behaviour.
+    enabled: true,
     historyTurns: 3,
   },
   prompt: {

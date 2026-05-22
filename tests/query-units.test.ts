@@ -1309,3 +1309,132 @@ test('postprocess: truncation appends locale-specific notice', () => {
   assert.ok(out.answer_md.length <= 4000);
   assert.match(out.answer_md, /答案过长已截断/);
 });
+
+// ---------------------------------------------------------------------------
+// RFC 0003 M2 — multi-turn system constraints + history block
+// ---------------------------------------------------------------------------
+
+function fakeChunkForPromptTest() {
+  return {
+    ...fakeRetrieved({
+      chunk_id: 1,
+      page_id: 'a',
+      page_title: '配置',
+      text: '系统配置说明。',
+      breadcrumb: [{ id: 'a', title: '配置', type: 'section' as const }],
+    }),
+    final_score: 0.2,
+  };
+}
+
+test('buildPrompt: no history → no multi-turn block in system, no history block in user (single-turn byte-equivalent)', () => {
+  // alpha.0 regression guard: when history is omitted, neither the system
+  // prompt (no "对话历史" constraints line) nor the user prompt (no "Qn:"
+  // lines) should grow a single byte. Equivalence with the alpha.0
+  // single-turn output is what makes the alpha.1 flip safely reversible.
+  const prompt = buildPrompt({
+    question: '怎么配置？',
+    chunks: [fakeChunkForPromptTest()],
+    answerLang: 'zh',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+  });
+  assert.doesNotMatch(prompt.system, /对话历史/);
+  assert.doesNotMatch(prompt.user, /对话历史/);
+  assert.doesNotMatch(prompt.user, /Q1:/);
+});
+
+test('buildPrompt: empty history array → same as omitted (regression guard)', () => {
+  const prompt = buildPrompt({
+    question: '怎么配置？',
+    chunks: [fakeChunkForPromptTest()],
+    answerLang: 'zh',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+    history: [],
+  });
+  assert.doesNotMatch(prompt.system, /对话历史/);
+  assert.doesNotMatch(prompt.user, /Q1:/);
+});
+
+test('buildPrompt zh: history populated → all 5 RFC §4.1 constraints in system + numbered Q/A block in user', () => {
+  // Verbatim sync with RFC 0003 §4.1 — if any bullet is rephrased here
+  // without updating the RFC (or vice-versa), this test fires.
+  const prompt = buildPrompt({
+    question: '它怎么改？',
+    chunks: [fakeChunkForPromptTest()],
+    answerLang: 'zh',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+    history: [
+      { question: '什么是配置？', answer_summary: '配置是 ...' },
+      { question: '配置在哪里？', answer_summary: '在 anydocs.json' },
+    ],
+  });
+
+  // 5 RFC §4.1 constraints, verbatim.
+  assert.match(prompt.system, /对话历史/);
+  assert.match(prompt.system, /把当前问题里的指代解析为对话历史中最贴近的具体实体/);
+  assert.match(prompt.system, /答案必须基于检索到的 chunks/);
+  assert.match(prompt.system, /不要在答案里重述历史里已答过的内容/);
+  assert.match(prompt.system, /如果对话历史与当前问题语义无关，忽略历史/);
+  assert.match(prompt.system, /答案语言与"当前问题"一致/);
+
+  // User prompt: numbered Q/A block precedes the user question.
+  assert.match(prompt.user, /对话历史（最近 N 轮/);
+  assert.match(prompt.user, /Q1: 什么是配置？/);
+  assert.match(prompt.user, /A1: 配置是 \.\.\./);
+  assert.match(prompt.user, /Q2: 配置在哪里？/);
+  assert.match(prompt.user, /A2: 在 anydocs\.json/);
+  // History block must come BEFORE the current question.
+  const histIdx = prompt.user.indexOf('对话历史');
+  const qIdx = prompt.user.indexOf('它怎么改？');
+  assert.ok(histIdx >= 0 && qIdx > histIdx, 'history precedes current question');
+});
+
+test('buildPrompt en: history populated → 5 RFC §4.1 constraints rendered in English', () => {
+  const prompt = buildPrompt({
+    question: 'How do I change it?',
+    chunks: [
+      {
+        ...fakeRetrieved({
+          chunk_id: 1,
+          lang: 'en',
+          page_id: 'a',
+          page_title: 'Config',
+          text: 'System config notes.',
+          breadcrumb: [{ id: 'a', title: 'Config', type: 'section' }],
+        }),
+        final_score: 0.2,
+      },
+    ],
+    answerLang: 'en',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+    history: [{ question: 'What is config?', answer_summary: 'Config is ...' }],
+  });
+  assert.match(prompt.system, /Conversation history/);
+  assert.match(prompt.system, /Resolve any pronoun/);
+  assert.match(prompt.system, /grounded in the retrieved chunks/);
+  assert.match(prompt.system, /Do not repeat content already covered/);
+  assert.match(prompt.system, /unrelated to the current question, ignore it/);
+  assert.match(prompt.system, /answer language must match the current question/);
+  assert.match(prompt.user, /Q1: What is config\?/);
+  assert.match(prompt.user, /A1: Config is \.\.\./);
+});
+
+test('buildPrompt: history turn with empty answer_summary still emits Qn line (clarify/error prior turn)', () => {
+  // Prior clarify / error turns persist with answer_md_summary = ''. The
+  // question side is still useful for pronoun resolution; the empty A line
+  // is harmless context for Claude.
+  const prompt = buildPrompt({
+    question: '它怎么改？',
+    chunks: [fakeChunkForPromptTest()],
+    answerLang: 'zh',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+    history: [{ question: '什么是配置？', answer_summary: '' }],
+  });
+  assert.match(prompt.user, /Q1: 什么是配置？/);
+  assert.match(prompt.user, /A1: /);
+});
