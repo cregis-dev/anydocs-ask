@@ -346,6 +346,11 @@ test('golden generate --from runs: excludes source=console by default', async ()
         projectRoot: root,
         stateRoot: root,
         from: 'runs',
+        // Explicit since: the fixture ts is fixed at 2026-05-08, so the
+        // default 14d window kicks in once "today" is past 2026-05-22 and
+        // drops every record (CI catches the boundary). Pin to a long
+        // backstop so this test never races against wall clock.
+        since: '2025-01-01',
         llmRewrite: false,
         force: false,
       }),
@@ -400,6 +405,8 @@ test('golden generate --from runs --include-console: pulls in console-origin run
         projectRoot: root,
         stateRoot: root,
         from: 'runs',
+        // See sibling test for rationale — pin past the fixed fixture ts.
+        since: '2025-01-01',
         llmRewrite: false,
         force: false,
         includeConsole: true,
@@ -514,6 +521,8 @@ test('golden generate --from runs: legacy rows without source treated as reader'
         projectRoot: root,
         stateRoot: root,
         from: 'runs',
+        // See sibling test for rationale — pin past the fixed fixture ts.
+        since: '2025-01-01',
         llmRewrite: false,
         force: false,
       }),
