@@ -206,8 +206,8 @@ Console 体验台 persist 落的 runs 自带 `source=console`，`analyze` / `gol
 | F1 `/v1/ask` LLM 抛错丢 run | ✅ PR #18 已合 | error path 现在 append `kind=error, code=llm_failed` |
 | F2 `golden generate --limit` lang 偏置 | ✅ PR #19 已合 | 按 `defaultLanguage` 优先 + 多 lang 轮询交错 |
 | F3 LLM gateway error message 留 `undefined` | ✅ PR #21 已合 | `AnthropicLLM` 错误现在带 status / type / requestID / body（截断 ~200B） |
-| F4 同页两 chunk citation 视觉重复 | 🔧 待修 | 把 `in_page_path` 拼到 title 同级 |
-| F5 Ask 卡停止态中英混排 | 🔧 待修 | IA cleanup 后统一回中文或英文 |
+| F4 同页两 chunk citation 视觉重复 | ✅ PR #23 已合 | `citeSectionLabel()` 把 `in_page_path` 章节段拼到 Console Ask 卡 title 同级（Reader `web-ask.ts` 仍是 dogfood 前形态，留待真实回报触发） |
+| F5 Ask 卡停止态中英混排 | ✅ PR #24 已合 | 停止态 heading 英文化；后续 IA 进一步把 start-gate 收进 next-action banner |
 | F6 analyze D1 在小项目上 9/9 命中召回失败 | 📋 观察 | confidence floor 待真实数据校准；不在 alpha.3 动 |
 | O1 LLM 单次调用 timeout 偏长（~30s × 重试） | 📋 观察 | 配置项 `singleCallTimeoutMs` 待评估 |
 
