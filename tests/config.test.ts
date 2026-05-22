@@ -363,3 +363,87 @@ test('loadConfig: feedback rejects out-of-range rerankerWeight with a warning', 
     await cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// multiTurn section (RFC 0003 — schema 登记 only in 0.2, no pipeline consumer)
+// ---------------------------------------------------------------------------
+
+test('loadConfig: multiTurn defaults — disabled, 3-turn history window', async () => {
+  // Default-off mirrors feedback.enabled — RFC §2.1 M5. The 0.4.x pipeline
+  // feeds the existing primary LLM (Anthropic / OpenAI provider) with the
+  // last `historyTurns` turns when enabled=true; no extra runtime needed.
+  const { root, cleanup } = await withTmpProject(async () => {});
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.multiTurn.enabled, false);
+    assert.equal(r.config.multiTurn.historyTurns, 3);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: multiTurn fields merge over defaults', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        multiTurn: { enabled: true, historyTurns: 5 },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.multiTurn.enabled, true);
+    assert.equal(r.config.multiTurn.historyTurns, 5);
+    assert.deepEqual(r.warnings, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: multiTurn rejects out-of-range historyTurns with a warning', async () => {
+  // Hard cap at 20 — beyond that the primary LLM's input grows fast enough
+  // to dilute current_q signal and inflate token cost without recall gain
+  // (RFC §4.3).
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ multiTurn: { historyTurns: 0 } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.multiTurn.historyTurns, 3, 'falls back to default');
+    assert.ok(
+      r.warnings.some((w) => /historyTurns/.test(w)),
+      `expected a historyTurns warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: multiTurn rejects non-object value with a warning, leaves siblings intact', async () => {
+  // Defensive: a malformed multiTurn section must not bleed into other
+  // sections (feedback / prompt etc.). Same posture as feedback / runs.
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        multiTurn: 'enabled',
+        feedback: { enabled: true },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.multiTurn.enabled, false, 'multiTurn defaults preserved');
+    assert.equal(r.config.feedback.enabled, true, 'sibling section still merges');
+    assert.ok(
+      r.warnings.some((w) => /'multiTurn' must be an object/.test(w)),
+      `expected a multiTurn shape warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
