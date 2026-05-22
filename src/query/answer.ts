@@ -211,7 +211,25 @@ async function askWithTraceInternal(
   const currentSubtreeRoot = req.context?.current_page_id
     ? lookupSubtreeRoot(deps.db, req.context.current_page_id, queryLang)
     : null;
-  const queryVector = (await deps.embedder.embed([question]))[0]!.vector;
+  // RFC 0003 §4.2 — multi-turn history-aware retrieve query (M1).
+  //
+  // When `context.history` is supplied (server layer fills this when
+  // multiTurn.enabled and a valid session has prior turns; see
+  // [src/server/app.ts](../server/app.ts)), splice prior question text into
+  // the embedding input so vector retrieval inherits dialogue context —
+  // pronoun-only follow-ups ("它怎么改？") get pulled toward the right
+  // subtree because the vector lands closer to the prior turn's region.
+  //
+  // BM25 (`ftsQuery`) and entity injection (`entityTerms` / api hints)
+  // deliberately stay on the current question only — splicing old keywords
+  // would dilute the present query's term focus (RFC §4.2 rationale).
+  //
+  // `undefined` / `[]` history is the single-turn path; embedder receives
+  // the raw question verbatim, byte-equivalent to 0.1.x.
+  const history = req.context?.history ?? [];
+  const embeddingInput =
+    history.length > 0 ? `${history.join('\n')}\n${question}` : question;
+  const queryVector = (await deps.embedder.embed([embeddingInput]))[0]!.vector;
   throwIfAborted(hooks.signal);
   const ftsQuery = sanitizeFtsQuery(question);
   const entityTerms = extractEntityTerms(question);

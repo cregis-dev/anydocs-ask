@@ -178,6 +178,72 @@ test('cleanup: removes expired sessions', () => {
   assert.equal(t.size, 0);
 });
 
+// ---------------------------------------------------------------------------
+// getRecentEntries — RFC 0003 M1 multi-turn history-aware retrieve.
+// ---------------------------------------------------------------------------
+
+test('getRecentEntries: returns last N entries newest-first', () => {
+  const t = new SessionTable({ now: () => 1_000_000 });
+  const session = t.getOrCreate(null);
+  for (const q of ['q0', 'q1', 'q2', 'q3']) {
+    t.record({
+      session_id: session,
+      entry: {
+        question: q,
+        embedding: unitVec([1, 0]),
+        answer_id: null,
+        used_chunk_ids: [],
+        asked_at: 1_000_000,
+      },
+    });
+  }
+  const recent = t.getRecentEntries(session, 3);
+  assert.deepEqual(
+    recent.map((e) => e.question),
+    ['q3', 'q2', 'q1'],
+    'newest first, capped at N=3',
+  );
+});
+
+test('getRecentEntries: n=0 returns empty without throwing', () => {
+  const t = new SessionTable();
+  const session = t.getOrCreate(null);
+  t.record({
+    session_id: session,
+    entry: { question: 'q', embedding: unitVec([1, 0]), answer_id: null, used_chunk_ids: [], asked_at: Date.now() },
+  });
+  assert.deepEqual(t.getRecentEntries(session, 0), []);
+});
+
+test('getRecentEntries: n larger than available returns all (no error)', () => {
+  const t = new SessionTable({ now: () => 1_000_000 });
+  const session = t.getOrCreate(null);
+  t.record({
+    session_id: session,
+    entry: { question: 'q0', embedding: unitVec([1, 0]), answer_id: null, used_chunk_ids: [], asked_at: 1_000_000 },
+  });
+  const recent = t.getRecentEntries(session, 99);
+  assert.equal(recent.length, 1);
+  assert.equal(recent[0]?.question, 'q0');
+});
+
+test('getRecentEntries: unknown session → empty (no throw)', () => {
+  const t = new SessionTable();
+  assert.deepEqual(t.getRecentEntries('s_never_existed', 3), []);
+});
+
+test('getRecentEntries: expired session → empty (multi-turn falls back to single-turn)', () => {
+  let now = 1_000_000;
+  const t = new SessionTable({ sessionTtlMs: 100, now: () => now });
+  const session = t.getOrCreate(null);
+  t.record({
+    session_id: session,
+    entry: { question: 'q0', embedding: unitVec([1, 0]), answer_id: null, used_chunk_ids: [], asked_at: now },
+  });
+  now += 200; // past TTL
+  assert.deepEqual(t.getRecentEntries(session, 3), []);
+});
+
 test('record: touching a session refreshes its TTL', () => {
   let now = 1_000_000;
   const t = new SessionTable({ sessionTtlMs: 1_000, now: () => now });

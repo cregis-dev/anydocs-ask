@@ -1008,3 +1008,63 @@ test('ask: explicit scope_id constrains retrieval to that subtree', async () => 
     await ctx.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// RFC 0003 M1 — multi-turn history-aware retrieve query
+// ---------------------------------------------------------------------------
+
+test('ask: context.history splices prior questions into the embedding input', async () => {
+  // Multi-turn path: server layer pulls last N prior `question` strings from
+  // the session table and stuffs them into `context.history`. The query
+  // pipeline joins them with the current question before embedding so the
+  // vector lands closer to the dialogue's prior region — pronouns-only
+  // follow-ups ("它怎么改？") get pulled toward the right subtree.
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', { id: 'a', title: '配置', body: '系统配置说明。' });
+    await writeNav(root, 'zh', { version: 1, items: [{ type: 'page', pageId: 'a' }] });
+  });
+  try {
+    await ask(ctx, {
+      question: '它怎么改？',
+      context: { history: ['什么是配置？', '配置在哪里？'] },
+    });
+    // Embedder must have seen ONE composite input — history joined by '\n'
+    // then the current question on the last line. Order is chronological
+    // (oldest → newest → current_q).
+    assert.equal(ctx.embedder.lastEmbeddedTexts.length, 1);
+    assert.equal(
+      ctx.embedder.lastEmbeddedTexts[0],
+      '什么是配置？\n配置在哪里？\n它怎么改？',
+    );
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: missing / empty history → embedder sees raw question (single-turn byte-equivalent)', async () => {
+  // The default 0.1.x path must be untouched: when callers omit `history`
+  // OR pass an empty array, embedder.embed() receives the raw question with
+  // no decoration — bit-for-bit the single-turn behaviour.
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', { id: 'a', title: '配置', body: '系统配置说明。' });
+    await writeNav(root, 'zh', { version: 1, items: [{ type: 'page', pageId: 'a' }] });
+  });
+  try {
+    // (a) No context at all.
+    await ask(ctx, { question: '怎么配置？' });
+    assert.equal(ctx.embedder.lastEmbeddedTexts[0], '怎么配置？');
+
+    // (b) Explicit empty history array — same path.
+    await ask(ctx, { question: '怎么配置？', context: { history: [] } });
+    assert.equal(ctx.embedder.lastEmbeddedTexts[0], '怎么配置？');
+
+    // (c) Other context fields without history — also untouched.
+    await ask(ctx, {
+      question: '怎么配置？',
+      context: { current_page_id: 'a' },
+    });
+    assert.equal(ctx.embedder.lastEmbeddedTexts[0], '怎么配置？');
+  } finally {
+    await ctx.cleanup();
+  }
+});

@@ -138,6 +138,32 @@ export class SessionTable {
   }
 
   /**
+   * Return the most recent `n` entries for this session, newest → oldest by
+   * `asked_at`. Caller filters / shapes as needed.
+   *
+   * Used by the multi-turn history-aware retrieve path (RFC 0003 M1):
+   * server layer pulls `entry.question` from up to `multiTurn.historyTurns`
+   * recent entries and splices them into the embedding query. Unknown or
+   * expired session ids return `[]` — single-turn behaviour kicks in
+   * automatically.
+   *
+   * `n <= 0` returns `[]`. `n > available` returns all available without
+   * error. We do not enforce the `MAX_ENTRIES_PER_SESSION` cap here — the
+   * underlying ring already does (8 max).
+   */
+  getRecentEntries(session_id: string, n: number): SessionEntry[] {
+    if (n <= 0) return [];
+    const now = this.now();
+    const rec = this.map.get(session_id);
+    if (!rec || rec.expires_at <= now) return [];
+    // entries are stored in append (chronological) order; take the tail and
+    // reverse so newest is first.
+    const tail = rec.entries.slice(-n);
+    tail.reverse();
+    return tail;
+  }
+
+  /**
    * Append a new entry. Evicts the oldest if the per-session cap is hit, and
    * refreshes the session TTL. Silently no-ops on unknown session ids — the
    * server should always have called `getOrCreate` first, so an unknown id
