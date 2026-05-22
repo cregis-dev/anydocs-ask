@@ -134,7 +134,7 @@ Usage:
   anydocs-ask runs export      <projectRoot> --since <when> [--format jsonl|csv]
   anydocs-ask golden generate  <projectRoot> [--from structure|runs] [--limit N]
                                              [--since 14d] [--no-llm-rewrite] [--force]
-                                             [--include-console]
+                                             [--rewrite-batch-size N] [--include-console]
   anydocs-ask golden review    <projectRoot> [--reviewer <name>]
   anydocs-ask golden import    <projectRoot> --file <jsonl> [--replace]
   anydocs-ask eval             <projectRoot> [--baseline <path>]
@@ -403,6 +403,10 @@ async function main(): Promise<number> {
           return 2;
         }
         const limit = typeof flags.limit === 'string' ? Number(flags.limit) : undefined;
+        const rewriteBatchSize =
+          typeof flags['rewrite-batch-size'] === 'string'
+            ? Number(flags['rewrite-batch-size'])
+            : undefined;
         // --no-llm-rewrite parses as flags['no-llm-rewrite'] === true.
         const llmRewrite = flags['no-llm-rewrite'] !== true;
         const force = flags.force === true;
@@ -414,6 +418,9 @@ async function main(): Promise<number> {
           from: fromRaw,
           ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
           ...(since !== undefined ? { since } : {}),
+          ...(rewriteBatchSize !== undefined && Number.isFinite(rewriteBatchSize)
+            ? { rewriteBatchSize }
+            : {}),
           llmRewrite,
           force,
           ...(includeConsole ? { includeConsole: true } : {}),

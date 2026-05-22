@@ -23,8 +23,14 @@ import type { GoldenCaseCandidate } from './types.ts';
 
 export type RewriteOptions = {
   llm: LLM;
-  /** Hard cap on rewrite batch size to avoid token blow-ups on very large
-   *  projects. Caller chunks above this. Default 200. */
+  /**
+   * Hard cap on rewrite batch size to avoid token blow-ups and gateway
+   * timeouts. Caller chunks above this. Default 50 — was originally 200
+   * (one round-trip per ~100-page project) but gateways that cap output
+   * tokens around 8K-16K truncate on big batches. Some self-hosted
+   * Anthropic-compat gateways are even tighter; pass `batchSize: 10` for
+   * those (proven necessary against gw.cregis.ai on 2026-05-22).
+   */
   batchSize?: number;
   /**
    * Progress reporter. Called with already-newline-terminated lines so the
