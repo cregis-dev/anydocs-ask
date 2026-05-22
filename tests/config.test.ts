@@ -468,3 +468,106 @@ test('loadConfig: multiTurn rejects non-object value with a warning, leaves sibl
     await cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// citationSemanticCheck section (RFC 0005 alpha.0 — schema 留位, default off)
+// ---------------------------------------------------------------------------
+
+test('loadConfig: citationSemanticCheck defaults — off, shadow mode', async () => {
+  // RFC 0005 alpha.0 (2026-05-23) lands the schema slot for the B.2 reused-
+  // main-LLM citation validator. 0.3 alpha.1 wires the actual validation;
+  // for now flipping enabled has no runtime effect (the field is read by
+  // future code), and `mode` is reserved for the 0.4 H4 enforce upgrade.
+  const { root, cleanup } = await withTmpProject(async () => {});
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.citationSemanticCheck.enabled, false);
+    assert.equal(r.config.citationSemanticCheck.mode, 'shadow');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: citationSemanticCheck.enabled=true is accepted without warning', async () => {
+  // Operators opting in early should not see noise — alpha.0 silently
+  // accepts the flip even though the pipeline does not yet consume it.
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ citationSemanticCheck: { enabled: true } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.citationSemanticCheck.enabled, true);
+    assert.equal(r.config.citationSemanticCheck.mode, 'shadow', 'mode default preserved');
+    assert.deepEqual(r.warnings, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: citationSemanticCheck.mode=enforce schema-accepted but warned (0.4 H4 reserved)', async () => {
+  // `enforce` is reserved for the 0.4 H4 hard-gate upgrade. The schema accepts
+  // it so the file validates cleanly, but until 0.4 H4 lands operators should
+  // be told flipping it does not yet change behaviour.
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ citationSemanticCheck: { enabled: true, mode: 'enforce' } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.citationSemanticCheck.mode, 'enforce');
+    assert.deepEqual(r.warnings, [], 'enforce is a valid schema value, no warning');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: citationSemanticCheck.mode rejects garbage with a warning', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ citationSemanticCheck: { mode: 'paranoid' } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.citationSemanticCheck.mode, 'shadow', 'falls back to default');
+    assert.ok(
+      r.warnings.some((w) => /citationSemanticCheck\.mode/.test(w)),
+      `expected a mode warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: citationSemanticCheck rejects non-object value with a warning, leaves siblings intact', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        citationSemanticCheck: 42,
+        feedback: { enabled: true },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(
+      r.config.citationSemanticCheck.enabled,
+      false,
+      'citationSemanticCheck defaults preserved',
+    );
+    assert.equal(r.config.feedback.enabled, true, 'sibling section still merges');
+    assert.ok(
+      r.warnings.some((w) => /'citationSemanticCheck' must be an object/.test(w)),
+      `expected a citationSemanticCheck shape warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
