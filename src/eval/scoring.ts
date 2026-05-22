@@ -30,6 +30,16 @@ export type CaseResult = {
    * even when at least one correct page is present.
    */
   context_precision_at_5: number;
+  /**
+   * Page-level context recall: |top-5 unique pages ∩ must_cite_pages| /
+   * |must_cite_pages|. null when must_cite_pages is empty (averaged like
+   * {@link api_rule_pass}).
+   *
+   * This is the deterministic, page-level version of Ragas
+   * `context_recall`. The claim-level LLM-judge variant lands in eval
+   * Phase 6 alongside Faithfulness.
+   */
+  context_recall_at_5: number | null;
   citation_pass: boolean;
   /**
    * Brittle: substring + regex matching against the LLM answer. Misses
@@ -62,6 +72,8 @@ export type EvalSummary = {
   hit_at_3: number;
   mrr: number;
   context_precision_at_5: number;
+  context_recall_n: number;
+  context_recall_at_5: number | null;
   citation_pass: number;
   /** Diagnostic only; see {@link CaseResult.answer_rule_pass}. */
   answer_rule_pass: number;
@@ -92,6 +104,9 @@ export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): Ca
     trace.fused.slice(0, 5),
     allowedCitationPages,
   );
+  const context_recall_at_5 = mustPages.size === 0
+    ? null
+    : [...mustPages].filter((p) => top5Pages.includes(p)).length / mustPages.size;
 
   const kind = result.type;
   let citedPages: string[] = [];
@@ -149,6 +164,7 @@ export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): Ca
     hit_at_3,
     mrr,
     context_precision_at_5,
+    context_recall_at_5,
     citation_pass: citationPass,
     answer_rule_pass: answerRulePass,
     api_rule_pass: apiRulePass,
@@ -183,6 +199,7 @@ export function failedCase(c: GoldenCase, latencyMs: number): CaseResult {
     hit_at_3: false,
     mrr: 0,
     context_precision_at_5: 0,
+    context_recall_at_5: c.expected.must_cite_pages.length === 0 ? null : 0,
     citation_pass: false,
     answer_rule_pass: false,
     api_rule_pass: hasApiRules ? false : null,
@@ -203,6 +220,9 @@ export function failedCase(c: GoldenCase, latencyMs: number): CaseResult {
 
 export function summarizeResults(results: CaseResult[]): EvalSummary {
   const apiResults = results.filter((r) => r.api_rule_pass !== null);
+  const recallResults = results.filter(
+    (r): r is CaseResult & { context_recall_at_5: number } => r.context_recall_at_5 !== null,
+  );
   return {
     n: results.length,
     r_at_5: mean(results.map((r) => (r.r_at_5 ? 1 : 0))),
@@ -210,6 +230,10 @@ export function summarizeResults(results: CaseResult[]): EvalSummary {
     hit_at_3: mean(results.map((r) => (r.hit_at_3 ? 1 : 0))),
     mrr: mean(results.map((r) => r.mrr)),
     context_precision_at_5: mean(results.map((r) => r.context_precision_at_5)),
+    context_recall_n: recallResults.length,
+    context_recall_at_5: recallResults.length === 0
+      ? null
+      : mean(recallResults.map((r) => r.context_recall_at_5)),
     citation_pass: mean(results.map((r) => (r.citation_pass ? 1 : 0))),
     answer_rule_pass: mean(results.map((r) => (r.answer_rule_pass ? 1 : 0))),
     kind_pass: mean(results.map((r) => (r.kind_pass ? 1 : 0))),

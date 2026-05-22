@@ -143,6 +143,39 @@ test('scoreCase MRR ignores chunk-level duplication of the same page', () => {
   assert.equal(scored.mrr, 1);
 });
 
+test('scoreCase context_recall_at_5 reports fraction of must_cite_pages in top-5', () => {
+  // 4 required pages, only 2 surface in top-5 → recall = 0.5
+  const c = golden({
+    expected: {
+      must_cite_pages: ['page-A', 'page-B', 'page-C', 'page-D'],
+      must_contain: [],
+      forbid_contain: [],
+    },
+  });
+
+  const scored = scoreCase(
+    c,
+    answer(),
+    trace(['page-A', 'noise-1', 'page-B', 'noise-2', 'noise-3']),
+  );
+
+  assert.equal(scored.r_at_5, true, 'Hit@5 satisfied by any one of the 4');
+  assert.equal(scored.context_recall_at_5, 0.5, '2/4 required pages in top-5');
+});
+
+test('scoreCase context_recall_at_5 is null when must_cite_pages is empty', () => {
+  const c = golden({
+    expected: {
+      must_cite_pages: [],
+      must_contain: [],
+      forbid_contain: [],
+    },
+  });
+
+  const scored = scoreCase(c, answer(), trace(['anything']));
+  assert.equal(scored.context_recall_at_5, null);
+});
+
 test('scoreCase scores API operation and citation URL rules only when configured', () => {
   const c = golden({
     expected: {
