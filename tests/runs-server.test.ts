@@ -395,3 +395,68 @@ test('/v1/ask?dry_run=0 (or absent value) is NOT treated as dry-run', async () =
     await cleanup();
   }
 });
+
+test('/v1/ask: RunRecord.session_id matches the id echoed in the response (dogfood 2026-05-22)', async () => {
+  // Dogfood 2026-05-22 against hermes-docs (5-turn multi-turn dialogue):
+  // runs.jsonl had session_id=null on every row even when multi-turn was
+  // clearly working (history_window 1→2→3). appendRun() used to hardcode
+  // null; the bug broke the M6 fallback path that backfills β rows whose
+  // feedback.session_id column is null (pre-PR #61). The id must now be
+  // resolved once and threaded through both writes.
+  const { runtime, cleanup, stateRoot } = await setup({ runsEnabled: true });
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Q' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { session_id: string };
+    assert.ok(body.session_id, 'response must echo session_id');
+
+    const file = findRunsFile(stateRoot);
+    assert.ok(file, 'expected runs file');
+    const lines = readFileSync(file!, 'utf8').trim().split('\n');
+    const rec = JSON.parse(lines[0]!) as RunRecord;
+    assert.equal(rec.session_id, body.session_id);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('/v1/ask: second call in the same session reuses the same session_id on RunRecord', async () => {
+  // Multi-turn round-trip: turn 1 mints a session, turn 2 echoes it. The
+  // server must persist the echoed id (not mint a new one) and the runs
+  // ledger must match. Dogfood hermes-docs verified this end-to-end with
+  // 5 turns; this is the minimal mock-LLM regression.
+  const { runtime, cleanup, stateRoot } = await setup({ runsEnabled: true });
+  try {
+    const app = createApp({ runtime });
+    const a = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Q1' }),
+    });
+    const aBody = (await a.json()) as { session_id: string };
+    const sid = aBody.session_id;
+
+    const b = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Q2', session_id: sid }),
+    });
+    const bBody = (await b.json()) as { session_id: string };
+    assert.equal(bBody.session_id, sid, 'turn 2 must echo the same session_id');
+
+    const file = findRunsFile(stateRoot);
+    const lines = readFileSync(file!, 'utf8').trim().split('\n');
+    assert.equal(lines.length, 2);
+    const r1 = JSON.parse(lines[0]!) as RunRecord;
+    const r2 = JSON.parse(lines[1]!) as RunRecord;
+    assert.equal(r1.session_id, sid);
+    assert.equal(r2.session_id, sid);
+  } finally {
+    await cleanup();
+  }
+});

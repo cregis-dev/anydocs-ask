@@ -46,6 +46,12 @@ export type ObserveAskArgs = {
   result: AskResult;
   /** ms-epoch the ask completed. */
   now: number;
+  /** When the server already resolved the session id earlier in the request
+   *  (e.g. to stamp runs.jsonl before γ observation), pass it here so
+   *  observeAsk reuses the same id instead of calling sessionTable.getOrCreate
+   *  a second time. Calling getOrCreate twice with `null` would mint two
+   *  different ids and split the run+response identity. */
+  preResolvedSessionId?: string;
 };
 
 export type ObserveAskOutcome = {
@@ -56,7 +62,8 @@ export type ObserveAskOutcome = {
 };
 
 export function observeAsk(args: ObserveAskArgs): ObserveAskOutcome {
-  const session_id = args.sessionTable.getOrCreate(args.requestedSessionId);
+  const session_id =
+    args.preResolvedSessionId ?? args.sessionTable.getOrCreate(args.requestedSessionId);
 
   // Gate everything behind both knobs (PRD §11.4 #6 + ARCH §15.7).
   // 'off' → just mint/refresh the session_id and bail. We still issue an id

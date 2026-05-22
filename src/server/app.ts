@@ -517,6 +517,16 @@ function finalizeAskCall(args: {
 }): AskResult & { session_id: string; _dry_run?: true } {
   const { runtime, req, result, trace, t0, options, requestedSessionId, queryVector } = args;
 
+  // Resolve session_id once up front so both runs.jsonl (audit log) and
+  // /v1/ask response carry the SAME id. Dogfood 2026-05-22 caught the bug:
+  // runs.jsonl had session_id=null on every row even when multi-turn was
+  // clearly running, because appendRun used to hardcode null while gamma
+  // resolved its own id later. We now mint once and thread the id through
+  // both writes — observeAsk receives it via preResolvedSessionId to skip
+  // calling getOrCreate a second time (which would mint a different id
+  // when requestedSessionId is null).
+  const sessionId = runtime.sessions.getOrCreate(requestedSessionId);
+
   // Persist + log to runs.jsonl regardless of outcome — analyze needs
   // visibility into errors / clarifies / answers alike. Skipped for dry_run.
   if (!options.dryRun) {
@@ -525,6 +535,7 @@ function finalizeAskCall(args: {
       result.type === 'answer' ? result.latency_ms : Math.round(performance.now() - t0);
     appendRun(runtime, {
       requestId,
+      sessionId,
       query: req.question ?? '',
       filters: extractFilters(req),
       contextPageId: req.context?.current_page_id ?? null,
@@ -553,6 +564,7 @@ function finalizeAskCall(args: {
     config: runtime.config,
     sessionTable: runtime.sessions,
     requestedSessionId,
+    preResolvedSessionId: sessionId,
     question: (req.question ?? '').trim(),
     queryVector: options.dryRun ? null : queryVector,
     result,
@@ -593,6 +605,12 @@ function appendRun(
   runtime: Runtime,
   args: {
     requestId: string;
+    /** Resolved by finalizeAskCall via sessionTable.getOrCreate — same id
+     *  echoed back in the /v1/ask response. Always non-null on the live
+     *  request path. RunRecord.session_id allows analyze/Studio to fold
+     *  per-dialogue runs (RFC 0003 M6 fallback for feedback rows whose
+     *  column is null — pre-PR #61 β rows). */
+    sessionId: string;
     query: string;
     filters: Record<string, unknown>;
     contextPageId: string | null;
@@ -630,7 +648,7 @@ function appendRun(
   const record: RunRecord = {
     ts: new Date().toISOString(),
     request_id: args.requestId,
-    session_id: null,
+    session_id: args.sessionId,
     query: args.query,
     filters: args.filters,
     context_pageId: args.contextPageId,
