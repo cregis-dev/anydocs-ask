@@ -1,6 +1,6 @@
 {
   "name": "@anydocs/ask",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local-first Q&A service for anydocs projects — respects authoring intent, supports multilingual",
   "type": "module",
   "license": "MIT",
