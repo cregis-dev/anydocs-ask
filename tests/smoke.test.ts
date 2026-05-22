@@ -316,6 +316,126 @@ test('POST /v1/ask/feedback falls back to body.question when answers row expired
   }
 });
 
+test('POST /v1/ask/feedback persists session_id from request body (RFC 0003 M6 follow-up)', async () => {
+  // β explicit feedback insert used to leave feedback.session_id NULL even
+  // though Reader / Widget clients always echo the session_id (RFC 0001
+  // §4.1). M6's Console grouping JOINed runs.jsonl to backfill, but rows
+  // outliving the runs window lost their session anchor. The writer now
+  // persists the value on insert; γ + curated paths have always done so.
+  const { runtime, cleanup } = await makeRuntime();
+  try {
+    await runtime.start();
+    const app = createApp({ runtime });
+    const askRes = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    const askBody = (await askRes.json()) as { answer_id: string; session_id: string };
+    assert.ok(askBody.session_id, '/v1/ask must echo session_id');
+
+    await app.request('/v1/ask/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        answer_id: askBody.answer_id,
+        rating: 1,
+        session_id: askBody.session_id,
+      }),
+    });
+    const row = runtime.db
+      .prepare(`SELECT session_id FROM feedback WHERE answer_id = ?`)
+      .get(askBody.answer_id) as { session_id: string | null } | undefined;
+    assert.ok(row, 'feedback row must be inserted');
+    assert.equal(row!.session_id, askBody.session_id);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /v1/ask/feedback accepts sessionId camelCase alias', async () => {
+  const { runtime, cleanup } = await makeRuntime();
+  try {
+    await runtime.start();
+    const app = createApp({ runtime });
+    const askRes = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    const askBody = (await askRes.json()) as { answer_id: string };
+    await app.request('/v1/ask/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        answer_id: askBody.answer_id,
+        rating: 1,
+        sessionId: 'sess-camel-case',
+      }),
+    });
+    const row = runtime.db
+      .prepare(`SELECT session_id FROM feedback WHERE answer_id = ?`)
+      .get(askBody.answer_id) as { session_id: string | null } | undefined;
+    assert.equal(row!.session_id, 'sess-camel-case');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /v1/ask/feedback leaves session_id NULL when neither key sent (back-compat)', async () => {
+  // Legacy clients (pre-RFC 0001) and direct curl invocations don't carry
+  // a session_id. The writer must persist NULL — never crash, never invent
+  // a value — so the column stays a faithful signal of "client had a
+  // session at feedback time".
+  const { runtime, cleanup } = await makeRuntime();
+  try {
+    await runtime.start();
+    const app = createApp({ runtime });
+    const askRes = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    const askBody = (await askRes.json()) as { answer_id: string };
+    await app.request('/v1/ask/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answer_id: askBody.answer_id, rating: 1 }),
+    });
+    const row = runtime.db
+      .prepare(`SELECT session_id FROM feedback WHERE answer_id = ?`)
+      .get(askBody.answer_id) as { session_id: string | null } | undefined;
+    assert.equal(row!.session_id, null);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /v1/ask/feedback treats empty-string session_id as NULL', async () => {
+  const { runtime, cleanup } = await makeRuntime();
+  try {
+    await runtime.start();
+    const app = createApp({ runtime });
+    const askRes = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    const askBody = (await askRes.json()) as { answer_id: string };
+    await app.request('/v1/ask/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answer_id: askBody.answer_id, rating: 1, session_id: '' }),
+    });
+    const row = runtime.db
+      .prepare(`SELECT session_id FROM feedback WHERE answer_id = ?`)
+      .get(askBody.answer_id) as { session_id: string | null } | undefined;
+    assert.equal(row!.session_id, null);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('POST /v1/ask/feedback without answer_id returns 400', async () => {
   const { runtime, cleanup } = await makeRuntime();
   try {
