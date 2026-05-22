@@ -19,6 +19,60 @@ developer scenarios, multi-page citations, explicit
 `must_cite_operations` / `must_cite_urls`, and `must_contain_regex`
 that uses synonym alternations rather than rigid keyword lists.
 
+## 2026-05-22 · Manual expansion (+20 cases)
+
+Source-controlled snapshot:
+`eval/cregis-developer-docs/cases.jsonl`. To sync it into the active
+runtime set, run:
+
+```bash
+pnpm dev golden import /Users/vincentjin/CodingProject/cregis-developer-docs \
+  --file /Users/vincentjin/CodingProject/anydocs-ask/eval/cregis-developer-docs/cases.jsonl \
+  --replace
+```
+
+The active runtime file was also updated at
+`~/anydocs-ask-runtime/state/default/golden/cases.jsonl`, bringing the
+approved set to **28 cases**.
+
+New distribution:
+
+- Signature / auth ×5 — `cregis-auth-zh-signature-debug`,
+  `cregis-auth-en-ordered-signature-string`,
+  `cregis-auth-zh-webhook-vs-api-signature`,
+  `cregis-auth-en-backend-signature-fails`,
+  `cregis-auth-zh-system-params-required`
+- Project setup ×3 — `cregis-setup-zh-collections-and-payouts-projects`,
+  `cregis-setup-en-marketplace-project-choice`,
+  `cregis-setup-zh-project-credential-isolation`
+- WaaS payout / balance / token details ×4 —
+  `cregis-waas-zh-payout-failure-status-query`,
+  `cregis-waas-en-sub-address-withdrawal-fields`,
+  `cregis-waas-zh-sub-address-balance-query`,
+  `cregis-waas-en-token-network-payout-fields`
+- Payment Engine supplemental scenarios ×4 —
+  `cregis-pe-zh-order-timeout-valid-time`,
+  `cregis-pe-en-order-timeout-query-fallback`,
+  `cregis-pe-zh-partial-payment-idempotency`,
+  `cregis-pe-en-cross-currency-order-fields`
+- Cross-product / concepts ×4 —
+  `cregis-errors-zh-code-handling-priority`,
+  `cregis-sdk-en-service-language-choice`,
+  `cregis-tokens-zh-network-token-mapping`,
+  `cregis-webhook-en-public-callback-url`
+
+Validation notes:
+
+- JSONL parse + schema consistency: pass.
+- Page and synthetic OpenAPI page references: pass.
+- OpenAPI operation / URL references: pass.
+- Mock-provider eval for retrieval health: `H@5=1.00`, `H@3=1.00`,
+  `H@1=0.89`, `MRR=0.94`, `Context-P@5=0.85`.
+
+Full LLM eval was not run in this pass because the shell environment did
+not contain `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`; avoid placing
+secrets directly in command history.
+
 ## 2026-05-22 · Attempted: `golden generate --from structure`
 
 Goal: bootstrap ~20-30 new cases for Phase 3 (domain expansion).
