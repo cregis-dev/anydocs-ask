@@ -33,6 +33,13 @@ export class MockEmbedder implements Embedder {
    * call; only the latest invocation's texts survive.
    */
   lastEmbeddedTexts: string[] = [];
+  /**
+   * Flat list of every text passed to embed() since construction, across
+   * all calls. RFC 0003 alpha.1 — the pipeline now runs TWO embeds per ask
+   * when history is in play (raw current_q for γ similarity + history-
+   * augmented for retrieve). Tests assert both inputs appear here.
+   */
+  allEmbeddedTexts: string[] = [];
 
   constructor(opts: MockEmbedderOptions = {}) {
     this.model = opts.model ?? 'mock-embedder';
@@ -48,6 +55,7 @@ export class MockEmbedder implements Embedder {
     this.calls += 1;
     this.textsEmbedded += texts.length;
     this.lastEmbeddedTexts = [...texts];
+    this.allEmbeddedTexts.push(...texts);
     return texts.map((text) => ({ vector: vectorFor(text, this.dim) }));
   }
 }

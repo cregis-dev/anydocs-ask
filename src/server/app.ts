@@ -480,9 +480,13 @@ function injectMultiTurnHistory(
   );
   if (entries.length === 0) return;
   // getRecentEntries returns newest → oldest; reverse for chronological order
-  // so the embedding sees the dialogue as it happened.
-  const questions = entries.map((e) => e.question).reverse();
-  req.context = { ...(req.context ?? {}), history: questions };
+  // so embedding splice + prompt history block both see the dialogue as it
+  // actually happened (oldest → newest, current question implicit at the
+  // tail). Both consumers in the query pipeline assume this ordering.
+  const turns = entries
+    .map((e) => ({ question: e.question, answer_summary: e.answer_md_summary }))
+    .reverse();
+  req.context = { ...(req.context ?? {}), history: turns };
 }
 
 function finalizeAskCall(args: {
@@ -639,6 +643,7 @@ function appendRun(
       tokens_out: trace.tokens_out,
       model,
       error_code: errorCode,
+      ...(trace.history_window !== undefined ? { history_window: trace.history_window } : {}),
     },
     feedback: { beta: null, gamma: null },
   };

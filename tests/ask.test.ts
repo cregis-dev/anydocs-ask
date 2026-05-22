@@ -1013,12 +1013,15 @@ test('ask: explicit scope_id constrains retrieval to that subtree', async () => 
 // RFC 0003 M1 — multi-turn history-aware retrieve query
 // ---------------------------------------------------------------------------
 
-test('ask: context.history splices prior questions into the embedding input', async () => {
-  // Multi-turn path: server layer pulls last N prior `question` strings from
-  // the session table and stuffs them into `context.history`. The query
-  // pipeline joins them with the current question before embedding so the
-  // vector lands closer to the dialogue's prior region — pronouns-only
-  // follow-ups ("它怎么改？") get pulled toward the right subtree.
+test('ask: context.history splices prior questions into the retrieve-time embedding (separate from γ vector)', async () => {
+  // Multi-turn path: server layer pulls last N prior turns from the session
+  // table and stuffs them into `context.history`. The query pipeline now
+  // runs TWO embeds per ask:
+  //   1. Raw current_q — what γ similarity comparison uses across turns.
+  //   2. History-augmented input — what feeds the vector retrieve path.
+  // Splitting them was forced by the alpha.1 default flip: identical
+  // questions across turns must still cosine-1.0 each other on the γ side
+  // even though history makes their retrieve-time inputs differ.
   const ctx = await bootstrap(async (root) => {
     await writePage(root, 'zh', { id: 'a', title: '配置', body: '系统配置说明。' });
     await writeNav(root, 'zh', { version: 1, items: [{ type: 'page', pageId: 'a' }] });
@@ -1026,44 +1029,114 @@ test('ask: context.history splices prior questions into the embedding input', as
   try {
     await ask(ctx, {
       question: '它怎么改？',
-      context: { history: ['什么是配置？', '配置在哪里？'] },
+      context: {
+        history: [
+          { question: '什么是配置？', answer_summary: '配置是 ...' },
+          { question: '配置在哪里？', answer_summary: '在 anydocs.json' },
+        ],
+      },
     });
-    // Embedder must have seen ONE composite input — history joined by '\n'
-    // then the current question on the last line. Order is chronological
-    // (oldest → newest → current_q).
-    assert.equal(ctx.embedder.lastEmbeddedTexts.length, 1);
-    assert.equal(
-      ctx.embedder.lastEmbeddedTexts[0],
-      '什么是配置？\n配置在哪里？\n它怎么改？',
+    // Both inputs must have hit the embedder, in either order. Use
+    // allEmbeddedTexts so we see across calls.
+    assert.ok(
+      ctx.embedder.allEmbeddedTexts.includes('它怎么改？'),
+      'raw current_q must be embedded for γ',
+    );
+    assert.ok(
+      ctx.embedder.allEmbeddedTexts.includes(
+        '什么是配置？\n配置在哪里？\n它怎么改？',
+      ),
+      'history-augmented input must be embedded for retrieve',
     );
   } finally {
     await ctx.cleanup();
   }
 });
 
-test('ask: missing / empty history → embedder sees raw question (single-turn byte-equivalent)', async () => {
-  // The default 0.1.x path must be untouched: when callers omit `history`
-  // OR pass an empty array, embedder.embed() receives the raw question with
-  // no decoration — bit-for-bit the single-turn behaviour.
+test('ask: missing / empty history → ONE embed call on the raw question (single-turn byte-equivalent)', async () => {
+  // The default single-turn path must be untouched: when callers omit
+  // `history` OR pass an empty array, exactly one embed call goes out with
+  // the raw question — alpha.0 byte-equivalent.
   const ctx = await bootstrap(async (root) => {
     await writePage(root, 'zh', { id: 'a', title: '配置', body: '系统配置说明。' });
     await writeNav(root, 'zh', { version: 1, items: [{ type: 'page', pageId: 'a' }] });
   });
   try {
     // (a) No context at all.
+    const beforeA = ctx.embedder.calls;
     await ask(ctx, { question: '怎么配置？' });
+    assert.equal(ctx.embedder.calls - beforeA, 1, 'single-turn should call embed exactly once');
     assert.equal(ctx.embedder.lastEmbeddedTexts[0], '怎么配置？');
 
-    // (b) Explicit empty history array — same path.
+    // (b) Explicit empty history array — same path, same single-call.
+    const beforeB = ctx.embedder.calls;
     await ask(ctx, { question: '怎么配置？', context: { history: [] } });
+    assert.equal(ctx.embedder.calls - beforeB, 1);
     assert.equal(ctx.embedder.lastEmbeddedTexts[0], '怎么配置？');
 
     // (c) Other context fields without history — also untouched.
+    const beforeC = ctx.embedder.calls;
     await ask(ctx, {
       question: '怎么配置？',
       context: { current_page_id: 'a' },
     });
+    assert.equal(ctx.embedder.calls - beforeC, 1);
     assert.equal(ctx.embedder.lastEmbeddedTexts[0], '怎么配置？');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: history populated → result.history_window = entry count + trace mirrors', async () => {
+  // RFC 0003 M4 — the result body advertises how many turns this call ate
+  // so Studio + trace consumers don't need to re-derive from session_id.
+  // Trace mirrors the same number for runs.jsonl analyze paths.
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', { id: 'a', title: '配置', body: '系统配置说明。' });
+    await writeNav(root, 'zh', { version: 1, items: [{ type: 'page', pageId: 'a' }] });
+  });
+  try {
+    const { askWithTrace } = await import('../src/query/answer.ts');
+    const out = await askWithTrace(ctx, {
+      question: '它怎么改？',
+      context: {
+        history: [
+          { question: '什么是配置？', answer_summary: 'A1' },
+          { question: '配置在哪里？', answer_summary: 'A2' },
+        ],
+      },
+    });
+    // History was 2 turns; result body + trace must both expose 2.
+    const hw =
+      out.result.type === 'answer' || out.result.type === 'clarify'
+        ? out.result.history_window
+        : undefined;
+    assert.equal(hw, 2, `result.history_window should be 2, got ${hw}`);
+    assert.equal(out.trace.history_window, 2);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: empty history → history_window field absent on result + trace', async () => {
+  // Backward-compat invariant: single-turn calls must not gain a
+  // history_window=0 field. Absent vs. 0 matters for runs.jsonl filters
+  // and Studio multi-turn vs. single-turn grouping.
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', { id: 'a', title: '配置', body: '系统配置说明。' });
+    await writeNav(root, 'zh', { version: 1, items: [{ type: 'page', pageId: 'a' }] });
+  });
+  try {
+    const { askWithTrace } = await import('../src/query/answer.ts');
+    const out = await askWithTrace(ctx, { question: '怎么配置？' });
+    if (out.result.type === 'answer' || out.result.type === 'clarify') {
+      assert.equal(
+        out.result.history_window,
+        undefined,
+        'single-turn result must not carry history_window',
+      );
+    }
+    assert.equal(out.trace.history_window, undefined);
   } finally {
     await ctx.cleanup();
   }

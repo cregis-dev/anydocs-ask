@@ -15,19 +15,30 @@ export type AskRequest = {
     current_page_id?: string | null;
     scope_id?: string | null;
     /**
-     * RFC 0003 M1 (multi-turn). Most-recent-N prior question strings from
-     * the same session, oldest → newest. Populated by the server layer
-     * when `multiTurn.enabled === true` and a valid session_id is in play
-     * (see [src/server/app.ts](../server/app.ts)). The query pipeline
-     * splices these into the embedding query so vector retrieval inherits
-     * dialogue context (RFC 0003 §4.2). BM25 / entity injection paths
-     * remain on the current question only — splicing old keywords would
-     * dilute the present query's term focus.
+     * RFC 0003 multi-turn — most-recent-N prior turns from the same session,
+     * oldest → newest. Populated by the server layer when
+     * `multiTurn.enabled === true` and a valid session_id is in play (see
+     * [src/server/app.ts](../server/app.ts)).
      *
-     * `undefined` (default) is the single-turn path and is byte-equivalent
-     * to 0.1.x behaviour; an empty array `[]` is treated identically.
+     * Two downstream consumers:
+     *   1. History-aware retrieve (M1, RFC §4.2). Only `question` strings
+     *      are spliced into the embedding query — vector retrieval inherits
+     *      dialogue context so pronoun-only follow-ups land near the right
+     *      subtree. BM25 / entity injection stay on the current question.
+     *   2. Multi-turn prompt (M2, RFC §4.1). Both `question` and
+     *      `answer_summary` (≤ 200 chars per RFC §4.3) feed into the prompt
+     *      so Claude can resolve pronouns against the actual prior turn.
+     *
+     * `undefined` (default) and `[]` are the single-turn path — byte-
+     * equivalent to 0.1.x for both embedding and prompt.
      */
-    history?: string[];
+    history?: Array<{
+      question: string;
+      /** Prior answer markdown truncated to ≤ 200 chars (RFC §4.3). May be
+       *  the empty string for prior clarify / error turns — caller still
+       *  sends the entry so the `question` slot stays in chronological order. */
+      answer_summary: string;
+    }>;
   };
   options?: {
     /** Cap chunks injected into the prompt. Server applies a hard ceiling. */
@@ -64,6 +75,11 @@ export type AskAnswer = {
   used_chunks: number;
   model: string;
   latency_ms: number;
+  /** RFC 0003 M4 — how many prior session turns this call consumed (embedding
+   *  splice + prompt). 0 / undefined on first-turn or `multiTurn.enabled=false`
+   *  paths. Surfaced to Studio + trace so reviewers can tell single-turn from
+   *  multi-turn answers without re-deriving from session_id joins. */
+  history_window?: number;
 };
 
 export type ClarifyOption = {
@@ -80,6 +96,11 @@ export type AskClarify = {
   answer_lang: DocsLang;
   message: string;
   options: ClarifyOption[];
+  /** RFC 0003 M4 — same semantics as [[AskAnswer.history_window]]. Clarify
+   *  branches return BEFORE the LLM call, so history was only consumed at the
+   *  embedding splice stage. Still reported so Studio can group clarify
+   *  outcomes per dialogue. */
+  history_window?: number;
 };
 
 export type AskError = {

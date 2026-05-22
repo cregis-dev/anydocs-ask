@@ -365,18 +365,39 @@ test('loadConfig: feedback rejects out-of-range rerankerWeight with a warning', 
 });
 
 // ---------------------------------------------------------------------------
-// multiTurn section (RFC 0003 — schema 登记 only in 0.2, no pipeline consumer)
+// multiTurn section (RFC 0003 — alpha.1 flip, default-on with 3-turn window)
 // ---------------------------------------------------------------------------
 
-test('loadConfig: multiTurn defaults — disabled, 3-turn history window', async () => {
-  // Default-off mirrors feedback.enabled — RFC §2.1 M5. The 0.4.x pipeline
-  // feeds the existing primary LLM (Anthropic / OpenAI provider) with the
-  // last `historyTurns` turns when enabled=true; no extra runtime needed.
+test('loadConfig: multiTurn defaults — enabled, 3-turn history window (alpha.1 flip)', async () => {
+  // RFC 0003 alpha.1 (2026-05-22) flipped the default from false → true once
+  // M1+M2+M3+M4 were end-to-end wired. Design partners get pronoun resolution
+  // on second turns without flipping a knob; operators who want the old
+  // alpha.0 (M1-only, embedding-splice-only) behaviour pin enabled=false.
   const { root, cleanup } = await withTmpProject(async () => {});
   try {
     const r = await loadConfig(root);
-    assert.equal(r.config.multiTurn.enabled, false);
+    assert.equal(r.config.multiTurn.enabled, true);
     assert.equal(r.config.multiTurn.historyTurns, 3);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: multiTurn.enabled=false explicit override pins single-turn', async () => {
+  // Escape hatch — operators wanting alpha.0 byte-equivalent single-turn
+  // behaviour (no prompt history block, no embedding splice, no
+  // history_window field on responses) must be able to disable cleanly.
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ multiTurn: { enabled: false } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.multiTurn.enabled, false);
+    assert.equal(r.config.multiTurn.historyTurns, 3, 'historyTurns default preserved');
+    assert.deepEqual(r.warnings, []);
   } finally {
     await cleanup();
   }
@@ -437,7 +458,7 @@ test('loadConfig: multiTurn rejects non-object value with a warning, leaves sibl
   });
   try {
     const r = await loadConfig(root);
-    assert.equal(r.config.multiTurn.enabled, false, 'multiTurn defaults preserved');
+    assert.equal(r.config.multiTurn.enabled, true, 'multiTurn defaults preserved');
     assert.equal(r.config.feedback.enabled, true, 'sibling section still merges');
     assert.ok(
       r.warnings.some((w) => /'multiTurn' must be an object/.test(w)),

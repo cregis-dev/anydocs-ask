@@ -267,3 +267,117 @@ test('observeAsk: threshold constant matches RFC §7 Q2 (0.85)', () => {
   // Smoke test against accidental constant drift.
   assert.equal(REASK_SIMILARITY_THRESHOLD, 0.85);
 });
+
+// ---------------------------------------------------------------------------
+// answer_md_summary persistence — RFC 0003 M3
+// ---------------------------------------------------------------------------
+
+test('observeAsk: short answer → SessionEntry.answer_md_summary = full answer_md', () => {
+  // Under the 200-char cap, the summary is the full text. M2 prompt builder
+  // round-trips this verbatim into the `A_N:` line of the history block.
+  const db = openDatabase({ dbPath: ':memory:' });
+  const sessions = new SessionTable();
+  try {
+    const out = observeAsk({
+      db,
+      config: makeConfig({}),
+      sessionTable: sessions,
+      requestedSessionId: null,
+      question: 'q',
+      queryVector: unitVec([1, 0]),
+      result: answerResult({ answer_id: 'ans_1', chunk_ids: [1] }),
+      now: 1_000_000,
+    });
+    const [entry] = sessions.getRecentEntries(out.session_id, 1);
+    assert.ok(entry);
+    assert.equal(entry.answer_md_summary, 'ans', 'answerResult helper stubs answer_md="ans"');
+  } finally {
+    db.close();
+  }
+});
+
+test('observeAsk: answer_md > 200 chars is truncated to exactly 200 in the session entry', () => {
+  const db = openDatabase({ dbPath: ':memory:' });
+  const sessions = new SessionTable();
+  try {
+    const longAnswer = 'X'.repeat(500);
+    const out = observeAsk({
+      db,
+      config: makeConfig({}),
+      sessionTable: sessions,
+      requestedSessionId: null,
+      question: 'q',
+      queryVector: unitVec([1, 0]),
+      result: {
+        type: 'answer',
+        answer_id: 'ans_1',
+        answer_lang: 'en',
+        answer_md: longAnswer,
+        translation_notice: null,
+        citations: [],
+        used_chunks: 0,
+        model: 'mock',
+        latency_ms: 1,
+      },
+      now: 1_000_000,
+    });
+    const [entry] = sessions.getRecentEntries(out.session_id, 1);
+    assert.ok(entry, 'session entry should exist');
+    assert.equal(entry.answer_md_summary.length, 200, 'truncated to 200 chars');
+    assert.equal(entry.answer_md_summary, 'X'.repeat(200));
+  } finally {
+    db.close();
+  }
+});
+
+test('observeAsk: clarify result → answer_md_summary = clarify message (≤ 200 chars)', () => {
+  // Clarify turns still feed the next turn's pronoun resolution, so the
+  // clarify prompt text is what we persist as the "answer summary".
+  const db = openDatabase({ dbPath: ':memory:' });
+  const sessions = new SessionTable();
+  try {
+    const out = observeAsk({
+      db,
+      config: makeConfig({}),
+      sessionTable: sessions,
+      requestedSessionId: null,
+      question: 'q',
+      queryVector: unitVec([1, 0]),
+      result: {
+        type: 'clarify',
+        answer_id: 'ans_clarify',
+        answer_lang: 'zh',
+        message: '请问您是想了解 A 还是 B？',
+        options: [],
+      },
+      now: 1_000_000,
+    });
+    const [entry] = sessions.getRecentEntries(out.session_id, 1);
+    assert.ok(entry);
+    assert.equal(entry.answer_md_summary, '请问您是想了解 A 还是 B？');
+  } finally {
+    db.close();
+  }
+});
+
+test('observeAsk: error result → answer_md_summary is empty string', () => {
+  const db = openDatabase({ dbPath: ':memory:' });
+  const sessions = new SessionTable();
+  try {
+    const out = observeAsk({
+      db,
+      config: makeConfig({}),
+      sessionTable: sessions,
+      requestedSessionId: null,
+      question: 'q',
+      queryVector: unitVec([1, 0]),
+      result: { type: 'error', code: 'no_citations', message: 'no chunks' },
+      now: 1_000_000,
+    });
+    const [entry] = sessions.getRecentEntries(out.session_id, 1);
+    assert.ok(entry);
+    assert.equal(entry.answer_md_summary, '');
+  } finally {
+    db.close();
+  }
+});

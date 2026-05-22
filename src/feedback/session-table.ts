@@ -43,6 +43,14 @@ export type SessionEntry = {
   used_chunk_ids: number[];
   /** When the ask was recorded. Used for the 5min re-ask window cutoff. */
   asked_at: number;
+  /** Answer markdown truncated to the first 200 chars (RFC 0003 §4.3). The
+   *  multi-turn prompt builder pulls this back as `A_N` summaries so Claude
+   *  can resolve pronouns against the actual prior turn content without us
+   *  re-fetching from the answers table. Empty string on clarify / error /
+   *  no-citation paths — those entries still need a slot so similarity
+   *  comparison stays valid. Hard-capped at 200 chars by the writer; we do
+   *  NOT re-truncate here to avoid masking writer bugs. */
+  answer_md_summary: string;
 };
 
 type SessionRecord = {

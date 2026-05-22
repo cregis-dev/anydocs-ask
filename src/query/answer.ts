@@ -44,7 +44,7 @@ import {
 import { aggregate, TOP_K_FOR_AGGREGATION, type AggregateOutcome, type SubtreeShare } from './aggregate.ts';
 import { buildPrompt, detectFormatHint } from './prompt.ts';
 import { postprocess } from './postprocess.ts';
-import type { AskRequest, AskResult, ClarifyOption } from './types.ts';
+import type { AskRequest, AskResult, AskClarify, ClarifyOption } from './types.ts';
 
 const MAX_QUESTION_CHARS = 500;
 const HARD_MAX_CHUNKS = 20;
@@ -100,6 +100,12 @@ export type AskTrace = {
    *  0 on the success path. Persisted to runs.jsonl so analyze can track
    *  flake rate over time. */
   citation_retry_count?: number;
+  /** RFC 0003 M4 — number of prior session turns the pipeline consumed for
+   *  THIS call (embedding splice + prompt). Mirrors the field surfaced on
+   *  the result body; duplicated into the trace so runs.jsonl analyses can
+   *  filter / group on multi-turn calls without re-joining on session_id.
+   *  Undefined / 0 on single-turn or `multiTurn.enabled=false` paths. */
+  history_window?: number;
 };
 
 export type AskTraceFusedChunk = {
@@ -226,10 +232,32 @@ async function askWithTraceInternal(
   //
   // `undefined` / `[]` history is the single-turn path; embedder receives
   // the raw question verbatim, byte-equivalent to 0.1.x.
+  //
+  // M2 (RFC §4.1) consumes the same `history` array in buildPrompt below.
+  // Both paths must see the same turns or the embedding region and the
+  // prompt's pronoun-resolution scope would drift.
   const history = req.context?.history ?? [];
-  const embeddingInput =
-    history.length > 0 ? `${history.join('\n')}\n${question}` : question;
-  const queryVector = (await deps.embedder.embed([embeddingInput]))[0]!.vector;
+  const historyWindow = history.length;
+  // Two distinct vectors when multi-turn is active:
+  //   - `queryVector` (raw current question) is what we return and what γ
+  //     uses for cross-turn similarity comparison. γ asks "did the user
+  //     re-ask the same question?" — that signal must compare current_q to
+  //     prior current_q. If γ saw the history-augmented vector, identical
+  //     questions across turns would never reach the 0.85 threshold because
+  //     the history prefix grows monotonically.
+  //   - `retrieveVector` (history-augmented) is what feeds the vector
+  //     retrieve path. RFC §4.2 — the splice anchors retrieval in the
+  //     dialogue's prior region.
+  // Batched into one embed() call so multi-turn asks pay one round-trip
+  // instead of two (Embedder contract takes a `string[]` for exactly this
+  // reason). Single-turn calls submit one input and keep the alpha.0 cost.
+  const embedInputs =
+    historyWindow > 0
+      ? [question, `${history.map((h) => h.question).join('\n')}\n${question}`]
+      : [question];
+  const embedded = await deps.embedder.embed(embedInputs);
+  const queryVector = embedded[0]!.vector;
+  const retrieveVector = embedded[1]?.vector ?? queryVector;
   throwIfAborted(hooks.signal);
   const ftsQuery = sanitizeFtsQuery(question);
   const entityTerms = extractEntityTerms(question);
@@ -244,7 +272,7 @@ async function askWithTraceInternal(
     .filter((hint): hint is string => !!hint);
   const apiReferencePagePrefix = apiReferencePagePrefixFor(currentSubtreeRoot);
   const { chunks: retrieved, trace: retrievalTrace } = retrieveWithTrace(deps.db, {
-    queryVector,
+    queryVector: retrieveVector,
     ftsQuery,
     scopeId,
     entityTerms,
@@ -289,8 +317,10 @@ async function askWithTraceInternal(
   const outcome = aggregate(aggregationCandidates, { queryLang, currentSubtreeRoot, titleMatchedSubtrees });
 
   if (outcome.kind === 'clarify') {
+    const clarify = buildClarifyResult({ answerLang: queryLang, shares: outcome.topSubtrees });
+    if (historyWindow > 0) clarify.history_window = historyWindow;
     return {
-      result: buildClarifyResult({ answerLang: queryLang, shares: outcome.topSubtrees }),
+      result: clarify,
       trace: {
         fused: fusedTrace,
         subtree_ask_triggered: true,
@@ -298,6 +328,7 @@ async function askWithTraceInternal(
         confidence,
         tokens_in: null,
         tokens_out: null,
+        ...(historyWindow > 0 ? { history_window: historyWindow } : {}),
       },
       queryVector,
     };
@@ -324,6 +355,7 @@ async function askWithTraceInternal(
     formatHint,
     ...(deps.promptConfig ? { promptConfig: deps.promptConfig } : {}),
     ...(entityTerms ? { entityTerms } : {}),
+    ...(historyWindow > 0 ? { history } : {}),
   });
 
   let llmOutput;
@@ -471,6 +503,7 @@ async function askWithTraceInternal(
       used_chunks: post.used_chunks,
       model: llmOutput.modelUsed,
       latency_ms: Math.round(performance.now() - t0),
+      ...(historyWindow > 0 ? { history_window: historyWindow } : {}),
     },
     trace: {
       fused: fusedTrace,
@@ -480,6 +513,7 @@ async function askWithTraceInternal(
       tokens_in: null,
       tokens_out: null,
       citation_retry_count: citationRetryCount,
+      ...(historyWindow > 0 ? { history_window: historyWindow } : {}),
     },
     queryVector,
   };
@@ -902,7 +936,7 @@ function translationNoticeFor(lang: DocsLang): string {
 function buildClarifyResult(args: {
   answerLang: DocsLang;
   shares: SubtreeShare[];
-}): AskResult {
+}): AskClarify {
   const options: ClarifyOption[] = args.shares.slice(0, 4).map((share) => {
     const firstChunk = share.chunks[0]!;
     const subtreeBreadcrumb = breadcrumbToSubtree(firstChunk.breadcrumb, share.subtree_root);

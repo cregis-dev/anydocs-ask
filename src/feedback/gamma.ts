@@ -165,6 +165,7 @@ function recordCurrentAsk(args: {
     answer_id: extractAnswerId(args.result),
     used_chunk_ids: extractUsedChunkIds(args.result),
     asked_at: args.now,
+    answer_md_summary: extractAnswerMdSummary(args.result),
   };
   args.sessionTable.record({ session_id: args.session_id, entry });
 }
@@ -177,4 +178,16 @@ function extractAnswerId(result: AskResult): string | null {
 function extractUsedChunkIds(result: AskResult): number[] {
   if (result.type !== 'answer') return [];
   return result.citations.map((c) => c.chunk_id);
+}
+
+/** Per RFC 0003 §4.3 hard cap. Higher and prompt input tokens balloon; lower
+ *  and pronoun anchors get truncated mid-entity. Not config-exposed. Exported
+ *  so the prompt builder can reference the same number when describing the
+ *  truncation rule to the LLM (single source of truth). */
+export const ANSWER_SUMMARY_MAX_CHARS = 200;
+
+function extractAnswerMdSummary(result: AskResult): string {
+  if (result.type === 'answer') return result.answer_md.slice(0, ANSWER_SUMMARY_MAX_CHARS);
+  if (result.type === 'clarify') return result.message.slice(0, ANSWER_SUMMARY_MAX_CHARS);
+  return '';
 }
