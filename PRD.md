@@ -400,7 +400,7 @@ v1 立项时的叙事是"读懂目录结构的文档问答服务"。0.1.0 上线
 - **Reranker 凭直觉添加** ❌（必须满足 §10.5 三档前置）
 - **多轮对话以"Reader 多轮 UI"为优先支撑场景** ❌（Reader 多轮在 anydocs 主仓评估；ask 工程的 multi-turn 设计**优先服务于嵌入式产品 UI**，避免被 Reader UI 排期拖累，详见 RFC 0003）
 - **嵌入式 Widget 自动抓取宿主 DOM 数据** ❌（数据上下文必须由宿主显式 `setContext()` 注入，避免隐私边界争议，详见 RFC 0004）
-- **用小模型替代大 LLM 生成最终答案** ❌（grounding 保真度风险；小模型只承担 query 重写 / citation 校验 / 可答性判断等辅助角色，详见 RFC 0003 / 0005）
+- **用小模型替代大 LLM 生成最终答案** ❌（grounding 保真度风险）。**历史注**：RFC 0003 / 0005 起草版本曾把小模型保留为辅助角色（query 重写 / citation 校验 / 可答性判断）；两者落地阶段（2026-05 B.2 转向）均改为**复用现有主 LLM 通道**，anydocs-ask 不再引入任何小模型基础设施。本红线现在等价于"辅助角色由主 LLM 异步承担"。
 
 ### 10.8 RFC 索引
 
@@ -410,7 +410,7 @@ v1 立项时的叙事是"读懂目录结构的文档问答服务"。0.1.0 上线
 | [0002](./docs/rfcs/0002-console-studio-feedback-loop.md) | Console → Studio：反馈闭环主线 | Draft 起草中 | 0.2 |
 | [0003](./docs/rfcs/0003-multi-turn-session-rewrite.md) | 多轮对话 + Session 重写 | Draft 起草中 | 0.4 |
 | [0004](./docs/rfcs/0004-embedded-ask-widget.md) | 嵌入式 Ask Widget | Draft 起草中 | 0.4 设计 / 0.5+ 落地 |
-| [0005](./docs/rfcs/0005-citation-semantic-validation.md) | Citation 语义校验（小模型层） | Draft 起草中 | 0.3 |
+| [0005](./docs/rfcs/0005-citation-semantic-validation.md) | Citation 语义校验（B.2 复用主 LLM） | Accepted | 0.3 |
 
 ---
 

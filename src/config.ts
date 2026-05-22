@@ -132,6 +132,24 @@ export type MultiTurnConfig = {
   historyTurns: number;
 };
 
+/**
+ * RFC 0005 — citation 语义校验（B.2 复用主 LLM 路径）。0.3 起 shadow 模式
+ * 上线，事后异步校验每条 citation 的 claim_sentence ↔ chunk_text 是否语义
+ * 一致。
+ *
+ * 0.3 in-scope schema 仅暴露两个字段：`enabled` 控制整段功能，`mode` 留位
+ * 未来 0.4 H4（enforce 模式 — 校验失败立即重试）。0.3 alpha 阶段只实现
+ * `shadow`；`enforce` 在 schema 留位但运行时拒绝（warn + fallback shadow）
+ * 直到 0.4 真正接通。
+ *
+ * 与 RFC 0003 一致地走 B.2 路径 — 复用现有 Anthropic LLM 通道，不引入小
+ * 模型 / 本地推理服务 / 外部 SaaS 校验依赖。
+ */
+export type CitationSemanticCheckConfig = {
+  enabled: boolean;
+  mode: 'shadow' | 'enforce';
+};
+
 export type PromptConfig = {
   /**
    * Optional project-specific assistant identity. This replaces only the
@@ -159,6 +177,7 @@ export type ResolvedConfig = {
   analyze: AnalyzeConfig;
   feedback: FeedbackConfig;
   multiTurn: MultiTurnConfig;
+  citationSemanticCheck: CitationSemanticCheckConfig;
   prompt: PromptConfig;
 };
 
@@ -226,6 +245,12 @@ const DEFAULTS: ResolvedConfig = {
     // single-turn behaviour.
     enabled: true,
     historyTurns: 3,
+  },
+  citationSemanticCheck: {
+    // RFC 0005 alpha.0: schema 留位，整段默认关闭。0.3 alpha.1+ 才接通实际
+    // 校验逻辑；当前 flip 到 true 也不产生效果（pipeline 还没读这两个字段）。
+    enabled: false,
+    mode: 'shadow',
   },
   prompt: {
     assistantName: null,
@@ -340,6 +365,11 @@ function mergeWithDefaults(
   applyAnalyze(user.analyze, out.analyze, warnings);
   applyFeedback(user.feedback, out.feedback, warnings);
   applyMultiTurn(user.multiTurn, out.multiTurn, warnings);
+  applyCitationSemanticCheck(
+    user.citationSemanticCheck,
+    out.citationSemanticCheck,
+    warnings,
+  );
   applyPrompt(user.prompt, out.prompt, warnings);
   return out;
 }
@@ -484,6 +514,37 @@ function applyMultiTurn(value: unknown, target: MultiTurnConfig, warnings: strin
       target.historyTurns = v;
     } else {
       warnings.push(`anydocs.ask.json: multiTurn.historyTurns must be an integer in [1, 20]; using default`);
+    }
+  }
+}
+
+function applyCitationSemanticCheck(
+  value: unknown,
+  target: CitationSemanticCheckConfig,
+  warnings: string[],
+): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'citationSemanticCheck' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.enabled !== undefined) {
+    if (typeof obj.enabled === 'boolean') {
+      target.enabled = obj.enabled;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: citationSemanticCheck.enabled must be a boolean; using default`,
+      );
+    }
+  }
+  if (obj.mode !== undefined) {
+    if (obj.mode === 'shadow' || obj.mode === 'enforce') {
+      target.mode = obj.mode;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: citationSemanticCheck.mode must be 'shadow' or 'enforce'; using default`,
+      );
     }
   }
 }
