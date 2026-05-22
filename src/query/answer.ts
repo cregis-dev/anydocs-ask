@@ -23,7 +23,8 @@ import { randomBytes } from 'node:crypto';
 import type { DbHandle } from '../db/index.ts';
 import type { Embedder } from '../embedding/types.ts';
 import type { LLM } from '../llm/types.ts';
-import type { PromptConfig } from '../config.ts';
+import type { Reranker } from '../reranker/types.ts';
+import type { PromptConfig, RerankerConfig } from '../config.ts';
 import type { DocsLang } from '../anydocs/types.ts';
 import type { BreadcrumbNode } from '../db/schema.ts';
 import { detectLangFromText, langFromScopeId } from './lang.ts';
@@ -62,6 +63,16 @@ export type AskDeps = {
   db: DbHandle;
   embedder: Embedder;
   llm: LLM;
+  /**
+   * Cross-encoder reranker. Optional — when null/omitted the cross-encoder
+   * rerank stage is skipped and the rule rerank is the only ranking
+   * authority. answer.ts gates the entire stage on this being non-null so
+   * v1 callers stay byte-equivalent.
+   */
+  reranker?: Reranker | null;
+  /** Cross-encoder rerank config (window size etc). Optional; defaults
+   *  applied inline so test deps don't need to construct one. */
+  rerankerConfig?: RerankerConfig;
   promptConfig?: PromptConfig;
 };
 
@@ -237,8 +248,12 @@ async function askWithTraceInternal(
     apiReferencePagePrefix,
   });
 
-  // 4. Rerank.
-  const reranked = rerank(retrieved, {
+  // 4. Rerank — rule rerank first (cheap, applies structural biases), then
+  // optionally a cross-encoder pass on the top window. The cross-encoder
+  // recovers semantic relevance signals the rules can't express (e.g. that a
+  // chunk literally contains the field definition the user asked about); the
+  // rules still do the cheap structural work (same-subtree, nav order).
+  const ruleReranked = rerank(retrieved, {
     queryLang,
     currentSubtreeRoot,
     currentPageId: req.context?.current_page_id ?? null,
@@ -249,6 +264,10 @@ async function askWithTraceInternal(
     apiReferenceVersionPrefs,
     apiReferencePagePrefix,
   });
+
+  const reranked = deps.reranker
+    ? await applyCrossEncoderRerank(deps.reranker, question, ruleReranked, deps.rerankerConfig)
+    : ruleReranked;
 
   const fusedTrace = buildFusedTrace(reranked, retrievalTrace);
   const top_final_score = reranked[0]?.final_score ?? 0;
@@ -525,6 +544,50 @@ function navIndexBoostForTrace(navIndex: number | null): number {
   // the internal helper through rerank.ts's public surface).
   if (navIndex === null) return 0;
   return 0.1 * (1 / Math.log(navIndex + 2));
+}
+
+const DEFAULT_RERANK_TOP_K = 20;
+
+/**
+ * Cross-encoder rerank — feeds the top-N rule-reranked candidates to a
+ * Reranker as (query, chunk_text) pairs and reorders by relevance score.
+ *
+ * The chunk text already carries its heading_path prefix (set in
+ * extractMarkdownSections) so the reranker sees enough context to score
+ * field-table chunks against natural-language questions without us having
+ * to re-stitch the breadcrumb here.
+ *
+ * Score normalization: bge-reranker-v2-m3 emits raw logits in roughly
+ * [-10, +10]. We sigmoid them into (0, 1) and overwrite `final_score` for
+ * the reranked window so downstream code (computeConfidence, aggregate) sees
+ * a coherent scale within the top-N. Chunks beyond rerankTopK keep their
+ * rule-rerank final_score; this is rare in practice because the retrieval
+ * top-K and rerankTopK both default to 20.
+ *
+ * Returns a NEW array — input is not mutated.
+ */
+async function applyCrossEncoderRerank(
+  reranker: Reranker,
+  query: string,
+  ruleReranked: RerankedChunk[],
+  config: RerankerConfig | undefined,
+): Promise<RerankedChunk[]> {
+  const topK = config?.rerankTopK ?? DEFAULT_RERANK_TOP_K;
+  if (ruleReranked.length === 0) return ruleReranked;
+  const window = ruleReranked.slice(0, topK);
+  const tail = ruleReranked.slice(topK);
+  const docs = window.map((c) => ({ chunk_id: c.chunk_id, text: c.text }));
+  const scores = await reranker.rerank(query, docs);
+  const scoreByChunk = new Map<number | bigint, number>();
+  for (const s of scores) scoreByChunk.set(s.chunk_id, sigmoid(s.score));
+  const rescored = window
+    .map((c) => ({ ...c, final_score: scoreByChunk.get(c.chunk_id) ?? 0 }))
+    .sort((a, b) => b.final_score - a.final_score);
+  return [...rescored, ...tail];
+}
+
+function sigmoid(x: number): number {
+  return 1 / (1 + Math.exp(-x));
 }
 
 function preferNonApiContext(chunks: RerankedChunk[]): RerankedChunk[] {

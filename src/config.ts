@@ -49,6 +49,29 @@ export type RetrievalConfig = {
   maxChunksHardCap: number;
 };
 
+/**
+ * Cross-encoder reranker — runs after the rule-based rerank to re-score top-K
+ * candidates as (query, doc) pairs. Disabled by default so v1 pipeline stays
+ * byte-equivalent unless explicitly enabled.
+ *
+ * When enabled, the reranker re-sorts the top {@link rerankTopK} candidates
+ * from rule rerank before aggregation. The size matters: too small and a
+ * bug-pushed-down chunk (e.g. an API page demoted by same-page boost) never
+ * reaches the cross-encoder; too large and inference latency grows linearly.
+ */
+export type RerankerConfig = {
+  enabled: boolean;
+  provider: 'bge-cross-encoder' | 'mock';
+  model: string;
+  preferQuantized: boolean;
+  /** Tokens per (query, doc) pair fed into the cross-encoder. 512 = model native. */
+  maxLength: number;
+  /** Size of the candidate window pulled from rule rerank for cross-encoder
+   *  re-scoring. 20 catches typical retrieval losses where the right chunk
+   *  ranks 10-15 after rule rerank. Inference is O(N) in this number. */
+  rerankTopK: number;
+};
+
 export type ServerConfig = {
   host: string;
   port: number;
@@ -125,6 +148,7 @@ export type ResolvedConfig = {
   embedding: EmbeddingConfig;
   llm: LLMConfig;
   retrieval: RetrievalConfig;
+  reranker: RerankerConfig;
   server: ServerConfig;
   indexing: IndexingConfig;
   runs: RunsConfig;
@@ -160,6 +184,14 @@ const DEFAULTS: ResolvedConfig = {
     rerankSameSubtreeBoost: 0.2,
     navOrderBoost: 0.1,
     maxChunksHardCap: 20,
+  },
+  reranker: {
+    enabled: false,
+    provider: 'bge-cross-encoder',
+    model: 'Xenova/bge-reranker-large',
+    preferQuantized: true,
+    maxLength: 512,
+    rerankTopK: 20,
   },
   server: {
     host: '127.0.0.1',
@@ -293,6 +325,7 @@ function mergeWithDefaults(
   applySection(user.embedding, out.embedding, 'embedding', warnings);
   applySection(user.llm, out.llm, 'llm', warnings);
   applySection(user.retrieval, out.retrieval, 'retrieval', warnings);
+  applySection(user.reranker, out.reranker, 'reranker', warnings);
   applyServer(user.server, out.server, warnings);
   applySection(user.indexing, out.indexing, 'indexing', warnings);
   applyRuns(user.runs, out.runs, warnings);

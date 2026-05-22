@@ -210,12 +210,14 @@ function delay(ms: number): Promise<void> {
 }
 
 export function askDepsForEval(
-  runtime: Pick<Runtime, 'db' | 'embedder' | 'llm' | 'config'>,
+  runtime: Pick<Runtime, 'db' | 'embedder' | 'llm' | 'config'> & { reranker?: Runtime['reranker'] },
 ): AskDeps {
   return {
     db: runtime.db,
     embedder: runtime.embedder,
     llm: runtime.llm,
+    reranker: runtime.reranker ?? null,
+    rerankerConfig: runtime.config.reranker,
     promptConfig: runtime.config.prompt,
   };
 }
