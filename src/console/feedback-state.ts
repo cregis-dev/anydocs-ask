@@ -23,7 +23,12 @@ import { join } from 'node:path';
 import { openDatabase } from '../db/index.ts';
 import type { BreadcrumbNode, FeedbackRow } from '../db/schema.ts';
 import { iterateRunsSince } from '../runs/writer.ts';
-import { isRunRecord, type RunRecord, type RunsLine } from '../runs/types.ts';
+import {
+  isRunRecord,
+  type RunCitationSemanticCheck,
+  type RunRecord,
+  type RunsLine,
+} from '../runs/types.ts';
 
 const DAY_MS = 86_400_000;
 const DEFAULT_DAYS = 7;
@@ -35,21 +40,25 @@ const MAX_LIMIT = 200;
  *  list doesn't look broken until that fix lands. */
 const QUESTION_FALLBACK = '(question unavailable — pre-0.2.0-alpha.2 row)';
 
-/** UI filter chips — §7.5.1 list. `semantic_check_failed` still defers
- *  to RFC 0005 (0.3+). `no_citations` is data-driven from the runs.jsonl
- *  JOIN (no schema change). */
+/** UI filter chips — §7.5.1 list. `semantic_check_failed` is RFC 0005 V5
+ *  (alpha.2 read-side): rows whose linked run has ≥1 citation with verdict
+ *  !== 'supports' (i.e. 'partially' or 'not_supports'). `no_citations` is
+ *  data-driven from the runs.jsonl JOIN; both filters are cross-cutting
+ *  (work on top of the explicit/implicit split, not in place of it). */
 export type FeedbackFilter =
   | 'all'
   | 'thumbs_up'
   | 'thumbs_down'
   | 'implicit'
-  | 'no_citations';
+  | 'no_citations'
+  | 'semantic_check_failed';
 export const FEEDBACK_FILTERS: readonly FeedbackFilter[] = [
   'all',
   'thumbs_up',
   'thumbs_down',
   'implicit',
   'no_citations',
+  'semantic_check_failed',
 ] as const;
 
 export type FeedbackKpi = {
@@ -65,6 +74,11 @@ export type FeedbackKpi = {
   nonAnswerRate: number;
   /** Reserved for 0.3 A+ clustering (PRD §10.3, ≥50 threshold). */
   aplusCandidates: null;
+  /** RFC 0005 V5 — runs in window with ≥1 citation verdict !== 'supports'.
+   *  Same denominator as the semantic_check_failed chip badge. null when
+   *  no tail in the window had any verdict (feature off, or zero shadow
+   *  data yet). */
+  semanticCheckFailed: number | null;
 };
 
 export type FeedbackRowVM = {
@@ -107,6 +121,12 @@ export type FeedbackRowVM = {
   /** RFC 0003 M6 — total feedback rows observed for the same `sessionId`
    *  inside the same window. 1 when `sessionId` is null. */
   sessionTurnCount: number;
+  /** RFC 0005 V5 — true when the linked run had ≥1 citation with verdict
+   *  !== 'supports' (i.e. 'partially' or 'not_supports'). null when no
+   *  citation-check-update tail joined to the row (feature disabled,
+   *  validator failed silently, or pre-alpha.2 row). Drives the
+   *  semantic_check_failed chip badge + per-row affordance. */
+  semanticCheckFailed: boolean | null;
 };
 
 export type FilterCounts = Record<FeedbackFilter, number>;
@@ -235,9 +255,15 @@ function computeSnapshot(
     thumbs_down: 0,
     implicit: 0,
     no_citations: 0,
+    semantic_check_failed: 0,
   };
   let explicitCount = 0;
   let implicitCount = 0;
+  // RFC 0005 V5 — track total verdict observations + failures separately
+  // from filterCounts.semantic_check_failed (which is row-keyed). When zero
+  // tails landed in the window the KPI tile renders "—" instead of "0",
+  // distinguishing "feature off" from "feature on, no failures".
+  let semanticCheckSeen = 0;
   // `no_citations` is cross-cutting: it counts the rows in `all` whose
   // linked run had zero citations (or kind='error'). Tracked alongside
   // the other buckets so chip badges + list contents agree.
@@ -253,15 +279,22 @@ function computeSnapshot(
       filterCounts.all++;
       filterCounts.implicit++;
     }
-    if (runIndex.get(r.answer_id)?.citationsEmpty === true) {
+    const meta = runIndex.get(r.answer_id);
+    if (meta?.citationsEmpty === true) {
       filterCounts.no_citations++;
+    }
+    if (meta?.semanticChecks !== undefined && meta?.semanticChecks !== null) {
+      semanticCheckSeen++;
+      if (hasFailedVerdict(meta.semanticChecks)) {
+        filterCounts.semantic_check_failed++;
+      }
     }
     // 'curated' rows skip every counter; see chip-taxonomy comment above.
   }
 
-  // For the `no_citations` filter, narrow the SQL selection to answer_ids
-  // we already know match. Other filters use the same SQL predicates as
-  // T1-b.
+  // For the `no_citations` / `semantic_check_failed` filters, narrow the
+  // SQL selection to answer_ids we already know match. Other filters use
+  // the same SQL predicates as T1-b.
   const noCitationAnswerIds =
     filter === 'no_citations'
       ? new Set<string>(
@@ -270,7 +303,23 @@ function computeSnapshot(
           ),
         )
       : null;
-  const rowsRaw = selectRows(db, sinceMs, filter, limit, noCitationAnswerIds);
+  const semanticFailedAnswerIds =
+    filter === 'semantic_check_failed'
+      ? new Set<string>(
+          [...inWindowFeedbackIds].filter((aid) => {
+            const checks = runIndex.get(aid)?.semanticChecks;
+            return checks !== null && checks !== undefined && hasFailedVerdict(checks);
+          }),
+        )
+      : null;
+  const rowsRaw = selectRows(
+    db,
+    sinceMs,
+    filter,
+    limit,
+    noCitationAnswerIds,
+    semanticFailedAnswerIds,
+  );
 
   // Breadcrumb JOIN: pages.breadcrumb is JSON-encoded and already lives in
   // the same DB, so a single `WHERE page_id IN (...)` keeps the lookup
@@ -298,6 +347,7 @@ function computeSnapshot(
     const sessionId = runMeta?.sessionId ?? r.session_id ?? null;
     const meta = sessionId ? sessionTurnIndex.get(sessionId) : undefined;
     const turnIndex = meta ? meta.orderedIds.indexOf(r.feedback_id) + 1 : 1;
+    const semanticChecks = runMeta?.semanticChecks ?? null;
     return {
       feedback_id: r.feedback_id,
       ts: new Date(r.created_at).toISOString(),
@@ -313,6 +363,7 @@ function computeSnapshot(
       historyWindow: runMeta?.historyWindow ?? null,
       turnIndex: turnIndex > 0 ? turnIndex : 1,
       sessionTurnCount: meta ? meta.orderedIds.length : 1,
+      semanticCheckFailed: semanticChecks === null ? null : hasFailedVerdict(semanticChecks),
     };
   });
 
@@ -368,6 +419,8 @@ function computeSnapshot(
       meanConfidence: confN > 0 ? confSum / confN : null,
       nonAnswerRate: ratedN > 0 ? nonAnswer / ratedN : 0,
       aplusCandidates: null,
+      semanticCheckFailed:
+        semanticCheckSeen > 0 ? filterCounts.semantic_check_failed : null,
     },
     filterCounts,
     filter,
@@ -385,9 +438,15 @@ function selectRows(
    *  answer_ids known to have zero citations in their linked run. Empty
    *  set short-circuits to an empty result. */
   noCitationAnswerIds: Set<string> | null,
+  /** Required when filter='semantic_check_failed' — precomputed set of
+   *  answer_ids whose linked run has ≥1 verdict !== 'supports'. Empty set
+   *  short-circuits, same pattern as `no_citations`. */
+  semanticFailedAnswerIds: Set<string> | null,
 ): FeedbackRow[] {
-  if (filter === 'no_citations') {
-    const ids = noCitationAnswerIds ?? new Set<string>();
+  if (filter === 'no_citations' || filter === 'semantic_check_failed') {
+    const ids =
+      (filter === 'no_citations' ? noCitationAnswerIds : semanticFailedAnswerIds) ??
+      new Set<string>();
     if (ids.size === 0) return [];
     const placeholders = Array(ids.size).fill('?').join(',');
     return db
@@ -424,10 +483,22 @@ function filterToWhere(filter: FeedbackFilter): string {
     case 'implicit':
       return `signal_source = 'implicit'`;
     case 'no_citations':
+    case 'semantic_check_failed':
       // Handled out-of-line by selectRows (needs runIndex JOIN); this
       // branch keeps the switch exhaustive for TypeScript.
       return `signal_source IN ('explicit', 'implicit')`;
   }
+}
+
+/** RFC 0005 V5 — a semantic check is "failed" when any cit's verdict is
+ *  not `supports` (i.e. `partially` OR `not_supports`). `partially` counts
+ *  because the chip's purpose is "show me answers the LLM rated less than
+ *  fully supported"; the drawer breaks down which level for each cit. */
+function hasFailedVerdict(checks: Map<string, RunCitationSemanticCheck>): boolean {
+  for (const c of checks.values()) {
+    if (c.verdict !== 'supports') return true;
+  }
+  return false;
 }
 
 /**
@@ -490,12 +561,28 @@ type RunIndexEntry = {
   /** RFC 0003 M6 — `RunAnswer.history_window`. null on single-turn / legacy
    *  rows / multiTurn.enabled=false. */
   historyWindow: number | null;
+  /** RFC 0005 V5 — `RunRecord.request_id` used to join citation-check-update
+   *  tails. Not surfaced to UI directly; the join itself produces
+   *  `semanticChecks` below. */
+  requestId: string;
+  /** RFC 0005 V5 — verdicts keyed by `citation_id` ("cit_1" etc.). null
+   *  when no tail joined (alpha.2 default off, validator silent failure,
+   *  or legacy row). */
+  semanticChecks: Map<string, RunCitationSemanticCheck> | null;
 };
 
 /**
  * Walk runs.jsonl in [sinceMs, now) and bucket each answer_id → meta.
  * When `restrictTo` is non-empty we early-skip non-matching rows to keep
  * the scan cheap on busy projects.
+ *
+ * RFC 0005 V5: also merge `citation-check-update` tails onto the matching
+ * RunRecord (by `request_id`). The single-pass design avoids re-walking
+ * the file; we keep a `requestId → answer_id` side table that's populated
+ * as RunRecords land, and attach a tail's verdicts the moment we see it.
+ * Tails that arrive BEFORE their RunRecord (impossible in production —
+ * appendUpdate runs after append — but defensive) are buffered and
+ * applied at the end.
  */
 function buildRunIndex(
   stateRoot: string,
@@ -504,25 +591,72 @@ function buildRunIndex(
 ): Map<string, RunIndexEntry> {
   const out: Map<string, RunIndexEntry> = new Map();
   if (restrictTo.size === 0) return out;
+  const requestToAnswer: Map<string, string> = new Map();
+  type DeferredTail = {
+    requestId: string;
+    citations: Array<{ citation_id: string; semantic_check: RunCitationSemanticCheck }>;
+  };
+  const deferredTails: DeferredTail[] = [];
   for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
-    if (!isRunRecord(line)) continue;
-    const rec = line;
-    const aid = rec.answer.answer_id;
-    if (aid === null) continue;
-    if (!restrictTo.has(aid)) continue;
-    // Last-write-wins (a re-asked answer_id is rare; the latest line is
-    // usually the relevant one).
-    const citations = rec.answer.citations ?? [];
-    out.set(aid, {
-      confidence: rec.answer.confidence ?? null,
-      kind: rec.answer.kind,
-      citationsEmpty: citations.length === 0,
-      sessionId: rec.session_id ?? null,
-      historyWindow:
-        typeof rec.answer.history_window === 'number' ? rec.answer.history_window : null,
-    });
+    if (isRunRecord(line)) {
+      const rec = line;
+      const aid = rec.answer.answer_id;
+      if (aid === null) continue;
+      if (!restrictTo.has(aid)) continue;
+      // Last-write-wins (a re-asked answer_id is rare; the latest line is
+      // usually the relevant one). When this answer_id had a previous
+      // entry, its semanticChecks belong to a different request_id; we
+      // start fresh and rely on a later tail to repopulate them.
+      const citations = rec.answer.citations ?? [];
+      out.set(aid, {
+        confidence: rec.answer.confidence ?? null,
+        kind: rec.answer.kind,
+        citationsEmpty: citations.length === 0,
+        sessionId: rec.session_id ?? null,
+        historyWindow:
+          typeof rec.answer.history_window === 'number' ? rec.answer.history_window : null,
+        requestId: rec.request_id,
+        semanticChecks: null,
+      });
+      requestToAnswer.set(rec.request_id, aid);
+      continue;
+    }
+    if (line.type === 'citation-check-update') {
+      const aid = requestToAnswer.get(line.request_id);
+      if (aid === undefined) {
+        // Tail before record — defensive only; buffer and apply at end.
+        deferredTails.push({ requestId: line.request_id, citations: line.citations });
+        continue;
+      }
+      applyTail(out, aid, line.request_id, line.citations);
+    }
+  }
+  for (const t of deferredTails) {
+    const aid = requestToAnswer.get(t.requestId);
+    if (aid === undefined) continue; // truly orphaned — record never landed
+    applyTail(out, aid, t.requestId, t.citations);
   }
   return out;
+}
+
+/** Stitch a citation-check-update tail onto its RunIndexEntry. Skipped
+ *  silently when the entry has rotated to a newer request_id (re-ask
+ *  with the same answer_id) — the verdict is stale. */
+function applyTail(
+  out: Map<string, RunIndexEntry>,
+  answerId: string,
+  requestId: string,
+  citations: ReadonlyArray<{ citation_id: string; semantic_check: RunCitationSemanticCheck }>,
+): void {
+  const entry = out.get(answerId);
+  if (!entry) return;
+  if (entry.requestId !== requestId) return; // stale tail
+  const checks: Map<string, RunCitationSemanticCheck> = entry.semanticChecks ?? new Map();
+  for (const c of citations) {
+    if (typeof c.citation_id !== 'string') continue;
+    checks.set(c.citation_id, c.semantic_check);
+  }
+  entry.semanticChecks = checks.size > 0 ? checks : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -601,8 +735,16 @@ function emptySnapshot(
       meanConfidence: null,
       nonAnswerRate: 0,
       aplusCandidates: null,
+      semanticCheckFailed: null,
     },
-    filterCounts: { all: 0, thumbs_up: 0, thumbs_down: 0, implicit: 0, no_citations: 0 },
+    filterCounts: {
+      all: 0,
+      thumbs_up: 0,
+      thumbs_down: 0,
+      implicit: 0,
+      no_citations: 0,
+      semantic_check_failed: 0,
+    },
     filter,
     rows: [],
     hasMore: false,
@@ -621,6 +763,15 @@ export type FeedbackRunCitationVM = {
   page: string;
   quote: string;
   chunkId: number | null;
+  /** RFC 0005 V4/V5 — "cit_N" marker as emitted in answer.md. Absent on
+   *  pre-alpha.2 rows. The drawer uses it to join semantic-check verdicts
+   *  onto the right citation. */
+  citationId: string | null;
+  /** RFC 0005 V5 — `supports` / `partially` / `not_supports` verdict for
+   *  this citation, with the LLM's short reason. null when no
+   *  citation-check-update tail joined (feature off, validator silent
+   *  failure, citation lacked citation_id, etc.). */
+  semanticCheck: { verdict: RunCitationSemanticCheck['verdict']; reason: string } | null;
 };
 
 export type FeedbackFusedChunkVM = {
@@ -720,6 +871,18 @@ export function loadFeedbackRowDetail(
       : new Map<string, BreadcrumbNode[]>();
 
     const citations = parseRunCitations(row.retrieved);
+    // RFC 0005 V5 — merge semantic-check verdicts onto the drawer's citation
+    // VMs by citation_id. runMeta.semanticChecks may be null (feature off,
+    // pre-alpha.2 row, or validator silent failure) — in which case every
+    // cit keeps semanticCheck=null and the drawer renders no verdict chips.
+    if (runMeta?.semanticChecks) {
+      for (const cit of citations) {
+        if (!cit.citationId) continue;
+        const check = runMeta.semanticChecks.get(cit.citationId);
+        if (!check) continue;
+        cit.semanticCheck = { verdict: check.verdict, reason: check.reason };
+      }
+    }
 
     const sessionId = runMeta?.sessionId ?? row.session_id ?? null;
     const { turnIndex, sessionTurnCount, sessionTurns } = sessionId
@@ -952,6 +1115,10 @@ function parseRunCitations(json: string | null): FeedbackRunCitationVM[] {
         page,
         quote,
         chunkId: typeof o.chunk_id === 'number' ? o.chunk_id : null,
+        // RFC 0005 V4 — citation_id was added in alpha.2; absent on legacy
+        // β rows. The drawer's verdict join silently no-ops when null.
+        citationId: typeof o.citation_id === 'string' ? o.citation_id : null,
+        semanticCheck: null,
       });
     }
     return out;
