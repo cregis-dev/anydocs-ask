@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+### 新增
+
+- **RFC 0005 alpha.2 — citation 语义校验 pipeline 接通（V3 + V4 + V6）** —— `finalizeAskCall` 在主响应返回后异步、批量、fire-and-forget 触发 [src/query/citation-validator.ts](src/query/citation-validator.ts)；校验结果以 `citation-check-update` tail 行追加进 runs.jsonl，按 `request_id` + `citations[].citation_id` 与原 RunRecord join。`anydocs.ask.json` 的 `citationSemanticCheck.enabled` 现在真接通——`false`（默认）整段不触发任何 LLM 调用；`true` 时每个 answer 多 1 次 Claude 调用，shadow 模式不阻塞主答案延迟。dry_run / 无 citations / 校验抛错均自然降级（无 tail 写入，主响应 200 不受影响）。配套：`RunCitation` schema 加 optional `citation_id` + `semantic_check`；新增 `RunCitationCheckUpdate` tail record 类型 + `isRunRecord(line)` 守卫；所有 runs.jsonl 读端（analyze / golden / runs export / Console feedback-state / index-state / traffic-state）切到守卫，未来 tail 类型扩展不需要点 N 处。
+
 ## 0.2.0 — 2026-05-23
 
 主线：**反馈回路铺通（RFC 0001）+ Console → Studio 升级（RFC 0002）**。次主线：**Query 质量回归**（基于 hermes-docs / cregis-developer-docs / anydocs-user-manual 三轮 dogfood + eval round-1 至 round-7）。同时落地：**早期多轮对话（RFC 0003 M1-M6）默认开启** + **citation 语义校验 schema 留位（RFC 0005 alpha.0/alpha.1）**——后两条本属于 0.3 / 0.4 的预告主线，但代码已经在 main 上跑过 dogfood 真证，作为本版本"early in-scope"一并发布。

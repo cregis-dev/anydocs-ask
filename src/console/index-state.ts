@@ -15,7 +15,7 @@ import { loadProject } from '../anydocs/loader.ts';
 import type { LoadedProject } from '../anydocs/loader.ts';
 import type { DocsLang } from '../anydocs/types.ts';
 import { iterateRunsSince } from '../runs/writer.ts';
-import type { RunRecord, RunsLine } from '../runs/types.ts';
+import { isRunRecord, type RunRecord, type RunsLine } from '../runs/types.ts';
 
 export type IndexPageInfo = {
   id: string;
@@ -249,8 +249,8 @@ export function loadAskUsageStats(stateRoot: string, days: number): AskUsageStat
   const sinceMs = Date.now() - safeDays * 86_400_000;
   const acc: Map<string, { count: number; confs: number[] }> = new Map();
   for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
-    if ('type' in line && line.type === 'feedback-update') continue;
-    const rec = line as RunRecord;
+    if (!isRunRecord(line)) continue;
+    const rec = line;
     const fused = rec.retrieval?.fused;
     if (!Array.isArray(fused) || fused.length === 0) continue;
     const seenPages = new Set<string>();

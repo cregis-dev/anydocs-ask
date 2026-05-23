@@ -15,7 +15,7 @@ import {
   listRunFiles,
   tailRuns,
 } from '../src/runs/writer.ts';
-import type { RunRecord } from '../src/runs/types.ts';
+import type { RunCitationCheckUpdate, RunRecord, RunsLine } from '../src/runs/types.ts';
 
 /**
  * tmp dir doubles as the stateRoot for these tests — the writer doesn't care
@@ -236,6 +236,68 @@ test('iterateRunsSince: filters by ts across weeks', async () => {
     const out = [...iterateRunsSince({ stateRoot: root, sinceMs })] as RunRecord[];
     const ids = out.map((r) => r.request_id);
     assert.deepEqual(ids, ['mid', 'new']);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('RunsWriter.appendUpdate: writes a citation-check-update line to the same week file', async () => {
+  // RFC 0005 V3 alpha.2 — V4 schema tail. Lands next to the RunRecord with
+  // the same request_id so readers can join verdicts back on read.
+  const { root, cleanup } = await withTmpProject();
+  try {
+    const w = new RunsWriter({
+      stateRoot: root,
+      enabled: true,
+      now: () => new Date(Date.UTC(2026, 4, 8, 12, 0, 0)),
+    });
+    w.append(fakeRecord({ request_id: 'req-1' }));
+    const update: RunCitationCheckUpdate = {
+      type: 'citation-check-update',
+      ts: '2026-05-08T03:14:16.000Z',
+      request_id: 'req-1',
+      citations: [
+        {
+          citation_id: 'cit_1',
+          semantic_check: {
+            verdict: 'supports',
+            reason: 'matches the chunk',
+            model: 'mock-validator',
+            checked_at: '2026-05-08T03:14:16.000Z',
+            latency_ms: 1234,
+          },
+        },
+      ],
+    };
+    const path = w.appendUpdate(update);
+    assert.ok(path);
+    assert.equal(path, join(root, 'runs', '2026-W19.jsonl'));
+    const lines = readFileSync(path!, 'utf8').split('\n').filter((l) => l.length > 0);
+    assert.equal(lines.length, 2);
+    const parsed = JSON.parse(lines[1]!) as RunsLine;
+    assert.ok('type' in parsed && parsed.type === 'citation-check-update');
+    if ('type' in parsed && parsed.type === 'citation-check-update') {
+      assert.equal(parsed.request_id, 'req-1');
+      assert.equal(parsed.citations[0]!.citation_id, 'cit_1');
+      assert.equal(parsed.citations[0]!.semantic_check.verdict, 'supports');
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('RunsWriter.appendUpdate: enabled=false is a no-op', async () => {
+  const { root, cleanup } = await withTmpProject();
+  try {
+    const w = new RunsWriter({ stateRoot: root, enabled: false });
+    const path = w.appendUpdate({
+      type: 'citation-check-update',
+      ts: '2026-05-08T03:14:16.000Z',
+      request_id: 'req-1',
+      citations: [],
+    });
+    assert.equal(path, null);
+    assert.equal(existsSync(join(root, 'runs')), false);
   } finally {
     await cleanup();
   }

@@ -18,7 +18,7 @@ import { parseSince } from './runs.ts';
 import { loadProjectId } from '../workspace.ts';
 import { analyzeDimensions } from '../analyze/dimensions.ts';
 import { renderAnalyzeReport } from '../analyze/report.ts';
-import { runSource, type RunRecord, type RunsLine } from '../runs/types.ts';
+import { isRunRecord, runSource, type RunRecord, type RunsLine } from '../runs/types.ts';
 
 export type AnalyzeRunsOptions = {
   projectRoot: string;
@@ -49,14 +49,15 @@ export async function runAnalyzeRuns(opts: AnalyzeRunsOptions): Promise<number> 
     return 2;
   }
 
-  // Collect run records; drop feedback-update tails (v1.5 only). By default
-  // exclude console-origin runs so author dogfood doesn't pollute reader
-  // health metrics (PRD §13.6 / ARCH §17.8). --include-console reverses.
+  // Collect run records; drop all update tails (RFC 0001 feedback-update,
+  // RFC 0005 citation-check-update). By default exclude console-origin runs
+  // so author dogfood doesn't pollute reader health metrics (PRD §13.6 /
+  // ARCH §17.8). --include-console reverses.
   const records: RunRecord[] = [];
   let consoleSkipped = 0;
   for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
-    if ('type' in line && line.type === 'feedback-update') continue;
-    const r = line as RunRecord;
+    if (!isRunRecord(line)) continue;
+    const r = line;
     if (!opts.includeConsole && runSource(r) === 'console') {
       consoleSkipped++;
       continue;

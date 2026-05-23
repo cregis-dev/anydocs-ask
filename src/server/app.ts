@@ -23,9 +23,11 @@ import { askWithTrace, askWithTraceStream, type AskTrace } from '../query/answer
 import { persistAnswer } from './answer-cache.ts';
 import type { AskRequest, AskResult, Citation } from '../query/types.ts';
 import type { LLM } from '../llm/types.ts';
-import type { RunCitation, RunRecord } from '../runs/types.ts';
+import type { RunCitation, RunCitationCheckUpdate, RunRecord } from '../runs/types.ts';
 import { observeAsk } from '../feedback/gamma.ts';
 import { renderAskPage, getMarkedScript } from './web-ask.ts';
+import { extractClaimChunkPairs } from '../query/claim-extractor.ts';
+import { validateCitations } from '../query/citation-validator.ts';
 
 const SSE_HEARTBEAT_MS = 2_000;
 const SSE_INITIAL_PADDING_BYTES = 4_096;
@@ -547,8 +549,11 @@ function finalizeAskCall(args: {
 
   // Persist + log to runs.jsonl regardless of outcome — analyze needs
   // visibility into errors / clarifies / answers alike. Skipped for dry_run.
+  // requestId is minted up here (vs. inside appendRun) so the V3
+  // citation-check-update tail below can reference the SAME id — otherwise
+  // the update line couldn't be joined back to its source row.
+  const requestId = randomUUID();
   if (!options.dryRun) {
-    const requestId = randomUUID();
     const latencyMs =
       result.type === 'answer' ? result.latency_ms : Math.round(performance.now() - t0);
     appendRun(runtime, {
@@ -562,6 +567,41 @@ function finalizeAskCall(args: {
       latencyMs,
       source: options.source,
     });
+  }
+
+  // RFC 0005 V3 alpha.2 — citation semantic check (shadow mode).
+  // Fire-and-forget AFTER the RunRecord is written: the resulting tail line
+  // joins back via request_id, so we need the original row on disk first.
+  // Gating (RFC §4.6):
+  //   - citationSemanticCheck.enabled === true (config off → entire feature
+  //     never touches the LLM, zero extra calls — alpha.0 promise)
+  //   - !options.dryRun (probes shouldn't add LLM cost or pollute the audit
+  //     log; mirrors how dry_run already skips runs append + answer cache)
+  //   - result.type === 'answer' && result.citations.length > 0 (nothing to
+  //     check on clarify / error / cit-less answers)
+  //   - runtime.runs.isEnabled (no point firing if the tail can't land)
+  // Errors are fully swallowed inside validateCitations — but we wrap the
+  // whole tail in a try/catch anyway so the unawaited Promise never throws
+  // an UnhandledPromiseRejection on truly unexpected paths (e.g. claim
+  // extractor regex blowing up on adversarial markdown).
+  if (
+    !options.dryRun &&
+    result.type === 'answer' &&
+    result.citations.length > 0 &&
+    runtime.config.citationSemanticCheck.enabled &&
+    runtime.runs.isEnabled
+  ) {
+    const task = runCitationCheckTail({
+      runtime,
+      requestId,
+      answerMd: result.answer_md,
+      citations: result.citations,
+    }).catch((err: unknown) => {
+      process.stderr.write(
+        `[ask] citation-check tail crashed: ${(err as Error)?.message ?? String(err)}\n`,
+      );
+    });
+    runtime.trackBackgroundTask(task);
   }
 
   // Persist for feedback join (v1 doesn't dedupe; every call is its own row).
@@ -616,6 +656,10 @@ function citationsForRun(citations: Citation[]): RunCitation[] {
     chunk_id: c.chunk_id,
     page: c.page_id,
     quote: c.snippet,
+    // RFC 0005 V4: surface citation_id so the V3 citation-check-update tail
+    // can join verdicts back without depending on positional order. Cheap and
+    // additive; readers that don't care simply ignore the field.
+    citation_id: c.citation_id,
   }));
 }
 
@@ -700,4 +744,63 @@ function appendRun(
     feedback: { beta: null, gamma: null },
   };
   runtime.runs.append(record);
+}
+
+// ---------------------------------------------------------------------------
+// RFC 0005 V3 — citation semantic check tail
+// ---------------------------------------------------------------------------
+
+/**
+ * Build claim/chunk pairs from the just-returned answer, batch-validate via
+ * the main LLM, and append one `citation-check-update` line to runs.jsonl
+ * keyed by the original request_id.
+ *
+ * Caller already gated on enabled / dry_run / has-citations / runs-enabled
+ * (see finalizeAskCall). All errors are non-throwing here — validateCitations
+ * itself swallows LLM / parse failures (RFC §4.6), so the only way to reach
+ * the outer catch is a programmer error (e.g. snippet-less Citation shape).
+ * Even that case logs to stderr and exits cleanly.
+ *
+ * Empty verdict array → no tail written. Same shape as the
+ * `enabled=false` path so downstream readers can't tell them apart, which
+ * is the §4.6 design.
+ */
+async function runCitationCheckTail(args: {
+  runtime: Runtime;
+  requestId: string;
+  answerMd: string;
+  citations: Citation[];
+}): Promise<void> {
+  const { runtime, requestId, answerMd, citations } = args;
+  const pairs = extractClaimChunkPairs({ answerMd, citations });
+  if (pairs.length === 0) return;
+
+  let llm: LLM;
+  try {
+    llm = runtime.llm;
+  } catch {
+    // LLM provider unavailable — same swallow semantics as runtime.llm
+    // throwing from the main request path; we just skip the tail.
+    return;
+  }
+
+  const verdicts = await validateCitations({ llm, pairs });
+  if (verdicts.length === 0) return;
+
+  const update: RunCitationCheckUpdate = {
+    type: 'citation-check-update',
+    ts: new Date().toISOString(),
+    request_id: requestId,
+    citations: verdicts.map((v) => ({
+      citation_id: v.citationId,
+      semantic_check: {
+        verdict: v.verdict,
+        reason: v.reason,
+        model: v.model,
+        checked_at: v.checkedAt,
+        latency_ms: v.latencyMs,
+      },
+    })),
+  };
+  runtime.runs.appendUpdate(update);
 }

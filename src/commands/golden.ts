@@ -31,7 +31,7 @@ import {
 import { buildDefaultLLM } from '../llm/factory.ts';
 import { iterateRunsSince } from '../runs/writer.ts';
 import { parseSince } from './runs.ts';
-import { runSource, type RunRecord, type RunsLine } from '../runs/types.ts';
+import { isRunRecord, runSource, type RunRecord, type RunsLine } from '../runs/types.ts';
 import type { GoldenCase } from '../golden/types.ts';
 
 export type GoldenGenerateOptions = {
@@ -211,16 +211,16 @@ async function runFromRuns(
     return 2;
   }
 
-  // Collect run records from the window (drop feedback-update tails).
-  // Console-origin runs are excluded by default — promoting author dogfood
-  // queries into the regression set without opt-in would let test prompts
-  // leak into golden (ARCH §17.8).
+  // Collect run records from the window (drop all update tails — feedback,
+  // citation-check, future kinds). Console-origin runs are excluded by
+  // default — promoting author dogfood queries into the regression set
+  // without opt-in would let test prompts leak into golden (ARCH §17.8).
   report(`scanning runs since ${sinceArg}...\n`);
   const records: RunRecord[] = [];
   let consoleSkipped = 0;
   for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
-    if ('type' in line && line.type === 'feedback-update') continue;
-    const r = line as RunRecord;
+    if (!isRunRecord(line)) continue;
+    const r = line;
     if (!opts.includeConsole && runSource(r) === 'console') {
       consoleSkipped++;
       continue;
