@@ -23,7 +23,7 @@ import { join } from 'node:path';
 import { openDatabase } from '../db/index.ts';
 import type { BreadcrumbNode, FeedbackRow } from '../db/schema.ts';
 import { iterateRunsSince } from '../runs/writer.ts';
-import type { RunRecord, RunsLine } from '../runs/types.ts';
+import { isRunRecord, type RunRecord, type RunsLine } from '../runs/types.ts';
 
 const DAY_MS = 86_400_000;
 const DEFAULT_DAYS = 7;
@@ -505,8 +505,8 @@ function buildRunIndex(
   const out: Map<string, RunIndexEntry> = new Map();
   if (restrictTo.size === 0) return out;
   for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
-    if ('type' in line && line.type === 'feedback-update') continue;
-    const rec = line as RunRecord;
+    if (!isRunRecord(line)) continue;
+    const rec = line;
     const aid = rec.answer.answer_id;
     if (aid === null) continue;
     if (!restrictTo.has(aid)) continue;
@@ -821,8 +821,8 @@ function loadSessionTurns(
   // their feedback rows by answer_id.
   const sessionAnswerIds: Set<string> = new Set();
   for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
-    if ('type' in line && line.type === 'feedback-update') continue;
-    const rec = line as RunRecord;
+    if (!isRunRecord(line)) continue;
+    const rec = line;
     if (rec.session_id !== sessionId) continue;
     if (rec.answer.answer_id) sessionAnswerIds.add(rec.answer.answer_id);
   }
@@ -900,8 +900,8 @@ function readRunRecord(
 ): RunRecord | null {
   let latest: RunRecord | null = null;
   for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
-    if ('type' in line && line.type === 'feedback-update') continue;
-    const rec = line as RunRecord;
+    if (!isRunRecord(line)) continue;
+    const rec = line;
     if (rec.answer.answer_id !== answerId) continue;
     // Last write wins for re-asks; keep iterating to the end.
     latest = rec;

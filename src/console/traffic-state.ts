@@ -12,7 +12,7 @@
  */
 
 import { iterateRunsSince } from '../runs/writer.ts';
-import { runSource, type RunRecord, type RunsLine } from '../runs/types.ts';
+import { isRunRecord, runSource, type RunRecord, type RunsLine } from '../runs/types.ts';
 
 export type TrafficWindow = {
   /** ISO start of the window (sinceMs as ISO date). */
@@ -53,8 +53,8 @@ export function loadTrafficWindow(stateRoot: string, days = 7): TrafficWindow {
   const sinceMs = nowMs - days * DAY_MS;
   const records: RunRecord[] = [];
   for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
-    if ('type' in line && line.type === 'feedback-update') continue;
-    records.push(line as RunRecord);
+    if (!isRunRecord(line)) continue;
+    records.push(line);
   }
   return {
     sinceISO: new Date(sinceMs).toISOString().slice(0, 10),
