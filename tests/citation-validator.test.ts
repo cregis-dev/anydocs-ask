@@ -244,3 +244,34 @@ test('validateCitations: system prompt + user prompt 形状合约', async () => 
   // Temperature 钉为 0 — 校验是确定性任务
   assert.equal(call.temperature, 0);
 });
+
+test('validateCitations: maxTokens 给 batch 足量预算（CJK reason 不被截断）', async () => {
+  // Dogfood 2026-05-23 regression: alpha.1 用 `max(256, batch.len * 80)`，
+  // 6-cit batch 仅 480 tokens 预算，但中文 reason 每个 verdict 实际产 ~200
+  // tokens（CJK 字符 1.5-2 tokens/char），LLM 输出截断在 cit_1 中间，整批
+  // parse 失败 → 0 verdict。fix：floor 1024，scale 300/verdict 给 CJK
+  // headroom。本测试守住该最低预算。
+  const llm = new MockLLM({
+    responder: () =>
+      JSON.stringify([{ cit_id: 'cit_1', verdict: 'supports', reason: 'ok' }]),
+  });
+  // 单 cit：至少 1024
+  await validateCitations({ llm, pairs: [mkPair('cit_1')] });
+  assert.ok(
+    (llm.calls[0]!.maxTokens ?? 0) >= 1024,
+    `expected maxTokens ≥ 1024 for single cit; got ${llm.calls[0]!.maxTokens}`,
+  );
+  // 10-cit batch：≥ 3000（10 × 300）
+  const tenPairs = Array.from({ length: 10 }, (_, i) => mkPair('cit_' + (i + 1)));
+  llm.calls.length = 0;
+  llm.setResponder(() =>
+    JSON.stringify(
+      tenPairs.map((p) => ({ cit_id: p.citationId, verdict: 'supports', reason: 'ok' })),
+    ),
+  );
+  await validateCitations({ llm, pairs: tenPairs });
+  assert.ok(
+    (llm.calls[0]!.maxTokens ?? 0) >= 3000,
+    `expected maxTokens ≥ 3000 for 10-cit batch; got ${llm.calls[0]!.maxTokens}`,
+  );
+});
