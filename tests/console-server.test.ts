@@ -445,16 +445,21 @@ function insertFeedback(
     /** RFC 0003 M6 — populated by γ + curated inserts; β path persists null
      *  today (see app.ts:308). Tests use this to seed multi-turn dialogues. */
     session_id?: string | null;
+    /** F8 — pre-JSON-encoded retrieved snapshot. Either Citation[] shape
+     *  (page_id/snippet) — what β handler writes — or RunCitation[]
+     *  (page/quote) — what runs.jsonl uses. Parser must accept both. */
+    retrieved?: string | null;
   },
 ): void {
   db.prepare(
     `INSERT INTO feedback
-       (answer_id, question, generated, rating, signal_source, current_page_id, created_at, session_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (answer_id, question, generated, retrieved, rating, signal_source, current_page_id, created_at, session_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     args.answer_id,
     args.question ?? 'q',
     'gen',
+    args.retrieved ?? null,
     args.rating ?? null,
     args.signal_source ?? 'explicit',
     args.current_page_id ?? null,
@@ -1319,6 +1324,148 @@ test('GET /api/projects/:name/feedback/:id: drawer detail carries peer sessionTu
         [3, 'third'],
       ],
     );
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// F8 — drawer parser accepts both Citation and RunCitation field names
+// ---------------------------------------------------------------------------
+
+test('GET /api/projects/:name/feedback/:id: parseRunCitations decodes Citation[] shape from β handler (F8)', async () => {
+  // Dogfood 2026-05-23 F8 root cause: β /v1/ask/feedback handler writes
+  // Citation[] (page_id + snippet) into feedback.retrieved, but the
+  // drawer parser only knew RunCitation[] (page + quote). All items got
+  // filtered out → drawer falsely showed "no citations on this answer"
+  // even though the column had a 960+-byte populated JSON snapshot.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    const retrieved = JSON.stringify([
+      {
+        citation_id: 'cit_1',
+        chunk_id: 26111,
+        page_id: 'ai-providers',
+        lang: 'en',
+        source_lang: 'en',
+        title: 'AI Providers',
+        breadcrumb: [],
+        url: null,
+        snippet: 'Hermes supports Anthropic / OpenAI / OpenRouter.',
+        in_page_path: 'provider-selection/p[1]',
+      },
+      {
+        citation_id: 'cit_2',
+        chunk_id: 25771,
+        page_id: 'quickstart',
+        lang: 'en',
+        source_lang: 'en',
+        title: 'Quickstart',
+        breadcrumb: [],
+        url: null,
+        snippet: 'Run `hermes model` to choose your LLM provider.',
+        in_page_path: '2-set-up-a-provider/p[1]',
+      },
+    ]);
+    insertFeedback(db, { answer_id: 'beta-1', rating: -1, retrieved });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const json = (await (await app.request('/api/projects/docs-zh/feedback/1')).json()) as {
+      detail: { citations: Array<{ page: string; quote: string; chunkId: number | null }> };
+    };
+    assert.equal(json.detail.citations.length, 2, 'Citation[] shape must decode to 2 items');
+    assert.equal(json.detail.citations[0]!.page, 'ai-providers', 'page_id maps to page');
+    assert.match(json.detail.citations[0]!.quote, /Anthropic/, 'snippet maps to quote');
+    assert.equal(json.detail.citations[0]!.chunkId, 26111);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback/:id: parseRunCitations still decodes RunCitation[] shape (F8 backward-compat)', async () => {
+  // Pin the pre-F8 RunCitation path so the dual-shape fix doesn't regress
+  // existing rows. Any analyze / golden code that round-trips RunCitation
+  // through this column keeps working.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    const retrieved = JSON.stringify([
+      { chunk_id: 42, page: 'auth', quote: 'JWT bearer tokens' },
+      { chunk_id: 43, page: 'auth-jwt', quote: 'Refresh tokens expire after 30 days' },
+    ]);
+    insertFeedback(db, { answer_id: 'run-style', rating: 1, retrieved });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const json = (await (await app.request('/api/projects/docs-zh/feedback/1')).json()) as {
+      detail: { citations: Array<{ page: string; quote: string; chunkId: number | null }> };
+    };
+    assert.equal(json.detail.citations.length, 2);
+    assert.equal(json.detail.citations[0]!.page, 'auth');
+    assert.equal(json.detail.citations[0]!.quote, 'JWT bearer tokens');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback/:id: parseRunCitations prefers RunCitation page/quote over Citation page_id/snippet when both present (F8 precedence)', async () => {
+  // Belt-and-suspenders for the rare case where a writer started emitting
+  // both field families (e.g. a future RunCitation+Citation merge). Pin
+  // the canonical-trace-source-wins rule.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    const retrieved = JSON.stringify([
+      { chunk_id: 99, page: 'canonical-page', page_id: 'legacy-page',
+        quote: 'canonical quote', snippet: 'legacy snippet' },
+    ]);
+    insertFeedback(db, { answer_id: 'mixed', rating: 1, retrieved });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const json = (await (await app.request('/api/projects/docs-zh/feedback/1')).json()) as {
+      detail: { citations: Array<{ page: string; quote: string }> };
+    };
+    assert.equal(json.detail.citations[0]!.page, 'canonical-page');
+    assert.equal(json.detail.citations[0]!.quote, 'canonical quote');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback/:id: parseRunCitations skips items missing both page identifiers (F8 sanity)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    const retrieved = JSON.stringify([
+      { chunk_id: 1 }, // no page / page_id → skip
+      { chunk_id: 2, page: 'valid', quote: 'ok' },
+      null,
+      'not an object',
+    ]);
+    insertFeedback(db, { answer_id: 'partial', rating: 1, retrieved });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const json = (await (await app.request('/api/projects/docs-zh/feedback/1')).json()) as {
+      detail: { citations: Array<{ page: string }> };
+    };
+    assert.equal(json.detail.citations.length, 1);
+    assert.equal(json.detail.citations[0]!.page, 'valid');
   } finally {
     await cleanup();
   }
