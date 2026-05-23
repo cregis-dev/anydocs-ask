@@ -70,7 +70,23 @@ const SYSTEM_PROMPT =
 export async function validateCitations(
   input: ValidateCitationsInput,
 ): Promise<CitationCheckResult[]> {
-  const pairs = input.pairs ?? [];
+  const rawPairs = input.pairs ?? [];
+  if (rawPairs.length === 0) return [];
+  // F7 (dogfood 2026-05-23) — dedupe pairs by citationId before batching.
+  // extractClaimChunkPairs emits one pair per `[cit_N]` marker in the answer,
+  // so a citationId can repeat (same chunk, different claim sentence). The
+  // RFC §4.4 schema is one verdict per citation_id, so the surplus pairs
+  // can't widen the output — they only cost extra LLM tokens and, when the
+  // duplicates land in different batches, produce duplicate verdict rows
+  // that the V5 reader collapses arbitrarily (last-write-wins). First pair
+  // wins, matching the existing within-batch `seen` semantics in runBatch().
+  const pairs: CitationClaimPair[] = [];
+  const dedupSeen = new Set<string>();
+  for (const p of rawPairs) {
+    if (typeof p.citationId !== 'string' || dedupSeen.has(p.citationId)) continue;
+    dedupSeen.add(p.citationId);
+    pairs.push(p);
+  }
   if (pairs.length === 0) return [];
   const reasonMax = clampPositiveInt(input.reasonMaxChars, DEFAULT_REASON_MAX);
   const batchSize = clampPositiveInt(input.batchSize, DEFAULT_BATCH_SIZE);

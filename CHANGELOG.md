@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+### 修复
+
+- **F7 — `validateCitations` 入口处按 `citationId` 去重（dogfood 2026-05-23 follow-up）** —— `extractClaimChunkPairs` 给同一答案里多次出现的 `[cit_N]` 标记各产一 pair（同 chunk、不同 claim 句）。alpha.1 这些 pair 会被分布到多批 LLM 调用：(1) 白烧 token，(2) 跨批共有 `cit_id` 时输出含重复 verdict 行，(3) V5 reader `applyTail` 按 last-write-wins 折叠，verdict 随机被选。修后：入口前 dedupe（first-write-wins，与既有 within-batch `seen` 语义一致），LLM 看到的每 batch 都唯一 `cit_id`、tail 行无重复。Token 节省与 claim 数成正比。
+
 ### 新增
 
 - **RFC 0005 V5 — Console Studio 展示 verdict** —— Feedback tab 新增 `semantic_check_failed` 筛选 chip（"⚠ cit-check"，匹配任一 cit verdict !== `supports` 的行）+ 第 6 个 KPI tile（"cit-check failed"，feature off 时显示 "—" 区别于 "0 failures"）。Drawer CITATIONS 抽屉每个 cit 后挂彩色 verdict 徽章（supports=ok / partially=warn / not_supports=err）+ LLM 给出的 ≤100 字 reason 行（即便 supports 也展示，便于评估 false-positive）。读端通过 `request_id` 把 `citation-check-update` tail merge 进 `runIndex`，按 `citation_id` 把 verdict 落到对应 cit；feature off / 无 tail / pre-alpha.2 行 → 全部 null 自然降级。
