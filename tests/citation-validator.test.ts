@@ -88,6 +88,85 @@ test('validateCitations: pairs > batchSize 拆批；call count 正确', async ()
   );
 });
 
+test('validateCitations: cross-batch dedup — 重复 citationId 折叠为 1 个 LLM 调用 + 1 个 verdict', async () => {
+  // F7 (dogfood 2026-05-23): extractClaimChunkPairs 给一答案里多次出现的
+  // [cit_N] 各产一 pair。alpha.1 这些 pair 被分布到多批，会导致：
+  //   1) 多次 LLM 调用同 cit_id（白烧 token）
+  //   2) 跨批共有 cit_id → 输出含重复 verdict 行
+  //   3) V5 reader 收口时按 last-write-wins 折叠，verdict 随机被选
+  // Fix: validateCitations 入口前去重；本测试守住该不变量。
+  let callCount = 0;
+  const llm = new MockLLM({
+    responder: (input) => {
+      callCount++;
+      const parsed = JSON.parse(input.userPrompt) as Array<{ cit_id: string }>;
+      return JSON.stringify(
+        parsed.map((p) => ({ cit_id: p.cit_id, verdict: 'supports' as const, reason: 'ok' })),
+      );
+    },
+  });
+  // 11 个 pair 全是 cit_1（同 chunk，不同 claim）。
+  const pairs = Array.from({ length: 11 }, (_, i) =>
+    mkPair('cit_1', 'claim ' + i, 'chunk text'),
+  );
+  const out = await validateCitations({ llm, pairs });
+  assert.equal(out.length, 1, 'one verdict per unique citation_id');
+  assert.equal(out[0]!.citationId, 'cit_1');
+  assert.equal(callCount, 1, 'one LLM call (vs alpha.1: two — 10 in batch 1, 1 in batch 2)');
+});
+
+test('validateCitations: cross-batch dedup — mixed unique + duplicate cits', async () => {
+  // batchSize=1 强制每个 pair 独占一批，模拟最差跨批分散。Dedup 应该把
+  // 5 个 pair 收成 2 个唯一 cit → 2 次 LLM 调用，输出 [cit_1, cit_2]。
+  let callCount = 0;
+  const llm = new MockLLM({
+    responder: (input) => {
+      callCount++;
+      const parsed = JSON.parse(input.userPrompt) as Array<{ cit_id: string }>;
+      return JSON.stringify(
+        parsed.map((p) => ({ cit_id: p.cit_id, verdict: 'supports' as const, reason: 'ok' })),
+      );
+    },
+  });
+  const pairs = [
+    mkPair('cit_1', 'c1a'),
+    mkPair('cit_2', 'c2a'),
+    mkPair('cit_1', 'c1b'),
+    mkPair('cit_1', 'c1c'),
+    mkPair('cit_2', 'c2b'),
+  ];
+  const out = await validateCitations({ llm, pairs, batchSize: 1 });
+  assert.equal(out.length, 2, 'two verdicts: cit_1 + cit_2');
+  const ids = out.map((r) => r.citationId).sort();
+  assert.deepEqual(ids, ['cit_1', 'cit_2']);
+  assert.equal(callCount, 2, 'two LLM calls (alpha.1: 5 — every pair its own batch)');
+});
+
+test('validateCitations: dedup keeps first pair (claim 顺序 first-write-wins)', async () => {
+  // 同 cit_id 的多 pair，dedup 保留第一条 → LLM 看到的 claim 是 "first"。
+  const llm = new MockLLM({
+    responder: (input) => {
+      const parsed = JSON.parse(input.userPrompt) as Array<{ cit_id: string; claim: string }>;
+      return JSON.stringify(
+        parsed.map((p) => ({
+          cit_id: p.cit_id,
+          verdict: 'supports' as const,
+          reason: 'echo: ' + p.claim,
+        })),
+      );
+    },
+  });
+  const out = await validateCitations({
+    llm,
+    pairs: [
+      mkPair('cit_1', 'first claim'),
+      mkPair('cit_1', 'second claim'),
+    ],
+  });
+  assert.equal(out.length, 1);
+  assert.equal(out[0]!.reason, 'echo: first claim');
+});
+
 test('validateCitations: LLM 抛错 → 该批静默吞掉返回空', async () => {
   // Fire-and-forget 语义：不能 bubble 异常给主请求路径。
   const llm = new MockLLM({
