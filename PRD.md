@@ -344,7 +344,7 @@ v1 立项时的叙事是"读懂目录结构的文档问答服务"。0.1.0 上线
 
 | 版本 | 期 | 主线 | 关联 RFC |
 |---|---|---|---|
-| **0.2**（进行中） | 2026-05–06 | 反馈回路管道铺通 + Console → Studio 升级、反馈闭环主线 | [RFC 0001](./docs/rfcs/0001-feedback-loop-v0.2.md) / [RFC 0002](./docs/rfcs/0002-console-studio-feedback-loop.md) |
+| **0.2**（2026-05-23 已发布）| 2026-05 | 反馈回路管道铺通 + Console → Studio 升级、反馈闭环主线 + early multi-turn (RFC 0003 M1-M6 默认开启) + citation 校验 schema 留位 (RFC 0005 alpha) | [RFC 0001](./docs/rfcs/0001-feedback-loop-v0.2.md) / [RFC 0002](./docs/rfcs/0002-console-studio-feedback-loop.md) |
 | **0.3** | 2026-06–07 | A+ 失败查询诊断（≥ 50 条反馈门槛）+ Citation 语义校验 | [RFC 0005](./docs/rfcs/0005-citation-semantic-validation.md) |
 | **0.4** | 2026-07–08 | 多轮对话 + Session 重写 + 嵌入式 Ask Widget 设计 | [RFC 0003](./docs/rfcs/0003-multi-turn-session-rewrite.md) / [RFC 0004](./docs/rfcs/0004-embedded-ask-widget.md) |
 | **0.5+** | 2026-Q3+ | 嵌入式 Widget 落地 + Reranker 数据驱动启用（≥ 200 条门槛后 shadow → 上线） | RFC 0004 落地 / RFC 待立项 |
@@ -406,11 +406,11 @@ v1 立项时的叙事是"读懂目录结构的文档问答服务"。0.1.0 上线
 
 | RFC | 标题 | 状态 | 关联版本 |
 |---|---|---|---|
-| [0001](./docs/rfcs/0001-feedback-loop-v0.2.md) | 0.2 反馈回路落地 | Draft 起草中 | 0.2 |
-| [0002](./docs/rfcs/0002-console-studio-feedback-loop.md) | Console → Studio：反馈闭环主线 | Draft 起草中 | 0.2 |
-| [0003](./docs/rfcs/0003-multi-turn-session-rewrite.md) | 多轮对话 + Session 重写 | Draft 起草中 | 0.4 |
+| [0001](./docs/rfcs/0001-feedback-loop-v0.2.md) | 0.2 反馈回路落地 | **0.2.0 已落地** | 0.2 |
+| [0002](./docs/rfcs/0002-console-studio-feedback-loop.md) | Console → Studio：反馈闭环主线 | **0.2.0 T1-T4 已落地** | 0.2 |
+| [0003](./docs/rfcs/0003-multi-turn-session-rewrite.md) | 多轮对话 + Session 重写 | **M1-M6 已接通**（0.2.0 默认开启 / 0.4 主线收尾） | 0.4 |
 | [0004](./docs/rfcs/0004-embedded-ask-widget.md) | 嵌入式 Ask Widget | Draft 起草中 | 0.4 设计 / 0.5+ 落地 |
-| [0005](./docs/rfcs/0005-citation-semantic-validation.md) | Citation 语义校验（B.2 复用主 LLM） | Accepted | 0.3 |
+| [0005](./docs/rfcs/0005-citation-semantic-validation.md) | Citation 语义校验（B.2 复用主 LLM） | **alpha.0+alpha.1 schema 留位 + helper 模块**（0.2.0 early in-scope / 0.3 接通 pipeline） | 0.3 |
 
 ---
 
