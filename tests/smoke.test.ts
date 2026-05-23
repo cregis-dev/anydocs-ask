@@ -351,6 +351,42 @@ test('POST /v1/ask/feedback explicit body.generated wins over answers.payload (F
   }
 });
 
+test('POST /v1/ask/feedback explicit empty-string generated clears stored answer (F7 review)', async () => {
+  // Codex review on PR #69: pre-F7 the handler stored whatever the body
+  // sent, including '' as an explicit "do not persist the answer" opt-out.
+  // The F7 backfill must NOT eat that signal — only an omitted key falls
+  // through to the answers.payload.answer_md default. Type-only check on
+  // the body field accomplishes this.
+  const { runtime, cleanup } = await makeRuntime();
+  try {
+    await runtime.start();
+    const app = createApp({ runtime });
+    const askRes = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    const askBody = (await askRes.json()) as { answer_id: string; answer_md: string };
+    assert.ok(askBody.answer_md.length > 0, 'precondition: answers.payload.answer_md present');
+
+    await app.request('/v1/ask/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answer_id: askBody.answer_id, rating: 1, generated: '' }),
+    });
+    const row = runtime.db
+      .prepare(`SELECT generated FROM feedback WHERE answer_id = ?`)
+      .get(askBody.answer_id) as { generated: string } | undefined;
+    assert.equal(
+      row!.generated,
+      '',
+      'explicit empty string must clear, not fall through to backfill',
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test('POST /v1/ask/feedback generated stays empty when answers row aged out + no body field (F7)', async () => {
   // Pre-F7 invariant preserved: when neither path provides answer_md, the
   // column lands as '' rather than throwing. Studio drawer's "no answer body"

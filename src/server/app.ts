@@ -311,10 +311,13 @@ export function createApp(deps: AppDeps): Hono {
       question = obj.question;
     }
     // Explicit body `generated` always wins (e.g. when client edited the
-    // answer locally before reporting feedback). Falls back to backfill +
-    // empty string in that order — preserves pre-F7 behaviour for callers
-    // that already send it.
-    if (typeof obj.generated === 'string' && obj.generated.length > 0) {
+    // answer locally before reporting feedback). The check is on TYPE only,
+    // NOT length: pre-F7 the handler stored whatever the client sent —
+    // including an empty string used as an explicit "clear stored answer"
+    // opt-out — so the F7 backfill must not eat that signal. Caller
+    // omitting the key entirely (undefined) is the only path that falls
+    // through to the answers.payload backfill.
+    if (typeof obj.generated === 'string') {
       generated = obj.generated;
     }
 
