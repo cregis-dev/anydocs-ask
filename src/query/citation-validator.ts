@@ -105,8 +105,16 @@ async function runBatch(args: {
     raw = await llm.generate({
       systemPrompt: SYSTEM_PROMPT,
       userPrompt,
-      // 一段 JSON 数组 + 每个 reason ≤ 100 字符；100 cit 上限给得很宽。
-      maxTokens: Math.max(256, batch.length * 80),
+      // Per-verdict budget: ~50 tokens for JSON structure + up to ~200 tokens
+      // for the reason field. Reason cap is 100 *chars* (RFC §4.1), and in
+      // CJK each char tokenizes to ~1.5–2 tokens — alpha.1's
+      // `max(256, batch.length * 80)` regularly truncated batches mid-JSON
+      // when reasons were Chinese (dogfood 2026-05-23: 6-cit batch cut at
+      // 25 chars). Floor at 1024 so single-cit calls have plenty of slack;
+      // scale at 300/verdict for honest CJK headroom. parseLlmJsonArray
+      // silently drops truncated output → no false-verdict risk, but the
+      // shadow data goes blank, which defeats the whole point.
+      maxTokens: Math.max(1024, batch.length * 300),
       // 校验是确定性任务，去随机性。
       temperature: 0,
     });
