@@ -280,6 +280,7 @@ export function createApp(deps: AppDeps): Hono {
     let question = '';
     let model = '';
     let retrieved: unknown = null;
+    let generated = '';
     if (original) {
       question = original.question;
       try {
@@ -290,6 +291,13 @@ export function createApp(deps: AppDeps): Hono {
         };
         retrieved = parsed.citations ?? null;
         model = parsed.model ?? '';
+        // F7 (dogfood 2026-05-23): backfill answer_md into feedback.generated so
+        // the Console drawer's ANSWER section has body to render. Pre-fix the
+        // column was always '' because the handler never plumbed it through —
+        // Reader / curl callers do not send `generated` in the request body.
+        // Parallel to the `question` backfill above; same trade-off (24h TTL
+        // race covered by body override below).
+        if (typeof parsed.answer_md === 'string') generated = parsed.answer_md;
       } catch {
         // ignore — partial feedback is still useful.
       }
@@ -301,6 +309,16 @@ export function createApp(deps: AppDeps): Hono {
       // empty string, and callers that don't send it keep their existing
       // behaviour.
       question = obj.question;
+    }
+    // Explicit body `generated` always wins (e.g. when client edited the
+    // answer locally before reporting feedback). The check is on TYPE only,
+    // NOT length: pre-F7 the handler stored whatever the client sent —
+    // including an empty string used as an explicit "clear stored answer"
+    // opt-out — so the F7 backfill must not eat that signal. Caller
+    // omitting the key entirely (undefined) is the only path that falls
+    // through to the answers.payload backfill.
+    if (typeof obj.generated === 'string') {
+      generated = obj.generated;
     }
 
     // RFC 0003 M6 follow-up: persist the client's session_id on the β row
@@ -330,7 +348,7 @@ export function createApp(deps: AppDeps): Hono {
         question,
         typeof obj.current_page_id === 'string' ? obj.current_page_id : null,
         retrieved !== null ? JSON.stringify(retrieved) : null,
-        typeof obj.generated === 'string' ? obj.generated : '',
+        generated,
         typeof obj.rating === 'number' ? obj.rating : null,
         typeof obj.correction === 'string' ? obj.correction : null,
         Array.isArray(obj.bad_citation_ids)

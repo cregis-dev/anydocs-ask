@@ -287,6 +287,129 @@ test('POST /v1/ask/feedback persists the question text from the answers table', 
   }
 });
 
+test('POST /v1/ask/feedback backfills generated from answers.payload.answer_md (F7)', async () => {
+  // Dogfood 2026-05-23 F7: pre-fix the β handler INSERTed
+  // `typeof obj.generated === 'string' ? obj.generated : ''` and Reader /
+  // curl callers never send `generated`, so feedback.generated was always
+  // '' in production — Console drawer ANSWER section showed "(no answer
+  // body)". Parallel to the `question` backfill above: handler now reads
+  // answers.payload.answer_md as the default; body still wins when present.
+  const { runtime, cleanup } = await makeRuntime();
+  try {
+    await runtime.start();
+    const app = createApp({ runtime });
+    const askRes = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    const askBody = (await askRes.json()) as { answer_id: string; answer_md: string };
+    assert.ok(askBody.answer_md.length > 0, '/v1/ask must return answer_md');
+
+    await app.request('/v1/ask/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answer_id: askBody.answer_id, rating: 1 }),
+    });
+    const row = runtime.db
+      .prepare(`SELECT generated FROM feedback WHERE answer_id = ?`)
+      .get(askBody.answer_id) as { generated: string } | undefined;
+    assert.ok(row, 'feedback row must be inserted');
+    assert.equal(
+      row!.generated,
+      askBody.answer_md,
+      'feedback.generated must come from answers.payload.answer_md',
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /v1/ask/feedback explicit body.generated wins over answers.payload (F7 forward-compat)', async () => {
+  const { runtime, cleanup } = await makeRuntime();
+  try {
+    await runtime.start();
+    const app = createApp({ runtime });
+    const askRes = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    const askBody = (await askRes.json()) as { answer_id: string };
+    const edited = '用户编辑过的答案 markdown';
+    await app.request('/v1/ask/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answer_id: askBody.answer_id, rating: 1, generated: edited }),
+    });
+    const row = runtime.db
+      .prepare(`SELECT generated FROM feedback WHERE answer_id = ?`)
+      .get(askBody.answer_id) as { generated: string } | undefined;
+    assert.equal(row!.generated, edited, 'body.generated takes precedence');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /v1/ask/feedback explicit empty-string generated clears stored answer (F7 review)', async () => {
+  // Codex review on PR #69: pre-F7 the handler stored whatever the body
+  // sent, including '' as an explicit "do not persist the answer" opt-out.
+  // The F7 backfill must NOT eat that signal — only an omitted key falls
+  // through to the answers.payload.answer_md default. Type-only check on
+  // the body field accomplishes this.
+  const { runtime, cleanup } = await makeRuntime();
+  try {
+    await runtime.start();
+    const app = createApp({ runtime });
+    const askRes = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    const askBody = (await askRes.json()) as { answer_id: string; answer_md: string };
+    assert.ok(askBody.answer_md.length > 0, 'precondition: answers.payload.answer_md present');
+
+    await app.request('/v1/ask/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answer_id: askBody.answer_id, rating: 1, generated: '' }),
+    });
+    const row = runtime.db
+      .prepare(`SELECT generated FROM feedback WHERE answer_id = ?`)
+      .get(askBody.answer_id) as { generated: string } | undefined;
+    assert.equal(
+      row!.generated,
+      '',
+      'explicit empty string must clear, not fall through to backfill',
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /v1/ask/feedback generated stays empty when answers row aged out + no body field (F7)', async () => {
+  // Pre-F7 invariant preserved: when neither path provides answer_md, the
+  // column lands as '' rather than throwing. Studio drawer's "no answer body"
+  // copy is still the correct affordance here.
+  const { runtime, cleanup } = await makeRuntime();
+  try {
+    await runtime.start();
+    const app = createApp({ runtime });
+    await app.request('/v1/ask/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answer_id: 'ans_expired_or_never', rating: -1, question: 'X' }),
+    });
+    const row = runtime.db
+      .prepare(`SELECT generated FROM feedback WHERE answer_id = ?`)
+      .get('ans_expired_or_never') as { generated: string } | undefined;
+    assert.ok(row);
+    assert.equal(row!.generated, '');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('POST /v1/ask/feedback falls back to body.question when answers row expired', async () => {
   // 24h TTL guard: if the answers row aged out before the user clicked
   // 👍/👎, Reader MAY include the original question in the request body.
