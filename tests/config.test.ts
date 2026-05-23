@@ -2,13 +2,27 @@
  * Config loader tests — defaults, file overrides, lenient validation.
  */
 
-import { test } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { loadConfig, resolveTransformersCacheDir } from '../src/config.ts';
+
+// loadConfig applies ANTHROPIC_MODEL as an env override (src/config.ts:325).
+// Some dev shells inject it (e.g. Claude Code sets it to its gateway model),
+// which would shadow file-side llm.model values these tests assert against.
+// Pin a clean baseline for the whole file; the two tests that exercise the
+// override path (L186, L200) still save/restore their own values.
+const ORIG_ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL;
+before(() => {
+  delete process.env.ANTHROPIC_MODEL;
+});
+after(() => {
+  if (ORIG_ANTHROPIC_MODEL === undefined) delete process.env.ANTHROPIC_MODEL;
+  else process.env.ANTHROPIC_MODEL = ORIG_ANTHROPIC_MODEL;
+});
 
 async function withTmpProject(setup: (root: string) => Promise<void>): Promise<{
   root: string;
