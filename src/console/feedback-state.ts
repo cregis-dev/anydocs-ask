@@ -909,20 +909,52 @@ function readRunRecord(
   return latest;
 }
 
+/**
+ * Decode `feedback.retrieved` (JSON-encoded citation snapshot) into the
+ * drawer's view-model shape.
+ *
+ * F8 (dogfood 2026-05-23): two parallel citation schemas exist in the
+ * codebase:
+ *   - `Citation` from src/query/types.ts — `.page_id` + `.snippet`
+ *     (β handler writes this into feedback.retrieved at insert time)
+ *   - `RunCitation` from src/runs/types.ts — `.page` + `.quote`
+ *     (runs.jsonl writer + analyzer use this)
+ *
+ * Pre-F8 the parser only honoured RunCitation's `.page`, so every β row
+ * with a populated retrieved column rendered as "no citations on this
+ * answer" in the drawer. Fix: prefer the RunCitation field names (since
+ * runs.jsonl is the canonical trace source), fall back to Citation
+ * fields when the input was written by the β path.
+ */
 function parseRunCitations(json: string | null): FeedbackRunCitationVM[] {
   if (!json) return [];
   try {
     const parsed = JSON.parse(json);
     if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((c): c is { page: string; quote?: string; chunk_id?: number | null } =>
-        typeof c?.page === 'string',
-      )
-      .map((c) => ({
-        page: c.page,
-        quote: typeof c.quote === 'string' ? c.quote : '',
-        chunkId: typeof c.chunk_id === 'number' ? c.chunk_id : null,
-      }));
+    const out: FeedbackRunCitationVM[] = [];
+    for (const c of parsed) {
+      if (typeof c !== 'object' || c === null) continue;
+      const o = c as Record<string, unknown>;
+      const page =
+        typeof o.page === 'string'
+          ? o.page
+          : typeof o.page_id === 'string'
+            ? o.page_id
+            : null;
+      if (page === null) continue;
+      const quote =
+        typeof o.quote === 'string'
+          ? o.quote
+          : typeof o.snippet === 'string'
+            ? o.snippet
+            : '';
+      out.push({
+        page,
+        quote,
+        chunkId: typeof o.chunk_id === 'number' ? o.chunk_id : null,
+      });
+    }
+    return out;
   } catch {
     return [];
   }
