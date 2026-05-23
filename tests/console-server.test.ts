@@ -579,7 +579,7 @@ test('GET /api/projects/:name/feedback: returns rows + filterCounts; respects ?f
     };
     assert.equal(allBody.ok, true);
     assert.equal(allBody.rows.length, 4);
-    assert.deepEqual(allBody.filterCounts, { all: 4, thumbs_up: 2, thumbs_down: 1, implicit: 1, no_citations: 0 });
+    assert.deepEqual(allBody.filterCounts, { all: 4, thumbs_up: 2, thumbs_down: 1, implicit: 1, no_citations: 0, semantic_check_failed: 0 });
 
     // filter=thumbs_up — 2 rows.
     const upRes = await app.request('/api/projects/docs-zh/feedback?filter=thumbs_up');
@@ -633,7 +633,7 @@ test('GET /api/projects/:name/feedback: curated rows excluded from all chip + KP
       rows: Array<{ signal_source: string }>;
       filterCounts: Record<string, number>;
     };
-    assert.deepEqual(body.filterCounts, { all: 3, thumbs_up: 1, thumbs_down: 1, implicit: 1, no_citations: 0 });
+    assert.deepEqual(body.filterCounts, { all: 3, thumbs_up: 1, thumbs_down: 1, implicit: 1, no_citations: 0, semantic_check_failed: 0 });
     // List rows when filter='all' must also stay at 3 (curated suppressed
     // by the SQL filter; counts and list must agree).
     assert.equal(body.rows.length, 3);
@@ -694,7 +694,7 @@ test('GET /api/projects/:name/feedback: disabled project returns enabled=false, 
     assert.equal(body.ok, true);
     assert.equal(body.enabled, false);
     assert.equal(body.rows.length, 0);
-    assert.deepEqual(body.filterCounts, { all: 0, thumbs_up: 0, thumbs_down: 0, implicit: 0, no_citations: 0 });
+    assert.deepEqual(body.filterCounts, { all: 0, thumbs_up: 0, thumbs_down: 0, implicit: 0, no_citations: 0, semantic_check_failed: 0 });
   } finally {
     await cleanup();
   }
@@ -763,12 +763,23 @@ function makeRunRecord(args: {
   ts?: string;
   kind?: 'answer' | 'clarify' | 'error';
   confidence?: number;
-  citations?: Array<{ chunk_id: number | null; page: string; quote: string }>;
+  citations?: Array<{
+    chunk_id: number | null;
+    page: string;
+    quote: string;
+    /** RFC 0005 V4 — present on alpha.2+ runs. Drives the V5 verdict
+     *  join in the drawer. */
+    citation_id?: string;
+  }>;
   /** RFC 0003 — populated by the multi-turn pipeline (alpha.0+). M6 tests
    *  use this to exercise the runs.jsonl fallback for β rows whose
    *  feedback.session_id column is null. */
   session_id?: string | null;
   history_window?: number;
+  /** RFC 0005 V5 — request_id override. Defaults to `req_<answer_id>` so
+   *  test fixtures can build a matching citation-check-update tail
+   *  without bookkeeping. */
+  request_id?: string;
 }): Record<string, unknown> {
   const answerCore: Record<string, unknown> = {
     kind: args.kind ?? 'answer',
@@ -787,7 +798,7 @@ function makeRunRecord(args: {
   }
   return {
     ts: args.ts ?? new Date().toISOString(),
-    request_id: 'req_' + args.answer_id,
+    request_id: args.request_id ?? 'req_' + args.answer_id,
     session_id: args.session_id ?? null,
     query: 'q',
     filters: {},
@@ -796,6 +807,34 @@ function makeRunRecord(args: {
     retrieval: { fused: [], subtree_ask_triggered: false },
     answer: answerCore,
     feedback: { beta: null, gamma: null },
+  };
+}
+
+/** RFC 0005 V5 — build a citation-check-update tail keyed to a RunRecord's
+ *  request_id. Each verdict joins to its citation by `citation_id`. */
+function makeCitationCheckUpdate(args: {
+  request_id: string;
+  ts?: string;
+  verdicts: Array<{
+    citation_id: string;
+    verdict: 'supports' | 'partially' | 'not_supports';
+    reason?: string;
+  }>;
+}): Record<string, unknown> {
+  return {
+    type: 'citation-check-update',
+    ts: args.ts ?? new Date().toISOString(),
+    request_id: args.request_id,
+    citations: args.verdicts.map((v) => ({
+      citation_id: v.citation_id,
+      semantic_check: {
+        verdict: v.verdict,
+        reason: v.reason ?? 'reason placeholder',
+        model: 'mock-validator',
+        checked_at: args.ts ?? new Date().toISOString(),
+        latency_ms: 1234,
+      },
+    })),
   };
 }
 
@@ -3731,6 +3770,206 @@ test('POST /api/projects/:name/ask: touches lastUsedAt to defer reap', async () 
     });
     const after = registry.list()[0]!.lastUsedAt;
     assert.ok(after > before, `expected lastUsedAt to advance: before=${before} after=${after}`);
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// RFC 0005 V5 — Console Studio verdict display
+// ---------------------------------------------------------------------------
+
+test('GET /api/projects/:name/feedback: semantic_check_failed chip counts rows with ≥1 failing verdict', async () => {
+  // V5 happy path: 3 feedback rows linked to 3 runs.
+  //   ans_ok  — all supports → NOT counted
+  //   ans_partial — one partially → counted
+  //   ans_bad — one not_supports → counted
+  // Chip badge: filterCounts.semantic_check_failed = 2.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'ans_ok', rating: 1 });
+    insertFeedback(db, { answer_id: 'ans_partial', rating: 1 });
+    insertFeedback(db, { answer_id: 'ans_bad', rating: -1 });
+    db.close();
+    await seedRunsFile(stateRoot, [
+      makeRunRecord({
+        answer_id: 'ans_ok',
+        citations: [{ chunk_id: 1, page: 'p1', quote: 'q', citation_id: 'cit_1' }],
+      }),
+      makeCitationCheckUpdate({
+        request_id: 'req_ans_ok',
+        verdicts: [{ citation_id: 'cit_1', verdict: 'supports' }],
+      }),
+      makeRunRecord({
+        answer_id: 'ans_partial',
+        citations: [
+          { chunk_id: 1, page: 'p1', quote: 'q', citation_id: 'cit_1' },
+          { chunk_id: 2, page: 'p2', quote: 'q', citation_id: 'cit_2' },
+        ],
+      }),
+      makeCitationCheckUpdate({
+        request_id: 'req_ans_partial',
+        verdicts: [
+          { citation_id: 'cit_1', verdict: 'supports' },
+          { citation_id: 'cit_2', verdict: 'partially' },
+        ],
+      }),
+      makeRunRecord({
+        answer_id: 'ans_bad',
+        citations: [{ chunk_id: 1, page: 'p1', quote: 'q', citation_id: 'cit_1' }],
+      }),
+      makeCitationCheckUpdate({
+        request_id: 'req_ans_bad',
+        verdicts: [{ citation_id: 'cit_1', verdict: 'not_supports' }],
+      }),
+    ]);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const allBody = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      filterCounts: Record<string, number>;
+      kpi: { semanticCheckFailed: number | null };
+    };
+    assert.equal(allBody.filterCounts.semantic_check_failed, 2);
+    // KPI tile uses the same denominator.
+    assert.equal(allBody.kpi.semanticCheckFailed, 2);
+
+    // filter=semantic_check_failed narrows the SQL pull to those answer_ids.
+    const filtBody = (await (
+      await app.request('/api/projects/docs-zh/feedback?filter=semantic_check_failed')
+    ).json()) as {
+      filter: string;
+      rows: Array<{ answerId: string; semanticCheckFailed: boolean | null }>;
+    };
+    assert.equal(filtBody.filter, 'semantic_check_failed');
+    assert.equal(filtBody.rows.length, 2);
+    const ids = filtBody.rows.map((r) => r.answerId).sort();
+    assert.deepEqual(ids, ['ans_bad', 'ans_partial']);
+    for (const r of filtBody.rows) {
+      assert.equal(r.semanticCheckFailed, true);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback: with NO citation-check tails KPI semanticCheckFailed = null (feature off vs no failures distinct)', async () => {
+  // alpha.0 promise: `enabled=false` produces zero tails → KPI tile reads
+  // "—" not "0". Tests the distinction at the snapshot layer.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'ans_1', rating: 1 });
+    db.close();
+    await seedRunsFile(stateRoot, [
+      makeRunRecord({
+        answer_id: 'ans_1',
+        citations: [{ chunk_id: 1, page: 'p1', quote: 'q', citation_id: 'cit_1' }],
+      }),
+      // NO citation-check-update tail.
+    ]);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      filterCounts: Record<string, number>;
+      kpi: { semanticCheckFailed: number | null };
+    };
+    assert.equal(body.filterCounts.semantic_check_failed, 0);
+    assert.equal(body.kpi.semanticCheckFailed, null, 'null distinguishes "feature off" from "0 failures"');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback/:id: drawer citations carry semanticCheck verdict + reason', async () => {
+  // V5 drawer join: the citation snapshot in feedback.retrieved is
+  // β-style ({page_id, snippet, citation_id}). The runs.jsonl tail joins
+  // by citation_id and the drawer merges verdict + reason onto each cit.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    // Write feedback.retrieved as β-shape JSON (Citation, not RunCitation).
+    const retrievedJson = JSON.stringify([
+      { citation_id: 'cit_1', page_id: 'p1', snippet: 'snippet1' },
+      { citation_id: 'cit_2', page_id: 'p2', snippet: 'snippet2' },
+    ]);
+    insertFeedback(db, {
+      answer_id: 'ans_x',
+      rating: -1,
+      retrieved: retrievedJson,
+    });
+    db.close();
+    await seedRunsFile(stateRoot, [
+      makeRunRecord({
+        answer_id: 'ans_x',
+        citations: [
+          { chunk_id: 1, page: 'p1', quote: 'q1', citation_id: 'cit_1' },
+          { chunk_id: 2, page: 'p2', quote: 'q2', citation_id: 'cit_2' },
+        ],
+      }),
+      makeCitationCheckUpdate({
+        request_id: 'req_ans_x',
+        verdicts: [
+          { citation_id: 'cit_1', verdict: 'supports', reason: '原文吻合' },
+          { citation_id: 'cit_2', verdict: 'not_supports', reason: '片段在讲别的' },
+        ],
+      }),
+    ]);
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    // Find the inserted feedback row's id (always 1 in a fresh schema).
+    const detailRes = await app.request('/api/projects/docs-zh/feedback/1');
+    assert.equal(detailRes.status, 200);
+    const body = (await detailRes.json()) as {
+      ok: boolean;
+      detail: {
+        citations: Array<{
+          citationId: string | null;
+          semanticCheck: { verdict: string; reason: string } | null;
+        }>;
+      };
+    };
+    assert.equal(body.ok, true);
+    assert.equal(body.detail.citations.length, 2);
+    const byCit = new Map(body.detail.citations.map((c) => [c.citationId, c]));
+    assert.equal(byCit.get('cit_1')?.semanticCheck?.verdict, 'supports');
+    assert.equal(byCit.get('cit_1')?.semanticCheck?.reason, '原文吻合');
+    assert.equal(byCit.get('cit_2')?.semanticCheck?.verdict, 'not_supports');
+    assert.equal(byCit.get('cit_2')?.semanticCheck?.reason, '片段在讲别的');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab SSR — semantic_check_failed chip is in the chip bar + cit-check KPI tile', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: 1 });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    // Chip in the chip bar.
+    assert.match(body, /data-feedback-chip="semantic_check_failed"/);
+    assert.match(body, /⚠ cit-check/);
+    // KPI tile.
+    assert.match(body, /cit-check failed/);
   } finally {
     await cleanup();
   }

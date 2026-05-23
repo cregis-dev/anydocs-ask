@@ -30,6 +30,11 @@ const FILTER_LABELS: Record<FeedbackFilter, string> = {
   thumbs_down: '👎',
   implicit: 'implicit',
   no_citations: 'no citations',
+  // RFC 0005 V5 chip — "⚠ cit-check" reads as a quick scan affordance and
+  // dodges the colon-comma awkwardness of "semantic check: failed". The
+  // tooltip on the chip carries the full taxonomy ('partially' or
+  // 'not_supports').
+  semantic_check_failed: '⚠ cit-check',
 };
 
 export function renderFeedbackTab(vm: FeedbackTabViewModel): Html {
@@ -135,8 +140,13 @@ function kpiStrip(snap: FeedbackTabSnapshot): Html {
   const conf = (n: number | null): string => (n === null ? '—' : n.toFixed(2));
   const lowConf = k.meanConfidence !== null && k.meanConfidence < 0.5;
   const highNonAns = k.nonAnswerRate > 0.2;
+  // RFC 0005 V5 — `semanticCheckFailed` reads `null` (= feature off / no
+  // shadow data yet) vs a numeric count. We mark the tile warn only when
+  // > 0 to keep the chrome quiet while shadow data is sparse.
+  const semCheck = k.semanticCheckFailed;
+  const semCheckWarn = typeof semCheck === 'number' && semCheck > 0;
   return html`
-    <div class="kpis" style="grid-template-columns: repeat(5, 1fr);" data-feedback-kpi>
+    <div class="kpis" style="grid-template-columns: repeat(6, 1fr);" data-feedback-kpi>
       <div class="kpi">
         <div class="k-lab">feedback · ${snap.days}d</div>
         <div class="k-val">${k.count}</div>
@@ -158,6 +168,15 @@ function kpiStrip(snap: FeedbackTabSnapshot): Html {
         <div class="k-lab">non-answer rate</div>
         <div class="k-val">${pct(k.nonAnswerRate)}</div>
         <div class="k-foot">error + clarify</div>
+      </div>
+      <div class="kpi${semCheckWarn ? ' warn' : ''}">
+        <div class="k-lab">cit-check failed</div>
+        <div class="k-val">${semCheck === null ? '—' : String(semCheck)}</div>
+        <div class="k-foot">
+          ${semCheck === null
+            ? 'enable citationSemanticCheck'
+            : 'partially + not_supports'}
+        </div>
       </div>
       <div class="kpi">
         <div class="k-lab">A+ candidates</div>
@@ -227,6 +246,7 @@ function chipBar(counts: FilterCounts, active: FeedbackFilter): Html {
     'thumbs_down',
     'implicit',
     'no_citations',
+    'semantic_check_failed',
   ];
   return html`
     <nav class="feedback-chips"
@@ -427,6 +447,7 @@ const CHIP_LABELS = {
   thumbs_down: '👎',
   implicit: 'implicit',
   no_citations: 'no citations',
+  semantic_check_failed: '⚠ cit-check',
 };
 const FILTER_FALLBACK_HINT = 'Try another chip or widen the window with <code class="inline">?days=30</code>.';
 
@@ -693,9 +714,27 @@ function renderCitations(cits) {
   }
   let out = '<div>';
   cits.forEach((c, i) => {
+    // RFC 0005 V5 — verdict chip + reason. supports = neutral, partially =
+    // warn, not_supports = err. We deliberately don't hide the reason for
+    // supports — operators evaluating false-positive rate need to see why
+    // the LLM said yes too.
+    let verdictBadge = '';
+    let verdictReason = '';
+    if (c.semanticCheck && typeof c.semanticCheck.verdict === 'string') {
+      const v = c.semanticCheck.verdict;
+      const cls = v === 'not_supports' ? 'tag err' : v === 'partially' ? 'tag warn' : 'tag ok';
+      const label = v === 'not_supports' ? 'not supports' : v;
+      verdictBadge = ' <span class="' + cls + '" title="LLM citation semantic check">' +
+        escapeHtml(label) + '</span>';
+      if (c.semanticCheck.reason) {
+        verdictReason = '<div class="ci-sn" style="color:var(--fg-soft); font-style:italic;">' +
+          'check: ' + escapeHtml(c.semanticCheck.reason) + '</div>';
+      }
+    }
     out += '<div class="cit"><span class="ci-no"><span class="cite">' + (i + 1) + '</span></span>' +
-      '<div class="ci-bd"><div class="ci-ti">' + escapeHtml(c.page || '') + '</div>' +
+      '<div class="ci-bd"><div class="ci-ti">' + escapeHtml(c.page || '') + verdictBadge + '</div>' +
       (c.quote ? '<div class="ci-sn">' + escapeHtml(c.quote) + '</div>' : '') +
+      verdictReason +
       '</div></div>';
   });
   out += '</div>';

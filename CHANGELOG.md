@@ -6,6 +6,7 @@
 
 ### 新增
 
+- **RFC 0005 V5 — Console Studio 展示 verdict** —— Feedback tab 新增 `semantic_check_failed` 筛选 chip（"⚠ cit-check"，匹配任一 cit verdict !== `supports` 的行）+ 第 6 个 KPI tile（"cit-check failed"，feature off 时显示 "—" 区别于 "0 failures"）。Drawer CITATIONS 抽屉每个 cit 后挂彩色 verdict 徽章（supports=ok / partially=warn / not_supports=err）+ LLM 给出的 ≤100 字 reason 行（即便 supports 也展示，便于评估 false-positive）。读端通过 `request_id` 把 `citation-check-update` tail merge 进 `runIndex`，按 `citation_id` 把 verdict 落到对应 cit；feature off / 无 tail / pre-alpha.2 行 → 全部 null 自然降级。
 - **RFC 0005 alpha.2 — citation 语义校验 pipeline 接通（V3 + V4 + V6）** —— `finalizeAskCall` 在主响应返回后异步、批量、fire-and-forget 触发 [src/query/citation-validator.ts](src/query/citation-validator.ts)；校验结果以 `citation-check-update` tail 行追加进 runs.jsonl，按 `request_id` + `citations[].citation_id` 与原 RunRecord join。`anydocs.ask.json` 的 `citationSemanticCheck.enabled` 现在真接通——`false`（默认）整段不触发任何 LLM 调用；`true` 时每个 answer 多 1 次 Claude 调用，shadow 模式不阻塞主答案延迟。dry_run / 无 citations / 校验抛错均自然降级（无 tail 写入，主响应 200 不受影响）。配套：`RunCitation` schema 加 optional `citation_id` + `semantic_check`；新增 `RunCitationCheckUpdate` tail record 类型 + `isRunRecord(line)` 守卫；所有 runs.jsonl 读端（analyze / golden / runs export / Console feedback-state / index-state / traffic-state）切到守卫，未来 tail 类型扩展不需要点 N 处。
 
 ## 0.2.0 — 2026-05-23
