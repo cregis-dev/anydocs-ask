@@ -6,6 +6,7 @@
 
 ### 新增
 
+- **RFC 0004 0.4.0-alpha.0 — W1 协议规格 + TypeScript 接口类型定义** —— `src/widget/types.ts` 落 host API（`WidgetInitOptions` / `WidgetSetContextInput` / `WidgetHandle`）、postMessage 协议（`WidgetEnvelope` / `WidgetHostEvent` / `WidgetClientEvent`）、server API 扩展（`WidgetAskRequestExt` / `WidgetServerErrorCode` / `WidgetError`）、global runtime namespace（`WidgetGlobal`）的全套 TS 类型 + JSDoc 协议详解。`src/widget/protocol.ts` 落 zero-dependency postMessage 守卫（`hasWidgetEnvelope` / `parseHostEvent` / `parseClientEvent` / `envelope`），widget bundle 和 host SDK 都能复用，做严格 narrow（缺字段 / 类型错 / 未知 kind 都返 null）。仍是 alpha.0：**不接 endpoint、不动 server / runtime / answer pipeline**，仅类型契约 + pure 守卫。14 个新单测覆盖守卫所有分支。
 - **RFC 0004 alignment — 嵌入式 Ask Widget Accepted + schema 留位** —— RFC 0004 Status: Draft → Accepted（阻塞依赖 RFC 0003 / 0002 / 0005 全部已落 main）。`anydocs.ask.json` 增 `widget` 段，三字段默认 `{ enabled:false, rateLimitPerMinute:60, allowedOrigins:[] }`。alpha.0 alignment 范围：零代码消费、零行为变化；接口规格 + TS 类型 + endpoint 接通留给后续 alpha.0/alpha.1。`allowedOrigins` 做合法 Origin 形态校验（必须 `http://` 或 `https://`，不含路径/query/fragment），非法项静默丢弃 + 给一条 rejection 汇总 warning。`rateLimitPerMinute` 校验 `[1, 10000]` 整数。配套 5 个 config 测试覆盖。
 
 ### 修复
