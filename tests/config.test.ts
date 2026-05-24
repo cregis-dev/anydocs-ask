@@ -585,3 +585,119 @@ test('loadConfig: citationSemanticCheck rejects non-object value with a warning,
     await cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// widget section (RFC 0004 alignment PR — schema 留位, zero behavior change)
+// ---------------------------------------------------------------------------
+
+test('loadConfig: widget defaults — disabled, rate=60, no origins', async () => {
+  // RFC 0004 alignment (2026-05-24) lands the schema slot for the embedded
+  // Ask Widget. 0.4 alpha.0 wires the actual endpoint + TS types; for now
+  // flipping enabled has no runtime effect (no code path reads the section).
+  const { root, cleanup } = await withTmpProject(async () => {});
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.widget.enabled, false);
+    assert.equal(r.config.widget.rateLimitPerMinute, 60);
+    assert.deepEqual(r.config.widget.allowedOrigins, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: widget.enabled=true accepted without warning (alpha.x no-op flip)', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        widget: { enabled: true, allowedOrigins: ['https://app.example.com'] },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.widget.enabled, true);
+    assert.deepEqual(r.config.widget.allowedOrigins, ['https://app.example.com']);
+    assert.deepEqual(r.warnings, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: widget.rateLimitPerMinute rejects non-integer / out-of-range with a warning', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ widget: { rateLimitPerMinute: 0 } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.widget.rateLimitPerMinute, 60, 'falls back to default');
+    assert.ok(
+      r.warnings.some((w) => /widget\.rateLimitPerMinute/.test(w)),
+      `expected a rateLimitPerMinute warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: widget.allowedOrigins drops non-origin strings + counts rejections', async () => {
+  // Origin = scheme://host[:port], no path/query/fragment. Operators who
+  // paste a full URL by mistake get the bad ones dropped with a one-line
+  // warning summary.
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        widget: {
+          allowedOrigins: [
+            'https://app.example.com',                  // ✓
+            'http://localhost:3000',                     // ✓
+            'https://app.example.com/some/path',        // ✗ has path
+            'app.example.com',                          // ✗ no scheme
+            'ftp://files.example.com',                  // ✗ wrong scheme
+            42,                                          // ✗ non-string
+          ],
+        },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.deepEqual(r.config.widget.allowedOrigins, [
+      'https://app.example.com',
+      'http://localhost:3000',
+    ]);
+    assert.ok(
+      r.warnings.some((w) => /widget\.allowedOrigins/.test(w) && /4 non-string \/ non-origin/.test(w)),
+      `expected an allowedOrigins rejection summary; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: widget rejects non-object value with a warning, leaves siblings intact', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        widget: 42,
+        feedback: { enabled: true },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.widget.enabled, false, 'widget defaults preserved');
+    assert.equal(r.config.feedback.enabled, true, 'sibling section still merges');
+    assert.ok(
+      r.warnings.some((w) => /'widget' must be an object/.test(w)),
+      `expected a widget shape warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});

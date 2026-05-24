@@ -150,6 +150,26 @@ export type CitationSemanticCheckConfig = {
   mode: 'shadow' | 'enforce';
 };
 
+/**
+ * RFC 0004 — 嵌入式 Ask Widget。0.4 alignment PR (2026-05-24) 仅留 schema
+ * 位，三字段都不被代码路径消费；alpha.0 才接通 W1 协议规格 + TS 类型。
+ *
+ * - `enabled`: 整段功能开关。`false`（默认）= widget endpoint 不挂、CORS 不
+ *   动、运行时与 0.3.x 字节等价。
+ * - `rateLimitPerMinute`: 公开接入维度的 token bucket 上限（RFC §5 Q4）。
+ *   0.5+ Phase 1 才真消费。
+ * - `allowedOrigins`: 域名白名单，每条是合法 Origin 字符串（`https://app.example.com`
+ *   形态，不含路径）。空数组在 alpha.x 阶段意味"无任何外部源可用"；GA 后
+ *   作为强约束。
+ */
+export type WidgetConfig = {
+  enabled: boolean;
+  rateLimitPerMinute: number;
+  allowedOrigins: string[];
+};
+
+export const WIDGET_MAX_ALLOWED_ORIGINS = 50;
+
 export type PromptConfig = {
   /**
    * Optional project-specific assistant identity. This replaces only the
@@ -178,6 +198,7 @@ export type ResolvedConfig = {
   feedback: FeedbackConfig;
   multiTurn: MultiTurnConfig;
   citationSemanticCheck: CitationSemanticCheckConfig;
+  widget: WidgetConfig;
   prompt: PromptConfig;
 };
 
@@ -251,6 +272,13 @@ const DEFAULTS: ResolvedConfig = {
     // 校验逻辑；当前 flip 到 true 也不产生效果（pipeline 还没读这两个字段）。
     enabled: false,
     mode: 'shadow',
+  },
+  widget: {
+    // RFC 0004 alignment PR (2026-05-24): schema 留位，三字段都不被代码消费。
+    // alpha.0 才接通 W1 协议规格。flip enabled=true 在此阶段不产生任何行为。
+    enabled: false,
+    rateLimitPerMinute: 60,
+    allowedOrigins: [],
   },
   prompt: {
     assistantName: null,
@@ -370,6 +398,7 @@ function mergeWithDefaults(
     out.citationSemanticCheck,
     warnings,
   );
+  applyWidget(user.widget, out.widget, warnings);
   applyPrompt(user.prompt, out.prompt, warnings);
   return out;
 }
@@ -544,6 +573,85 @@ function applyCitationSemanticCheck(
     } else {
       warnings.push(
         `anydocs.ask.json: citationSemanticCheck.mode must be 'shadow' or 'enforce'; using default`,
+      );
+    }
+  }
+}
+
+/**
+ * RFC 0004 alignment — schema 留位。三字段都不被代码消费；本函数仅做形
+ * 状校验 + 默认填充。`allowedOrigins` 仅做"合法 URL origin 形态"的字符
+ * 串检查，不去重 / 不规范化大小写；GA 后会有更严格的规范化处理。
+ */
+function applyWidget(value: unknown, target: WidgetConfig, warnings: string[]): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'widget' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.enabled !== undefined) {
+    if (typeof obj.enabled === 'boolean') {
+      target.enabled = obj.enabled;
+    } else {
+      warnings.push(`anydocs.ask.json: widget.enabled must be a boolean; using default`);
+    }
+  }
+  if (obj.rateLimitPerMinute !== undefined) {
+    const v = obj.rateLimitPerMinute;
+    if (typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v) && v >= 1 && v <= 10_000) {
+      target.rateLimitPerMinute = v;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: widget.rateLimitPerMinute must be an integer in [1, 10000]; using default`,
+      );
+    }
+  }
+  if (obj.allowedOrigins !== undefined) {
+    if (!Array.isArray(obj.allowedOrigins)) {
+      warnings.push(`anydocs.ask.json: widget.allowedOrigins must be an array of strings; using default`);
+      return;
+    }
+    const origins: string[] = [];
+    let rejected = 0;
+    for (const item of obj.allowedOrigins) {
+      if (typeof item !== 'string') {
+        rejected++;
+        continue;
+      }
+      const trimmed = item.trim();
+      // Origin = scheme + "://" + host + optional ":port", no path.
+      // Cheap shape check: must parse as URL and the parsed string must
+      // equal `<origin>/` or `<origin>` — anything trailing means the
+      // operator probably included a path by mistake.
+      let ok = false;
+      try {
+        const u = new URL(trimmed);
+        if ((u.protocol === 'http:' || u.protocol === 'https:') && u.pathname === '/' && !u.search && !u.hash) {
+          ok = true;
+        }
+      } catch {
+        // not a valid URL
+      }
+      if (!ok) {
+        rejected++;
+        continue;
+      }
+      origins.push(trimmed);
+      if (origins.length === WIDGET_MAX_ALLOWED_ORIGINS) {
+        const remaining = obj.allowedOrigins.length - obj.allowedOrigins.indexOf(item) - 1;
+        if (remaining > 0) {
+          warnings.push(
+            `anydocs.ask.json: widget.allowedOrigins keeps only first ${WIDGET_MAX_ALLOWED_ORIGINS} item(s); ignored ${remaining} extra item(s)`,
+          );
+        }
+        break;
+      }
+    }
+    target.allowedOrigins = origins;
+    if (rejected > 0) {
+      warnings.push(
+        `anydocs.ask.json: widget.allowedOrigins ignored ${rejected} non-string / non-origin item(s)`,
       );
     }
   }

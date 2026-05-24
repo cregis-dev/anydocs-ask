@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+### 新增
+
+- **RFC 0004 alignment — 嵌入式 Ask Widget Accepted + schema 留位** —— RFC 0004 Status: Draft → Accepted（阻塞依赖 RFC 0003 / 0002 / 0005 全部已落 main）。`anydocs.ask.json` 增 `widget` 段，三字段默认 `{ enabled:false, rateLimitPerMinute:60, allowedOrigins:[] }`。alpha.0 alignment 范围：零代码消费、零行为变化；接口规格 + TS 类型 + endpoint 接通留给后续 alpha.0/alpha.1。`allowedOrigins` 做合法 Origin 形态校验（必须 `http://` 或 `https://`，不含路径/query/fragment），非法项静默丢弃 + 给一条 rejection 汇总 warning。`rateLimitPerMinute` 校验 `[1, 10000]` 整数。配套 5 个 config 测试覆盖。
+
 ### 修复
 
 - **F9 — Reader HISTORY 抽屉延迟刷新（0.2.0 dogfood follow-up）** —— 用户在第一次问答前打开 HISTORY 抽屉时显示 "No conversations yet"；答案落下后 `upsertCurrent` 写入 localStorage 但抽屉保留陈旧空态，必须关闭再打开才看到新会话。修法：`upsertCurrent` 在 localStorage 写入后检查 `histDrawer.hidden`，若抽屉处于打开状态立刻 `renderHistory()` 触发重渲染。`openHistory()` 仍然每次打开都读 localStorage 一次，不变。
