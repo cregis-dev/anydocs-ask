@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase } from '../src/db/index.ts';
 import {
+  runFeedbackDiagnose,
   runFeedbackExport,
   runFeedbackImport,
   runFeedbackStatus,
@@ -431,6 +432,121 @@ test('status works when feedback.enabled=false (read-only, no guard)', async () 
     }
     assert.match(cap.stdoutChunks.join(''), /enabled:\s+false/);
     assert.match(cap.stdoutChunks.join(''), /reviewable rows:\s+1/);
+  } finally {
+    await s.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// `feedback diagnose` (RFC 0006 alpha.0 stub)
+// ---------------------------------------------------------------------------
+
+test('diagnose stub: aplus disabled + no rows → "feature off" message, exit 0', async () => {
+  const s = await makeScenario({ feedbackEnabled: false });
+  try {
+    const cap = captureStd();
+    try {
+      const code = await runFeedbackDiagnose({
+        projectRoot: s.projectRoot,
+        stateRoot: s.stateRoot,
+      });
+      assert.equal(code, 0);
+    } finally {
+      cap.restore();
+    }
+    const out = cap.stdoutChunks.join('');
+    assert.match(out, /RFC 0006 alpha\.0 stub/);
+    assert.match(out, /aplus\.enabled:\s+false/);
+    assert.match(out, /threshold:\s+50/);
+    assert.match(out, /observation window:\s+28d/);
+    assert.match(out, /aplus\.enabled is false/);
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test('diagnose stub: data insufficient (< threshold) → guided message + exit 0', async () => {
+  const s = await makeScenario({ feedbackEnabled: true });
+  try {
+    // Seed 5 β feedback rows; threshold default 50, far short.
+    seedFeedback(s.stateRoot, [
+      { answer_id: 'a1', question: 'q1', generated: 'g', rating: -1 },
+      { answer_id: 'a2', question: 'q2', generated: 'g', rating: -1 },
+      { answer_id: 'a3', question: 'q3', generated: 'g', rating: -1 },
+      { answer_id: 'a4', question: 'q4', generated: 'g', rating: -1 },
+      { answer_id: 'a5', question: 'q5', generated: 'g', rating: -1 },
+    ]);
+    // aplus is opt-in: simulate operator enabled flip without threshold met.
+    await fs.writeFile(
+      join(s.projectRoot, 'anydocs.ask.json'),
+      JSON.stringify({ feedback: { enabled: true }, aplus: { enabled: true } }),
+    );
+    const cap = captureStd();
+    try {
+      const code = await runFeedbackDiagnose({
+        projectRoot: s.projectRoot,
+        stateRoot: s.stateRoot,
+      });
+      assert.equal(code, 0);
+    } finally {
+      cap.restore();
+    }
+    const out = cap.stdoutChunks.join('');
+    assert.match(out, /candidate β feedback rows:\s+5/);
+    assert.match(out, /threshold met:\s+no/);
+    assert.match(out, /data insufficient: 5 of 50/);
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test('diagnose stub: --threshold override + --shadow flag bypasses gate', async () => {
+  const s = await makeScenario({ feedbackEnabled: true });
+  try {
+    seedFeedback(s.stateRoot, [
+      { answer_id: 'a1', question: 'q1', generated: 'g', rating: -1 },
+      { answer_id: 'a2', question: 'q2', generated: 'g', rating: -1 },
+    ]);
+    const cap = captureStd();
+    try {
+      const code = await runFeedbackDiagnose({
+        projectRoot: s.projectRoot,
+        stateRoot: s.stateRoot,
+        threshold: 2,
+        shadow: true,
+      });
+      assert.equal(code, 0);
+    } finally {
+      cap.restore();
+    }
+    const out = cap.stdoutChunks.join('');
+    // With shadow + threshold=2 + actual rows=2, we should land in the
+    // "ready to diagnose" branch (stub still writes nothing).
+    assert.match(out, /candidate β feedback rows:\s+2/);
+    assert.match(out, /threshold met:\s+yes/);
+    assert.match(out, /shadow flag:\s+true/);
+    assert.match(out, /would diagnose 2 candidate rows/);
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test('diagnose stub: invalid observation window → 2', async () => {
+  const s = await makeScenario({ feedbackEnabled: false });
+  try {
+    const cap = captureStd();
+    let code: number;
+    try {
+      code = await runFeedbackDiagnose({
+        projectRoot: s.projectRoot,
+        stateRoot: s.stateRoot,
+        observationWindow: 'four-weeks',
+      });
+    } finally {
+      cap.restore();
+    }
+    assert.equal(code, 2);
+    assert.match(cap.stderrChunks.join(''), /invalid observationWindow/);
   } finally {
     await s.cleanup();
   }
