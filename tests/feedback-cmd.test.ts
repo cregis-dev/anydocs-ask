@@ -438,10 +438,38 @@ test('status works when feedback.enabled=false (read-only, no guard)', async () 
 });
 
 // ---------------------------------------------------------------------------
-// `feedback diagnose` (RFC 0006 alpha.0 stub)
+// `feedback diagnose` (RFC 0006 alpha.2 real pipeline)
 // ---------------------------------------------------------------------------
 
-test('diagnose stub: aplus disabled + no rows → "feature off" message, exit 0', async () => {
+import { MockLLM } from '../src/llm/mock.ts';
+import { MockEmbedder } from '../src/embedding/mock.ts';
+
+function mockSuggestLLM(): MockLLM {
+  return new MockLLM({
+    model: 'mock-diagnose-llm',
+    responder: (input) => {
+      // Pull center_question out of the user prompt for stable inline test.
+      let center = 'unknown';
+      try {
+        const parsed = JSON.parse(input.userPrompt) as { center_question?: string };
+        if (typeof parsed.center_question === 'string') center = parsed.center_question;
+      } catch {
+        /* ignore */
+      }
+      return [
+        `# 建议：在 (未指定) 下新增 "${center}" 章节`,
+        `## 当前用户的痛点（脱敏抽样）`,
+        `- ${center}`,
+        `## 建议覆盖的事实点`,
+        `- (mock 建议生成 — 见 cluster JSON trace)`,
+        `## 建议挂载位置`,
+        `(determine mount point manually)`,
+      ].join('\n');
+    },
+  });
+}
+
+test('diagnose: aplus disabled + no rows → "feature off" message, exit 0', async () => {
   const s = await makeScenario({ feedbackEnabled: false });
   try {
     const cap = captureStd();
@@ -449,13 +477,14 @@ test('diagnose stub: aplus disabled + no rows → "feature off" message, exit 0'
       const code = await runFeedbackDiagnose({
         projectRoot: s.projectRoot,
         stateRoot: s.stateRoot,
+        llm: mockSuggestLLM(),
+        embedder: new MockEmbedder(),
       });
       assert.equal(code, 0);
     } finally {
       cap.restore();
     }
     const out = cap.stdoutChunks.join('');
-    assert.match(out, /RFC 0006 alpha\.0 stub/);
     assert.match(out, /aplus\.enabled:\s+false/);
     assert.match(out, /threshold:\s+50/);
     assert.match(out, /observation window:\s+28d/);
@@ -465,10 +494,9 @@ test('diagnose stub: aplus disabled + no rows → "feature off" message, exit 0'
   }
 });
 
-test('diagnose stub: data insufficient (< threshold) → guided message + exit 0', async () => {
+test('diagnose: data insufficient (< threshold) → guided message + exit 0', async () => {
   const s = await makeScenario({ feedbackEnabled: true });
   try {
-    // Seed 5 β feedback rows; threshold default 50, far short.
     seedFeedback(s.stateRoot, [
       { answer_id: 'a1', question: 'q1', generated: 'g', rating: -1 },
       { answer_id: 'a2', question: 'q2', generated: 'g', rating: -1 },
@@ -476,7 +504,6 @@ test('diagnose stub: data insufficient (< threshold) → guided message + exit 0
       { answer_id: 'a4', question: 'q4', generated: 'g', rating: -1 },
       { answer_id: 'a5', question: 'q5', generated: 'g', rating: -1 },
     ]);
-    // aplus is opt-in: simulate operator enabled flip without threshold met.
     await fs.writeFile(
       join(s.projectRoot, 'anydocs.ask.json'),
       JSON.stringify({ feedback: { enabled: true }, aplus: { enabled: true } }),
@@ -486,6 +513,8 @@ test('diagnose stub: data insufficient (< threshold) → guided message + exit 0
       const code = await runFeedbackDiagnose({
         projectRoot: s.projectRoot,
         stateRoot: s.stateRoot,
+        llm: mockSuggestLLM(),
+        embedder: new MockEmbedder(),
       });
       assert.equal(code, 0);
     } finally {
@@ -493,20 +522,33 @@ test('diagnose stub: data insufficient (< threshold) → guided message + exit 0
     }
     const out = cap.stdoutChunks.join('');
     assert.match(out, /candidate β feedback rows:\s+5/);
-    assert.match(out, /threshold met:\s+no/);
     assert.match(out, /data insufficient: 5 of 50/);
   } finally {
     await s.cleanup();
   }
 });
 
-test('diagnose stub: --threshold override + --shadow flag bypasses gate', async () => {
+test('diagnose: --threshold + --shadow → writes suggestions/.shadow/cluster_*.{md,json}', async () => {
+  // Real pipeline: 2 β rows with identical-ish text → MockEmbedder gives
+  // deterministic vectors per text, so they'll cluster (or not) based on
+  // the mock vectors. We pin threshold low (2) and use a tiny similarity
+  // override via config write to ensure cluster forms.
   const s = await makeScenario({ feedbackEnabled: true });
   try {
     seedFeedback(s.stateRoot, [
-      { answer_id: 'a1', question: 'q1', generated: 'g', rating: -1 },
-      { answer_id: 'a2', question: 'q2', generated: 'g', rating: -1 },
+      { answer_id: 'a1', question: 'hermes 怎么配置 model provider？', generated: 'g', rating: -1 },
+      { answer_id: 'a2', question: 'hermes 配置 model provider', generated: 'g', rating: -1 },
     ]);
+    await fs.writeFile(
+      join(s.projectRoot, 'anydocs.ask.json'),
+      JSON.stringify({
+        feedback: { enabled: true },
+        // Pin similarity threshold low so MockEmbedder's hash-based vectors
+        // get unioned even though the two strings differ. The real bge-m3
+        // would group them at the default 0.65.
+        aplus: { enabled: true, embedSimilarityThreshold: 0.001 },
+      }),
+    );
     const cap = captureStd();
     try {
       const code = await runFeedbackDiagnose({
@@ -514,24 +556,83 @@ test('diagnose stub: --threshold override + --shadow flag bypasses gate', async 
         stateRoot: s.stateRoot,
         threshold: 2,
         shadow: true,
+        llm: mockSuggestLLM(),
+        embedder: new MockEmbedder(),
       });
       assert.equal(code, 0);
     } finally {
       cap.restore();
     }
     const out = cap.stdoutChunks.join('');
-    // With shadow + threshold=2 + actual rows=2, we should land in the
-    // "ready to diagnose" branch (stub still writes nothing).
     assert.match(out, /candidate β feedback rows:\s+2/);
-    assert.match(out, /threshold met:\s+yes/);
-    assert.match(out, /shadow flag:\s+true/);
-    assert.match(out, /would diagnose 2 candidate rows/);
+    assert.match(out, /clusters formed:\s+1/);
+    assert.match(out, /suggestions written:\s+1/);
+    assert.match(out, /shadow/, 'output should mention shadow output dir');
+    // Files actually landed under .shadow/.
+    const shadowDir = join(s.stateRoot, 'feedback', 'suggestions', '.shadow');
+    const files = readdirSync(shadowDir);
+    const mdFile = files.find((f) => f.endsWith('.md'));
+    const jsonFile = files.find((f) => f.endsWith('.json'));
+    assert.ok(mdFile, `expected a cluster_*.md under ${shadowDir}; got ${files.join(', ')}`);
+    assert.ok(jsonFile, `expected a cluster_*.json under ${shadowDir}`);
+    const md = readFileSync(join(shadowDir, mdFile!), 'utf8');
+    assert.match(md, /cluster_id: c_/);
+    assert.match(md, /model: mock-diagnose-llm/);
+    assert.match(md, /shadow: true/);
+    assert.match(md, /建议：/);
+    const trace = JSON.parse(readFileSync(join(shadowDir, jsonFile!), 'utf8')) as {
+      cluster_id: string;
+      size: number;
+      suggestion: { model: string };
+    };
+    assert.equal(trace.size, 2);
+    assert.equal(trace.suggestion.model, 'mock-diagnose-llm');
   } finally {
     await s.cleanup();
   }
 });
 
-test('diagnose stub: invalid observation window → 2', async () => {
+test('diagnose: --dry-run with threshold met → no files written but output paths reported', async () => {
+  const s = await makeScenario({ feedbackEnabled: true });
+  try {
+    seedFeedback(s.stateRoot, [
+      { answer_id: 'a1', question: 'q-alpha', generated: 'g', rating: -1 },
+      { answer_id: 'a2', question: 'q-alpha', generated: 'g', rating: -1 },
+    ]);
+    await fs.writeFile(
+      join(s.projectRoot, 'anydocs.ask.json'),
+      JSON.stringify({
+        feedback: { enabled: true },
+        aplus: { enabled: true, embedSimilarityThreshold: 0.001 },
+      }),
+    );
+    const cap = captureStd();
+    try {
+      const code = await runFeedbackDiagnose({
+        projectRoot: s.projectRoot,
+        stateRoot: s.stateRoot,
+        threshold: 2,
+        dryRun: true,
+        llm: mockSuggestLLM(),
+        embedder: new MockEmbedder(),
+      });
+      assert.equal(code, 0);
+    } finally {
+      cap.restore();
+    }
+    // No actual files (dry-run).
+    const outDir = join(s.stateRoot, 'feedback', 'suggestions');
+    assert.equal(
+      existsSync(join(outDir, 'cluster_dummy.md')),
+      false,
+      'sanity: no leftover cluster files',
+    );
+  } finally {
+    await s.cleanup();
+  }
+});
+
+test('diagnose: invalid observation window → 2', async () => {
   const s = await makeScenario({ feedbackEnabled: false });
   try {
     const cap = captureStd();
@@ -541,6 +642,8 @@ test('diagnose stub: invalid observation window → 2', async () => {
         projectRoot: s.projectRoot,
         stateRoot: s.stateRoot,
         observationWindow: 'four-weeks',
+        llm: mockSuggestLLM(),
+        embedder: new MockEmbedder(),
       });
     } finally {
       cap.restore();
