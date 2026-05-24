@@ -106,17 +106,29 @@ V5 Studio Feedback tab 会消费同一条 tail（在 Studio 看 widget 来源的
 
 无 P0/P1。alpha.2b 的 X-Project-Key bug 已经在落 PR 时同步修了。chat-page 第一次问答的 5-cit 答案的 verdicts 在本次 dogfood 截止窗口内还没完成（5 cit batch 一次 LLM 调用 + 网关延迟），不算瑕疵，是 shadow 模式预期行为。
 
-### F10【UX, P3】"?" bubble 视觉粗糙
+### F10【UX, P3】"?" bubble 视觉粗糙 ✅ 已修（alpha.3，2026-05-24）
 
 当前 "?" bubble 是黑底白字 56×56 px 圆形，文字 22px 不带 icon。能用，但跟 host 页面风格冲撞概率高。**修法（alpha.3 候选）**：换成 SVG icon (e.g. chat bubble)，theme 接口接通 RFC §4.2 的 \`themeBaseColor\` token 让客户改主色。
 
-### F11【UX, P3】iframe history restore 缺 β 状态
+**alpha.3 真机验**：[img/widget-alpha3-01-bubble-themed.png](img/widget-alpha3-01-bubble-themed.png) bubble 已换为 SVG 对话气泡 icon + 紫色背景 (`#7b3fa4`)，host SDK 通过 URL param 把主色透传到 iframe，挂成 CSS `--accent`；DOM 直查 `getComputedStyle(documentElement).getPropertyValue('--accent') === '#7b3fa4'` 确认。
+
+### F11【UX, P3】iframe history restore 缺 β 状态 ✅ 已修（alpha.3，2026-05-24）
 
 iframe 重载时 `loadStored()` 还原历史 turn，但 β 反馈按钮重新挂上去全是未提交状态（即便 `turns[i].fb` 在 localStorage 里）。**修法**：appendFeedbackBar 接受 `priorFb` 参数，渲染时若有就 lock + 高亮。
 
-### F12【UX, P3】iframe 内点 citation link 还没有 doc-deeplink
+**alpha.3 真机验**：reload 页面后历史 turn 渲染回原状，[img/widget-alpha3-03-locked-feedback.png](img/widget-alpha3-03-locked-feedback.png) 看到 👍 按钮已染绿 + disabled。DOM 直查：
+```
+{"text":"👍 helpful","disabled":true,"classes":"sel-up"},
+{"text":"👎 not helpful","disabled":true,"classes":""},
+{"text":"answered wrong…","disabled":true,"classes":""}
+```
+restore 的 `priorFb={rating:1}` 被正确装回去。
+
+### F12【UX, P3】iframe 内点 citation link 还没有 doc-deeplink ✅ 已修（alpha.3，2026-05-24）
 
 cit link 直接打开 ask server 的 `/en/<page-id>#<anchor>` URL。这是 anydocs reader 自带的 doc 站，本地启动时是 404（reader 站没起）。在 dogfood 场景下展示为黑色失败链接没意义。**修法**：alpha.3 给 host SDK 接 `docsBaseUrl` init option，让 client 显式指定客户 doc 站基础地址；如果未指定，cit link 显示为纯文本 + 工具提示。
+
+**alpha.3 真机验**：host SDK init 传 `docsBaseUrl: 'http://127.0.0.1:9001'`，DOM 直查第一个 citation link `href === 'http://127.0.0.1:9001/en/installation#step-9-configure-your-provider'`（之前是 `http://127.0.0.1:3201/en/...` 命中 ask server）。`resolveCitationHref()` 三分支齐备：绝对 URL / 相对路径+base / 相对路径无 base → 纯文本 + tooltip。
 
 ---
 
@@ -131,9 +143,9 @@ cit link 直接打开 ask server 的 `/en/<page-id>#<anchor>` URL。这是 anydo
 
 ## 行动建议
 
-- ✅ alpha.0 → alpha.2b 五个 PR 已全部合 main，可演示
-- F10 / F11 / F12 进 alpha.3 排队
+- ✅ alpha.0 → alpha.3 六个 PR 已全部合 main，alpha.3 polish 也已真机验
+- ✅ F10 / F11 / F12 全部修+验
 - 下一步候选：
-  1. **0.3.0 release**：把 main 上累计的 RFC 0005 alpha.2 全链 + RFC 0004 widget MVP alpha.2b 打 minor 发；design partner 拉到自带 widget
+  1. **0.3.0 release**：把 main 上累计的 RFC 0005 alpha.2 全链 + RFC 0004 widget alpha.3 打 minor 发；design partner 拉到自带 widget
   2. **W5 SaaS design partner 联调**：找一家做嵌入；RFC §5 Q6 的目标
-  3. **alpha.3 polish**：解 F10-F12 + 接 docsBaseUrl + theme tokens
+  3. 远期 0.4.1+ 候选：cross-origin direct SDK mode（不走 iframe）+ shadow DOM 形态（RFC §4.2 Q1 留口）
