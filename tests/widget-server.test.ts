@@ -121,7 +121,7 @@ test('GET /widget/v1.js — enabled returns JS bundle with protocol stamping', a
   }
 });
 
-test('GET /widget/chat — enabled returns HTML page wired for postMessage + /v1/ask', async () => {
+test('GET /widget/chat — enabled returns HTML page with SSE + β feedback + history (alpha.2b)', async () => {
   const { runtime, cleanup } = await setup(true);
   try {
     const app = createApp({ runtime });
@@ -131,9 +131,24 @@ test('GET /widget/chat — enabled returns HTML page wired for postMessage + /v1
     // Chat page UI scaffolding.
     assert.match(body, /<textarea id="q"/);
     assert.match(body, /<button[^>]+id="send"/);
-    // Sends POST /v1/ask with X-Project-Key header.
-    assert.match(body, /'\/v1\/ask'/);
-    assert.match(body, /'X-Project-Key'/);
+    // alpha.2b: streams from /v1/ask/stream (NOT /v1/ask non-stream).
+    assert.match(body, /'\/v1\/ask\/stream'/);
+    // alpha.2b: NOT sending X-Project-Key (gate is for direct cross-origin
+    // mode; iframe self-traffic is same-origin and would 403 otherwise).
+    assert.doesNotMatch(body, /'X-Project-Key'/);
+    // SSE frame parser present.
+    assert.match(body, /function parseSseFrame/);
+    assert.match(body, /event === 'delta'/);
+    assert.match(body, /event === 'result'/);
+    // β feedback bar rendered + POSTs to /v1/ask/feedback.
+    assert.match(body, /function appendFeedbackBar/);
+    assert.match(body, /'\/v1\/ask\/feedback'/);
+    assert.match(body, /👍 helpful/);
+    assert.match(body, /👎 not helpful/);
+    assert.match(body, /answered wrong/);
+    // History persistence uses widget-namespaced key (NOT Reader's namespace).
+    assert.match(body, /anydocs-ask:widget:history:v1/);
+    assert.doesNotMatch(body, /'anydocs-ask:history:v1'/); // Reader key
     // Emits envelope-stamped messages back to parent.
     assert.match(body, /protocol: PROTOCOL, version: VERSION/);
     // Reads URL params (projectKey + contextSources).
