@@ -44,3 +44,13 @@ test('renderAskPage: cite-slug still emits the full in_page_path for deeplink an
   assert.match(body, /slug\.className = 'cite-slug'/);
   assert.match(body, /slugText \+= ' · ' \+ c\.in_page_path/);
 });
+
+test('renderAskPage: upsertCurrent re-renders HISTORY drawer when open (F9 dogfood 2026-05-23)', () => {
+  // dogfood F9: user opens HISTORY drawer BEFORE the first answer lands.
+  // Drawer shows "No conversations yet". Answer arrives → upsertCurrent
+  // writes localStorage. Pre-fix: drawer keeps the stale empty render
+  // because nothing triggers a re-render until the user re-opens. Fix:
+  // upsertCurrent calls renderHistory() when histDrawer is visible.
+  const body = html();
+  assert.match(body, /if \(histDrawer && !histDrawer\.hidden\) renderHistory\(\)/);
+});

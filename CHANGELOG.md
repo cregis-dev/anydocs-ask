@@ -6,6 +6,7 @@
 
 ### 修复
 
+- **F9 — Reader HISTORY 抽屉延迟刷新（0.2.0 dogfood follow-up）** —— 用户在第一次问答前打开 HISTORY 抽屉时显示 "No conversations yet"；答案落下后 `upsertCurrent` 写入 localStorage 但抽屉保留陈旧空态，必须关闭再打开才看到新会话。修法：`upsertCurrent` 在 localStorage 写入后检查 `histDrawer.hidden`，若抽屉处于打开状态立刻 `renderHistory()` 触发重渲染。`openHistory()` 仍然每次打开都读 localStorage 一次，不变。
 - **F7 — `validateCitations` 入口处按 `citationId` 去重（dogfood 2026-05-23 follow-up）** —— `extractClaimChunkPairs` 给同一答案里多次出现的 `[cit_N]` 标记各产一 pair（同 chunk、不同 claim 句）。alpha.1 这些 pair 会被分布到多批 LLM 调用：(1) 白烧 token，(2) 跨批共有 `cit_id` 时输出含重复 verdict 行，(3) V5 reader `applyTail` 按 last-write-wins 折叠，verdict 随机被选。修后：入口前 dedupe（first-write-wins，与既有 within-batch `seen` 语义一致），LLM 看到的每 batch 都唯一 `cit_id`、tail 行无重复。Token 节省与 claim 数成正比。
 
 ### 新增

@@ -972,6 +972,12 @@ function upsertCurrent() {
     snapshot: turns,
   });
   saveHistory(list);
+  // F9 (dogfood 2026-05-23) — if the HISTORY drawer is already open when
+  // we land a turn, re-render so the user sees the new conversation appear
+  // instead of the stale "No conversations yet" empty state. openHistory()
+  // already reads fresh on each open, so the bug only bites the
+  // "drawer-open-then-first-answer" sequence.
+  if (histDrawer && !histDrawer.hidden) renderHistory();
 }
 function deleteLocal(localId) {
   saveHistory(loadHistory().filter((c) => c.localId !== localId));
