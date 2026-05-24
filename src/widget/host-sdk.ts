@@ -72,6 +72,17 @@ const WIDGET_HOST_JS = `/* anydocs-ask widget host SDK — RFC 0004 W3 MVP (alph
     if (Array.isArray(options.contextSources) && options.contextSources.length > 0) {
       params.set('contextSources', options.contextSources.join(','));
     }
+    // F12 (dogfood 2026-05-24) — propagate docsBaseUrl so the chat page can
+    // resolve relative citation paths to the customer's doc site instead of
+    // the ask server. Empty string is intentional opt-out (show plain text).
+    if (typeof options.docsBaseUrl === 'string' && options.docsBaseUrl.length > 0) {
+      params.set('docsBaseUrl', options.docsBaseUrl);
+    }
+    // F10 — let the iframe pick up theme.baseColor too (renders the send
+    // button + verdict accents in the host's brand color).
+    if (options.theme && typeof options.theme.baseColor === 'string' && options.theme.baseColor.length > 0) {
+      params.set('themeBaseColor', options.theme.baseColor);
+    }
     return baseUrl + '/widget/chat?' + params.toString();
   }
 
@@ -93,7 +104,7 @@ const WIDGET_HOST_JS = `/* anydocs-ask widget host SDK — RFC 0004 W3 MVP (alph
     el.style.top = pos === 'top-right' ? '16px' : '';
   }
 
-  function makeBubble(onClick) {
+  function makeBubble(onClick, themeBaseColor) {
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.setAttribute('aria-label', 'Open ask widget');
@@ -106,15 +117,27 @@ const WIDGET_HOST_JS = `/* anydocs-ask widget host SDK — RFC 0004 W3 MVP (alph
     btn.style.height = '56px';
     btn.style.borderRadius = '50%';
     btn.style.border = '0';
-    btn.style.background = '#1a1a17';
+    // F10 — theme.baseColor flows in here; default = ink black.
+    btn.style.background = (themeBaseColor && typeof themeBaseColor === 'string')
+      ? themeBaseColor
+      : '#1a1a17';
     btn.style.color = '#fff';
     btn.style.cursor = 'pointer';
     btn.style.boxShadow = '0 6px 18px rgba(0,0,0,0.25)';
-    btn.style.fontSize = '22px';
-    btn.style.lineHeight = '56px';
-    btn.style.textAlign = 'center';
     btn.style.padding = '0';
-    btn.textContent = '?';
+    btn.style.display = 'flex';
+    btn.style.alignItems = 'center';
+    btn.style.justifyContent = 'center';
+    btn.style.transition = 'transform 0.15s ease';
+    btn.addEventListener('mouseenter', function () { btn.style.transform = 'scale(1.06)'; });
+    btn.addEventListener('mouseleave', function () { btn.style.transform = 'scale(1)'; });
+    // F10 — SVG chat-bubble icon. Inline so the bundle stays one-file.
+    btn.innerHTML =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24"' +
+      ' fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"' +
+      ' stroke-linejoin="round" aria-hidden="true">' +
+        '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>' +
+      '</svg>';
     btn.addEventListener('click', onClick);
     return btn;
   }
@@ -143,9 +166,12 @@ const WIDGET_HOST_JS = `/* anydocs-ask widget host SDK — RFC 0004 W3 MVP (alph
     iframe.style.display = 'none';
     applyPositionStyles(iframe, options.position);
 
+    var themeBaseColor = (options.theme && typeof options.theme.baseColor === 'string')
+      ? options.theme.baseColor
+      : null;
     var bubble = options.position === 'inline' ? null : makeBubble(function () {
       handle.open();
-    });
+    }, themeBaseColor);
 
     var mountTarget = document.body;
     if (options.position === 'inline') {

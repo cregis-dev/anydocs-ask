@@ -63,6 +63,18 @@ export type WidgetInitOptions = {
   baseUrl?: string;
 
   /**
+   * 客户文档站点的 base URL（不是 ask 服务）。`/<lang>/<page-id>` 这类
+   * citation 相对路径会被 widget 拼到这个 base 上点开。null/未设时，
+   * citation link 渲染为纯文本（避免点开本地 404）。alpha.3+ 才接通；
+   * alpha.2b 之前 citation 直接打开 ask server 的 reader 路径（自部署
+   * 同源时凑合，跨 host SaaS 场景下没意义）。
+   *
+   * 例：客户文档站在 `https://docs.example.com`，传 docsBaseUrl 后
+   * citation 链接打到 `https://docs.example.com/en/quickstart`。
+   */
+  docsBaseUrl?: string;
+
+  /**
    * Widget 浮层位置。`inline` = 把 Widget 渲染到 host 提供的 mount 节点
    * 里（host 必须提供 `mountSelector`）；其余三个 = 视口浮层。
    */

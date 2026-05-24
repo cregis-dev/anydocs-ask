@@ -116,6 +116,13 @@ test('GET /widget/v1.js — enabled returns JS bundle with protocol stamping', a
     // Bubble + iframe styling must be inlined (no external CSS needed).
     assert.match(body, /data-anydocs-widget-bubble/);
     assert.match(body, /data-anydocs-widget-frame/);
+    // F10 (alpha.3) — bubble carries the SVG chat icon (not the old "?")
+    // and respects host theme.baseColor.
+    assert.match(body, /<svg[^>]*viewBox="0 0 24 24"/);
+    assert.match(body, /themeBaseColor/);
+    // F12 (alpha.3) — docsBaseUrl propagates to the iframe URL.
+    assert.match(body, /params\.set\('docsBaseUrl'/);
+    assert.match(body, /params\.set\('themeBaseColor'/);
   } finally {
     await cleanup();
   }
@@ -154,6 +161,16 @@ test('GET /widget/chat — enabled returns HTML page with SSE + β feedback + hi
     // Reads URL params (projectKey + contextSources).
     assert.match(body, /params\.get\('projectKey'\)/);
     assert.match(body, /params\.get\('contextSources'\)/);
+    // F12 (alpha.3) — docsBaseUrl resolution helper present + reads URL param.
+    assert.match(body, /params\.get\('docsBaseUrl'\)/);
+    assert.match(body, /function resolveCitationHref/);
+    // F11 (alpha.3) — appendFeedbackBar accepts a priorFb argument and the
+    // restore loop threads it in for stored turns.
+    assert.match(body, /function appendFeedbackBar\(turnIdx, aEl, answerId, priorFb\)/);
+    assert.match(body, /appendFeedbackBar\(restoredIdx, turn\.aEl, t\.answerId, t\.fb \|\| null\)/);
+    // F10 (alpha.3) — theme color applied as CSS variable.
+    assert.match(body, /params\.get\('themeBaseColor'\)/);
+    assert.match(body, /setProperty\('--accent'/);
   } finally {
     await cleanup();
   }
