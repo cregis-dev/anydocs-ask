@@ -6,6 +6,7 @@
 
 ### 新增
 
+- **RFC 0006 0.4.0-alpha.1 — A+ 聚类 pure 模块 + simulator** —— `src/feedback/diagnose-cluster.ts` 落 threshold-based union-find on bge-m3 cosine（RFC §4.2 选型 + 0.65 默认阈值）。`clusterFeedback(rows, options?)` 输入预备好的嵌入向量行（β 显式负反馈过滤是调用方责任），输出 `FeedbackCluster[]`（cluster_id sha256-12 hex / members / center_question / size / density）。`cosineSimilarity()` 兼容非归一化输入。`tests/feedback-diagnose-cluster.test.ts` 用 `synthesize60()` 模拟 4 主题 × 15 query × 32 维 orthogonal-anchor + 0.85 topicSignal + 0.15 噪声 → 默认阈值下精确 4 簇、size 13-15、cross-topic 0 边。17 个新测试覆盖：cosineSimilarity 4 sanity / cluster 空/单/孤立行 / 60 行模拟 / threshold 极值 (0→1 cluster of 60, 1→0 clusters) / cluster_id 跨次稳定 + 输入置换不变 / center 总属簇内 / minClusterSize 过滤 / 排序 size DESC + density DESC / density 反映 spread。**仍是 alpha.1**：纯函数，不读 DB、不调 LLM、不写 disk；CLI alpha.2 才接通 pipeline。
 - **RFC 0006 alignment — 失败查询诊断（A+）Accepted + schema 留位 + CLI `feedback diagnose` stub** —— [RFC 0006](docs/rfcs/0006-failure-query-diagnostic-aplus.md) Status: Draft → Accepted。`anydocs.ask.json` 增 `aplus.{enabled:false, threshold:50, observationWindow:'28d', embedSimilarityThreshold:0.65}` 段（PRD §10.3 双门槛 + RFC §4.2 聚类阈值）。CLI 注册 `feedback diagnose <projectRoot> [--threshold N] [--observation-window 28d] [--shadow] [--dry-run]` stub —— 读 `feedback` 表的 β 显式负反馈行计数 + 与配置门槛对比 + 友好输出 "feature off / data insufficient / would diagnose N rows"；**不读 embedding、不跑聚类、不写 `suggestions/`**（那些都进 alpha.1）。设计契约：design partner 可以今天就把 CLI 接到 cron 或 Studio 按钮，alpha.1+ 静默升级。10 个新测试覆盖 config schema 5 字段 + CLI stub 4 状态 + duration parser。
 
 ## 0.3.0 — 2026-05-24
