@@ -146,6 +146,16 @@ html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: 
   var params = new URLSearchParams(location.search);
   var projectKey = params.get('projectKey') || '';
   var contextSources = (params.get('contextSources') || 'url,title').split(',').filter(Boolean);
+  // F12 (alpha.3) — host-provided customer doc-site base. Falls back to
+  // empty string, in which case relative citation paths render as plain
+  // text (avoids opening ask server's reader as a deeplink).
+  var docsBaseUrl = (params.get('docsBaseUrl') || '').replace(/\\/+$/, '');
+  // F10 (alpha.3) — theme color from host init. Applied as CSS var on send
+  // button + verdict accent.
+  var themeBaseColor = params.get('themeBaseColor') || '';
+  if (themeBaseColor) {
+    try { document.documentElement.style.setProperty('--accent', themeBaseColor); } catch (_e) {}
+  }
 
   var hostContext = null; // last setContext payload from parent
   var sessionId = null;
@@ -205,6 +215,20 @@ html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: 
     return { wrap: wrap, aEl: aEl };
   }
 
+  function resolveCitationHref(rawUrl) {
+    // F12 (alpha.3) — figure out where a citation actually opens.
+    //   - absolute URL (scheme://...)        → use as-is
+    //   - relative path with docsBaseUrl set → prefix with docsBaseUrl
+    //   - relative path without docsBaseUrl  → null (render as plain text)
+    if (typeof rawUrl !== 'string' || rawUrl.length === 0) return null;
+    if (/^https?:\\/\\//i.test(rawUrl)) return rawUrl;
+    if (docsBaseUrl) {
+      // Ensure single slash join.
+      return docsBaseUrl + (rawUrl.charAt(0) === '/' ? rawUrl : '/' + rawUrl);
+    }
+    return null;
+  }
+
   function appendCitations(aEl, citations) {
     if (!Array.isArray(citations) || citations.length === 0) return;
     var cit = document.createElement('div');
@@ -213,30 +237,41 @@ html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: 
       var line = document.createElement('div');
       var n = i + 1;
       var title = c.title || c.page_id || '';
-      if (c.url) {
+      var href = resolveCitationHref(c.url);
+      if (href) {
         var a = document.createElement('a');
-        a.href = c.url;
+        a.href = href;
         a.target = '_blank';
         a.rel = 'noopener';
         a.textContent = n + '. ' + title;
         a.addEventListener('click', function (e) {
           e.preventDefault();
-          post({ kind: 'navigate', href: c.url, target: '_blank' });
+          post({ kind: 'navigate', href: href, target: '_blank' });
         });
         line.appendChild(a);
       } else {
+        // F12 — no docsBaseUrl + relative path = plain text with tooltip
+        // so operators can see what would have linked.
         line.textContent = n + '. ' + title;
+        if (typeof c.url === 'string' && c.url.length > 0) {
+          line.title = c.url;
+        }
       }
       cit.appendChild(line);
     });
     aEl.appendChild(cit);
   }
 
-  function appendFeedbackBar(turnIdx, aEl, answerId) {
+  function appendFeedbackBar(turnIdx, aEl, answerId, priorFb) {
     // alpha.2b β feedback. Three actions: 👍 / 👎 / 答错了 (correction).
     // POST /v1/ask/feedback with rating + optional correction; once
     // submitted the buttons are sticky (re-click does nothing — alpha.2b
     // doesn't yet support "change my mind").
+    //
+    // F11 (alpha.3) — priorFb carries a stored {rating, correction} from
+    // a restored history turn so we don't show "fresh" buttons that
+    // re-prompt the user. Buttons render locked + tinted to match the
+    // earlier submission.
     var bar = document.createElement('div');
     bar.className = 'fb';
     var up = document.createElement('button');
@@ -256,6 +291,24 @@ html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: 
     function lockButtons() {
       locked = true;
       up.disabled = true; down.disabled = true; fix.disabled = true;
+    }
+    if (priorFb && typeof priorFb === 'object') {
+      if (typeof priorFb.rating === 'number' && priorFb.rating > 0) up.classList.add('sel-up');
+      if (typeof priorFb.rating === 'number' && priorFb.rating < 0) down.classList.add('sel-down');
+      lockButtons();
+      // Show the previous correction (if any) inline + read-only so the
+      // user can see what they had typed.
+      if (typeof priorFb.correction === 'string' && priorFb.correction.length > 0) {
+        var prev = document.createElement('div');
+        prev.className = 'corr';
+        prev.style.opacity = '0.7';
+        var prevInput = document.createElement('input');
+        prevInput.type = 'text';
+        prevInput.value = priorFb.correction;
+        prevInput.disabled = true;
+        prev.appendChild(prevInput);
+        bar.appendChild(prev);
+      }
     }
     function submit(rating, correction) {
       if (locked) return;
@@ -466,7 +519,13 @@ html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: 
         turn.aEl.classList.remove('loading');
         turn.aEl.textContent = t.a || '';
         appendCitations(turn.aEl, t.citations || []);
+        var restoredIdx = turns.length;
         turns.push({ q: t.q, a: t.a || '', citations: t.citations || [], answerId: t.answerId || null, fb: t.fb });
+        // F11 (alpha.3) — show the feedback bar even on restored turns; if
+        // the user already submitted, render it locked + tinted via priorFb.
+        if (t.answerId) {
+          appendFeedbackBar(restoredIdx, turn.aEl, t.answerId, t.fb || null);
+        }
       });
     }
   }
