@@ -679,6 +679,127 @@ test('loadConfig: widget.allowedOrigins drops non-origin strings + counts reject
   }
 });
 
+// ---------------------------------------------------------------------------
+// aplus section (RFC 0006 alignment — schema 留位, zero behavior change)
+// ---------------------------------------------------------------------------
+
+test('loadConfig: aplus defaults — disabled, threshold=50, window=28d, embedSim=0.65', async () => {
+  // RFC 0006 alignment (2026-05-24) — PRD §10.3 双门槛 + §4.2 聚类阈值 0.65。
+  // 默认全 off；CLI stub 读 threshold/observationWindow 做门槛检查输出。
+  // alpha.1+ 才接通真正聚类。
+  const { root, cleanup } = await withTmpProject(async () => {});
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.aplus.enabled, false);
+    assert.equal(r.config.aplus.threshold, 50);
+    assert.equal(r.config.aplus.observationWindow, '28d');
+    assert.equal(r.config.aplus.embedSimilarityThreshold, 0.65);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: aplus.enabled=true accepted without warning (alpha.x no-op flip)', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ aplus: { enabled: true, threshold: 100 } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.aplus.enabled, true);
+    assert.equal(r.config.aplus.threshold, 100);
+    assert.deepEqual(r.warnings, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: aplus.threshold rejects non-positive-int with a warning', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ aplus: { threshold: -3 } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.aplus.threshold, 50, 'falls back to default');
+    assert.ok(
+      r.warnings.some((w) => /aplus\.threshold/.test(w)),
+      `expected a threshold warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: aplus.observationWindow accepts duration strings, rejects free-form', async () => {
+  // Valid: '28d' / '48h' / '120m'. Invalid: '4 weeks' / 'P28D' / numeric.
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ aplus: { observationWindow: '4 weeks' } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.aplus.observationWindow, '28d', 'falls back to default');
+    assert.ok(
+      r.warnings.some((w) => /aplus\.observationWindow/.test(w)),
+      `expected a window warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: aplus.embedSimilarityThreshold must be in (0, 1)', async () => {
+  for (const bad of [0, 1, 1.5, -0.1]) {
+    const { root, cleanup } = await withTmpProject(async (r) => {
+      await fs.writeFile(
+        join(r, 'anydocs.ask.json'),
+        JSON.stringify({ aplus: { embedSimilarityThreshold: bad } }),
+      );
+    });
+    try {
+      const r = await loadConfig(root);
+      assert.equal(
+        r.config.aplus.embedSimilarityThreshold,
+        0.65,
+        `embedSimilarityThreshold ${bad} should fall back to default`,
+      );
+      assert.ok(
+        r.warnings.some((w) => /aplus\.embedSimilarityThreshold/.test(w)),
+        `expected a warning for ${bad}; got ${JSON.stringify(r.warnings)}`,
+      );
+    } finally {
+      await cleanup();
+    }
+  }
+});
+
+test('loadConfig: aplus rejects non-object value with a warning, leaves siblings intact', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ aplus: 42, feedback: { enabled: true } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.aplus.enabled, false, 'aplus defaults preserved');
+    assert.equal(r.config.feedback.enabled, true, 'sibling section still merges');
+    assert.ok(
+      r.warnings.some((w) => /'aplus' must be an object/.test(w)),
+      `expected an aplus shape warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test('loadConfig: widget rejects non-object value with a warning, leaves siblings intact', async () => {
   const { root, cleanup } = await withTmpProject(async (r) => {
     await fs.writeFile(

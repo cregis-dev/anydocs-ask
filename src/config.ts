@@ -151,6 +151,29 @@ export type CitationSemanticCheckConfig = {
 };
 
 /**
+ * RFC 0006 — A+ 失败查询诊断（B.2 复用主 LLM 路径）。0.4 alignment PR
+ * (2026-05-24) 仅留 schema 位，四字段都不被代码路径消费（CLI stub 仅
+ * 读 `threshold` + `observationWindow` 做门槛检查输出）；alpha.1 才落
+ * 聚类 pure 模块。
+ *
+ * 设计依据：PRD §10.3 表（A+ 启动阈值 ≥ 50 条反馈 + ≥ 4 周观察窗）+
+ * PRD §11.3 F2（失败查询诊断概念）+ RFC 0006 §4.2（聚类阈值 0.65 推导）。
+ *
+ * - `enabled`: 整段功能开关。`false`（默认）= CLI / Studio 都跑门槛检查
+ *   提示但不真产 suggestions/；`true` 配合门槛达标后真跑聚类 + 建议。
+ * - `threshold`: feedback 行数门槛（默认 50，PRD §10.3）
+ * - `observationWindow`: 观察窗（ISO duration 字符串，默认 '28d' = 4 周）
+ * - `embedSimilarityThreshold`: bge-m3 cosine 聚类阈值（默认 0.65，
+ *   RFC §4.2 推导）
+ */
+export type AplusConfig = {
+  enabled: boolean;
+  threshold: number;
+  observationWindow: string;
+  embedSimilarityThreshold: number;
+};
+
+/**
  * RFC 0004 — 嵌入式 Ask Widget。0.4 alignment PR (2026-05-24) 仅留 schema
  * 位，三字段都不被代码路径消费；alpha.0 才接通 W1 协议规格 + TS 类型。
  *
@@ -199,6 +222,7 @@ export type ResolvedConfig = {
   multiTurn: MultiTurnConfig;
   citationSemanticCheck: CitationSemanticCheckConfig;
   widget: WidgetConfig;
+  aplus: AplusConfig;
   prompt: PromptConfig;
 };
 
@@ -279,6 +303,15 @@ const DEFAULTS: ResolvedConfig = {
     enabled: false,
     rateLimitPerMinute: 60,
     allowedOrigins: [],
+  },
+  aplus: {
+    // RFC 0006 alignment PR (2026-05-24): schema 留位，仅 CLI stub 读
+    // threshold / observationWindow 做门槛检查输出。alpha.1 才落聚类 pure
+    // 模块；alpha.2 接通 LLM 建议生成；0.4.0 operator flip enabled=true。
+    enabled: false,
+    threshold: 50,
+    observationWindow: '28d',
+    embedSimilarityThreshold: 0.65,
   },
   prompt: {
     assistantName: null,
@@ -399,6 +432,7 @@ function mergeWithDefaults(
     warnings,
   );
   applyWidget(user.widget, out.widget, warnings);
+  applyAplus(user.aplus, out.aplus, warnings);
   applyPrompt(user.prompt, out.prompt, warnings);
   return out;
 }
@@ -652,6 +686,55 @@ function applyWidget(value: unknown, target: WidgetConfig, warnings: string[]): 
     if (rejected > 0) {
       warnings.push(
         `anydocs.ask.json: widget.allowedOrigins ignored ${rejected} non-string / non-origin item(s)`,
+      );
+    }
+  }
+}
+
+/**
+ * RFC 0006 alignment — schema 留位。四字段都不被代码消费；本函数仅做
+ * 形状校验 + 默认填充。alpha.1 才接通真聚类。
+ */
+function applyAplus(value: unknown, target: AplusConfig, warnings: string[]): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'aplus' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.enabled !== undefined) {
+    if (typeof obj.enabled === 'boolean') {
+      target.enabled = obj.enabled;
+    } else {
+      warnings.push(`anydocs.ask.json: aplus.enabled must be a boolean; using default`);
+    }
+  }
+  if (obj.threshold !== undefined) {
+    const v = obj.threshold;
+    if (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 100_000) {
+      target.threshold = v;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: aplus.threshold must be an integer in [1, 100000]; using default`,
+      );
+    }
+  }
+  if (obj.observationWindow !== undefined) {
+    if (typeof obj.observationWindow === 'string' && /^\d+[dhm]$/.test(obj.observationWindow)) {
+      target.observationWindow = obj.observationWindow;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: aplus.observationWindow must be a duration string (e.g. '28d', '48h', '120m'); using default`,
+      );
+    }
+  }
+  if (obj.embedSimilarityThreshold !== undefined) {
+    const v = obj.embedSimilarityThreshold;
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0 && v < 1) {
+      target.embedSimilarityThreshold = v;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: aplus.embedSimilarityThreshold must be a number in (0, 1); using default`,
       );
     }
   }

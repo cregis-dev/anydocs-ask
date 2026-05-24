@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+### 新增
+
+- **RFC 0006 alignment — 失败查询诊断（A+）Accepted + schema 留位 + CLI `feedback diagnose` stub** —— [RFC 0006](docs/rfcs/0006-failure-query-diagnostic-aplus.md) Status: Draft → Accepted。`anydocs.ask.json` 增 `aplus.{enabled:false, threshold:50, observationWindow:'28d', embedSimilarityThreshold:0.65}` 段（PRD §10.3 双门槛 + RFC §4.2 聚类阈值）。CLI 注册 `feedback diagnose <projectRoot> [--threshold N] [--observation-window 28d] [--shadow] [--dry-run]` stub —— 读 `feedback` 表的 β 显式负反馈行计数 + 与配置门槛对比 + 友好输出 "feature off / data insufficient / would diagnose N rows"；**不读 embedding、不跑聚类、不写 `suggestions/`**（那些都进 alpha.1）。设计契约：design partner 可以今天就把 CLI 接到 cron 或 Studio 按钮，alpha.1+ 静默升级。10 个新测试覆盖 config schema 5 字段 + CLI stub 4 状态 + duration parser。
+
 ## 0.3.0 — 2026-05-24
 
 主线：**RFC 0005 citation 语义校验全链路接通（alpha.2 pipeline + V5 Studio 展示）+ RFC 0004 嵌入式 Ask Widget MVP（alpha.0→alpha.3 完整栈）**。次主线：**0.2.0 dogfood 留下的 F7 + F9 follow-up + RFC 0005 maxTokens CJK 修复**。两轮 dogfood（[2026-05-23 alpha.2 真机](docs/dogfood-2026-05-23-alpha2.md) / [2026-05-24 widget 真机](docs/dogfood-2026-05-24-widget.md)）锚定真实信号。

@@ -262,6 +262,125 @@ export async function runFeedbackStatus(opts: FeedbackCmdOptions): Promise<numbe
 }
 
 // ---------------------------------------------------------------------------
+// `feedback diagnose` (RFC 0006 alpha.0 stub)
+// ---------------------------------------------------------------------------
+
+export type FeedbackDiagnoseOptions = FeedbackCmdOptions & {
+  /** RFC 0006 §4.6 — override the PRD §10.3 threshold. */
+  threshold?: number;
+  /** RFC 0006 §4.6 — override the 4-week observation window. ISO-ish
+   *  duration (`28d` / `48h` / `120m`). */
+  observationWindow?: string;
+  /** Skip threshold guard and write to suggestions/.shadow/ (alpha.2 only;
+   *  the stub just notes the flag was acknowledged). */
+  shadow?: boolean;
+  /** Don't write any files; just print what would be diagnosed. */
+  dryRun?: boolean;
+};
+
+/**
+ * RFC 0006 alpha.0 stub. The full pipeline (cluster + suggest + write) lands
+ * in alpha.1 + alpha.2. For now we:
+ *
+ *   - Load config, surface `aplus.{enabled, threshold, observationWindow}`
+ *   - Count feedback rows in the window (post-filter: explicit-negative + clarify-failed)
+ *   - Print "ready to diagnose" / "data insufficient" / "feature off" depending on state
+ *   - Always exit 0 — operator's `--shadow` intent is parsed for forward-compat but no
+ *     suggestions/ output is produced.
+ *
+ * This keeps the CLI surface stable so design partners can wire `feedback diagnose`
+ * into their cron / Studio buttons today, and alpha.1+ silently upgrades to real work.
+ */
+export async function runFeedbackDiagnose(opts: FeedbackDiagnoseOptions): Promise<number> {
+  const projectRoot = resolve(opts.projectRoot);
+  const stateRoot = resolve(opts.stateRoot);
+  const { config } = await loadConfig(projectRoot);
+
+  const dbPath = resolveDbPath(stateRoot);
+  if (!existsSync(dbPath)) {
+    process.stderr.write(
+      `no index DB at ${dbPath}; run 'anydocs-ask reindex ${projectRoot}' first.\n`,
+    );
+    return 1;
+  }
+
+  const threshold = opts.threshold ?? config.aplus.threshold;
+  const window = opts.observationWindow ?? config.aplus.observationWindow;
+  const windowMs = parseDurationMs(window);
+  if (windowMs === null) {
+    process.stderr.write(
+      `feedback diagnose: invalid observationWindow '${window}'; expected duration like '28d' / '48h' / '120m'.\n`,
+    );
+    return 2;
+  }
+
+  const sinceMs = Date.now() - windowMs;
+  const db = openDatabase({ stateRoot, skipMigrations: true });
+  let candidateCount = 0;
+  try {
+    // RFC 0006 §4.1 candidate pool — signal_source='explicit' (β) only;
+    // γ deliberately excluded per PRD §11.4 red line. alpha.1 will extend to
+    // include clarify-without-followup + low-RRF cases from runs.jsonl.
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n
+           FROM feedback
+          WHERE created_at >= ?
+            AND signal_source = 'explicit'`,
+      )
+      .get(sinceMs) as { n: number } | undefined;
+    candidateCount = row?.n ?? 0;
+  } finally {
+    db.close();
+  }
+
+  const enabled = config.aplus.enabled;
+  const thresholdMet = candidateCount >= threshold;
+  const shadow = opts.shadow === true;
+  const dryRun = opts.dryRun === true;
+
+  const lines: string[] = [
+    `anydocs-ask feedback diagnose (RFC 0006 alpha.0 stub)`,
+    `  aplus.enabled:                ${enabled}`,
+    `  threshold:                    ${threshold} (config: ${config.aplus.threshold})`,
+    `  observation window:           ${window} (${Math.round(windowMs / 86_400_000)}d)`,
+    `  embed similarity threshold:   ${config.aplus.embedSimilarityThreshold} (RFC 0006 §4.2)`,
+    `  candidate β feedback rows:    ${candidateCount}`,
+    `  threshold met:                ${thresholdMet ? 'yes' : 'no'}`,
+    `  shadow flag:                  ${shadow}`,
+    `  dry-run flag:                 ${dryRun}`,
+    ``,
+  ];
+  if (!enabled && !shadow) {
+    lines.push(
+      `aplus.enabled is false; nothing to do. Flip to true in anydocs.ask.json after the threshold is met, or re-run with --shadow to bypass.`,
+    );
+  } else if (!thresholdMet && !shadow) {
+    lines.push(
+      `data insufficient: ${candidateCount} of ${threshold} β feedback rows in the last ${window}. Re-run after more reviews land, or pass --shadow to bypass the gate.`,
+    );
+  } else {
+    lines.push(
+      `would diagnose ${candidateCount} candidate rows (alpha.1+ clustering pipeline not yet wired). No suggestions/ output written by this stub.`,
+    );
+  }
+  process.stdout.write(lines.join('\n') + '\n');
+  return 0;
+}
+
+function parseDurationMs(spec: string): number | null {
+  const m = /^(\d+)([dhm])$/.exec(spec);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const unit = m[2];
+  if (unit === 'd') return n * 24 * 60 * 60 * 1000;
+  if (unit === 'h') return n * 60 * 60 * 1000;
+  if (unit === 'm') return n * 60 * 1000;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
 
