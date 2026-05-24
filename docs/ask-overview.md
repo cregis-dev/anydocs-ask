@@ -2,7 +2,7 @@
 
 > 一站式入口，把分散在 [PRD.md](../PRD.md) / [ARCHITECTURE.md](../ARCHITECTURE.md) / [README.md](../README.md) / [CHANGELOG.md](../CHANGELOG.md) 里的 ask 视角内容压成一份导览。深读各章节请走原文。
 >
-> 适用于 0.1.0-alpha.2（2026-05-14）。Schema / API / 阈值有变动以 PRD + ARCH + CHANGELOG 为准。
+> 适用于 0.3.1（2026-05-24）。Schema / API / 阈值有变动以 PRD + ARCH + CHANGELOG 为准。
 
 ---
 
@@ -177,18 +177,26 @@ Console 体验台 persist 落的 runs 自带 `source=console`，`analyze` / `gol
 - **navigation 编排**：D3 歧义高发 → 合并 / 拆分子树。R@5 偏低 → 给重要 section 显式写 `id`（ARCH §2.2.2 推荐）+ 调整 nav 顺序（`nav_index` 作权重）。
 - **文档行文**：Answer-rule-pass 偏低多半是文档没写明确 `must_contain` 关键词；A+ diagnose（v1.5）会自动给"应补文档"建议。
 
-### 5.2 v1.5 计划（PRD §11 / ARCH §15）
+### 5.2 0.2 → 0.4 已发布 + 计划中（PRD §11 / ARCH §15 / RFC 0001-0006）
 
-| 能力 | 触发条件 |
-|---|---|
-| **β 反馈采集** — Reader 加 👍/👎/答错按钮，调既有 `POST /v1/ask/feedback` | 上线 ≥ 4 周后真实积累 |
-| **γ 隐式信号** — 重问 / 未点引用 / 离场，喂 reranker（权重低于 β） | 同上 |
-| **chunk_priors reranker 加权** — 反馈先验进 §6 步骤 4，∈ [-0.30, +0.30] | feedback ≥ 50 条起 |
-| **A+ 失败查询诊断** — 周任务聚类负反馈 query，输出"应补文档"建议 | feedback 表非空起 |
-| **inbox/*.md 文件流审核** — `feedback export / import`，git 友好多人协作 | 同上 |
-| **Analyze D4 / D5** — 引用错配（依赖 β）/ embedding 漂移（依赖多次 reindex） | β 落地后 / 累积多份 reindex |
-| **`--from inbox` golden 补全** — 审过的失败修补回灌评测集 | inbox 流稳定后 |
-| **流式响应 (SSE)** / **实体表 + query expansion** / **意图分流 + 摘要层** / **Ollama 离线 LLM** | 真实使用反馈触发 |
+| 能力 | 状态 | 触发条件 / 备注 |
+|---|---|---|
+| **β 反馈采集** — Reader / Console / Widget 三端 👍/👎/答错纠正 | ✅ 0.2.0 | RFC 0001；`feedback.enabled=true` 启用 |
+| **γ 隐式信号** — session 内 5 min 重问 cosine ≥ 0.85 喂 reranker | ✅ 0.2.0 | RFC 0001 §4.2；权重低于 β |
+| **chunk_priors reranker 加权** — 反馈先验进 §6 步骤 4 | ✅ 0.2.0 | `feedback.rerankerWeight=0.15`；A 路径调权仍待 ≥ 200 条 + 显式负 ≥ 30 条 |
+| **多轮对话 + session round-trip** — history 拼进 prompt + embedding query | ✅ 0.2.0 默认开启 | RFC 0003 M1-M6；`multiTurn.historyTurns=3` |
+| **Console → Studio 升级** — Feedback / Traffic / Index 反向标注 + 跨 journey jump | ✅ 0.2.0 | RFC 0002 T1-T4 |
+| **inbox/*.md 文件流审核** — `feedback export / import`，git 友好多人协作 | ✅ 0.2.0 | — |
+| **Citation 语义校验** — 主 LLM 异步 verdict（supports / partially / not_supports + reason）+ Studio 展示 | ✅ 0.3.0 alpha.2 | RFC 0005 B.2；`citationSemanticCheck.enabled=true` 启用 shadow；H1 升级硬门槛进 0.4 |
+| **嵌入式 Ask Widget** — `GET /widget/v1.js` host bundle + iframe chat（SSE+β+history）+ CORS/origin/rate gate | ✅ 0.3.0 alpha.3 | RFC 0004；`widget.enabled=true` + `allowedOrigins[]` + `X-Project-Key`；cross-origin direct mode 进 0.4 |
+| **A+ 失败查询诊断 CLI** — bge-m3 聚类 → 主 LLM 生成「应补文档」markdown | ✅ 0.3.1 alpha.2 链路 | RFC 0006；`anydocs-ask feedback diagnose` 已可跑；产品门槛 ≥ 50 反馈 + 4 周观察窗后 flip `aplus.enabled` |
+| **Studio A+ 视图** — Feedback tab `aplusCandidates` 实数 + SUGGESTION drawer | 🚧 0.4 alpha.3 | RFC 0006 A7；纯前端，不依赖反馈量 |
+| **Citation H1 升级硬门槛** — verdict 进答案重写触发器 | 📋 0.4 待数据 | RFC 0005 H 系列；视 0.3 shadow 数据相关性 |
+| **Analyze D4 / D5** — 引用错配（依赖 β）/ embedding 漂移（依赖多次 reindex） | 📋 待启动 | β 已落地；D5 待累积多份 reindex |
+| **`--from inbox` golden 补全** — 审过的失败修补回灌评测集 | 📋 待 inbox 流稳定 | — |
+| **流式响应 (SSE)** | ✅ 0.1.x | `POST /v1/ask/stream` |
+| **实体表 + query expansion** / **意图分流 + 摘要层** | 📋 0.5+ | 合并为「query 理解增强」线，触发条件改为"诊断数据显示 vocabulary mismatch ≥ 阈值"（PRD §10.6） |
+| **Ollama 离线 LLM** | 📋 0.5+ | 触发条件改为"design partner 明确提出本地 LLM 诉求" |
 
 约束：**审过的 QA 不进检索**（PRD §11 决策 1 明确否决 Shadow Wiki）；只做 reranker 信号 + 给作者的补文档建议。
 
@@ -199,19 +207,28 @@ Console 体验台 persist 落的 runs 自带 `source=console`，`analyze` / `gol
 - **多项目联邦 / 单进程多项目** — v1 硬约束「一进程一项目」放开。
 - **多 audience / 多 version 细粒度隔离** — 等 anydocs 主仓加 `audience` / `version` / `nav.weight` / `page.priority` 字段；近似实现一律记为 v1 永久方案。
 
-### 5.4 已知瑕疵（dogfood-2026-05-14）
+### 5.4 已知瑕疵 / dogfood 历次报告
+
+历次 dogfood 报告（按时间顺序，新近在前）：
+
+| 报告 | 主线 | 关键 finding |
+|---|---|---|
+| [dogfood-2026-05-24-widget.md](./dogfood-2026-05-24-widget.md) | RFC 0004 Widget alpha.0-alpha.3 真机 | F1-F6 全过；F10/F11/F12 三个 polish ✅ 已修（alpha.3） |
+| [dogfood-2026-05-23-alpha2.md](./dogfood-2026-05-23-alpha2.md) | RFC 0005 alpha.2 citation 语义校验 | F1-F5 全过；F6 maxTokens CJK ✅ PR #73；F7 dedup ✅ PR #75；F8 V5 等 ✅ PR #74 |
+| [dogfood-2026-05-23.md](./dogfood-2026-05-23.md) | 0.2.0 真机回归 | F1-F6 反馈回路 / multi-turn / Studio / Reader UI / citation schema 全过；F7 generated 空 / F8 drawer "no citations" / F9 HISTORY 抽屉延迟 ✅ 0.3.0 修完 |
+| [dogfood-2026-05-14.md](./dogfood-2026-05-14.md) | 0.1.0-alpha 真机 | F1-F5 ✅ PR #18/#19/#21/#23/#24；F6 confidence floor 📋 观察；O1 LLM timeout 📋 观察 |
+
+0.1.0-alpha findings 详表（保留）：
 
 | ID | 状态 | 备注 |
 |---|---|---|
 | F1 `/v1/ask` LLM 抛错丢 run | ✅ PR #18 已合 | error path 现在 append `kind=error, code=llm_failed` |
 | F2 `golden generate --limit` lang 偏置 | ✅ PR #19 已合 | 按 `defaultLanguage` 优先 + 多 lang 轮询交错 |
 | F3 LLM gateway error message 留 `undefined` | ✅ PR #21 已合 | `AnthropicLLM` 错误现在带 status / type / requestID / body（截断 ~200B） |
-| F4 同页两 chunk citation 视觉重复 | ✅ PR #23 已合 | `citeSectionLabel()` 把 `in_page_path` 章节段拼到 Console Ask 卡 title 同级（Reader `web-ask.ts` 仍是 dogfood 前形态，留待真实回报触发） |
+| F4 同页两 chunk citation 视觉重复 | ✅ PR #23 已合 | `citeSectionLabel()` 把 `in_page_path` 章节段拼到 Console Ask 卡 title 同级（Reader `web-ask.ts` 0.2.0 PR #63 同步） |
 | F5 Ask 卡停止态中英混排 | ✅ PR #24 已合 | 停止态 heading 英文化；后续 IA 进一步把 start-gate 收进 next-action banner |
-| F6 analyze D1 在小项目上 9/9 命中召回失败 | 📋 观察 | confidence floor 待真实数据校准；不在 alpha.3 动 |
+| F6 analyze D1 在小项目上 9/9 命中召回失败 | 📋 观察 | confidence floor 待真实数据校准 |
 | O1 LLM 单次调用 timeout 偏长（~30s × 重试） | 📋 观察 | 配置项 `singleCallTimeoutMs` 待评估 |
-
-完整 dogfood 报告见 [docs/dogfood-2026-05-14.md](./dogfood-2026-05-14.md)。
 
 ---
 

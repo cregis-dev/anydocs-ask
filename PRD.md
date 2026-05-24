@@ -345,8 +345,8 @@ v1 立项时的叙事是"读懂目录结构的文档问答服务"。0.1.0 上线
 | 版本 | 期 | 主线 | 关联 RFC |
 |---|---|---|---|
 | **0.2**（2026-05-23 已发布）| 2026-05 | 反馈回路管道铺通 + Console → Studio 升级、反馈闭环主线 + early multi-turn (RFC 0003 M1-M6 默认开启) + citation 校验 schema 留位 (RFC 0005 alpha) | [RFC 0001](./docs/rfcs/0001-feedback-loop-v0.2.md) / [RFC 0002](./docs/rfcs/0002-console-studio-feedback-loop.md) |
-| **0.3**（2026-05-24 已发布）| 2026-05 | Citation 语义校验全链路（alpha.2 pipeline + V5 Studio 展示）+ 嵌入式 Ask Widget MVP（alpha.0→alpha.3 完整栈）—— 原 0.4 widget 主线 + A+ 诊断已提前到 0.3，复用现有 LLM 异步通道 | [RFC 0005](./docs/rfcs/0005-citation-semantic-validation.md) / [RFC 0004](./docs/rfcs/0004-embedded-ask-widget.md) |
-| **0.4** | 2026-06+ | A+ 失败查询诊断（≥ 50 条反馈门槛）+ Citation 校验 H1 升级硬门槛（视 shadow 数据，§2.2 触发条件）+ Widget cross-origin direct mode + shadow DOM 形态 | [RFC 0005](./docs/rfcs/0005-citation-semantic-validation.md) H 系列 / RFC 0004 0.4.1+ |
+| **0.3**（2026-05-24 已发布）| 2026-05 | Citation 语义校验全链路（alpha.2 pipeline + V5 Studio 展示）+ 嵌入式 Ask Widget MVP（alpha.0→alpha.3 完整栈）—— 原 0.4 widget 主线提前到 0.3；0.3.1 补丁追加 RFC 0006 A+ alpha 链路（以 `0.4.0-alpha.X` 名义随车搭载、默认 `aplus.enabled=false`，功能上仍归 0.4） | [RFC 0005](./docs/rfcs/0005-citation-semantic-validation.md) / [RFC 0004](./docs/rfcs/0004-embedded-ask-widget.md) |
+| **0.4** | 2026-06+ | A+ 失败查询诊断剩余链路（alpha.3 Studio A+ 视图 + 0.4.0 flip enabled，≥ 50 反馈 + 4 周观察窗后由 operator 触发）+ Citation 校验 H1 升级硬门槛（视 shadow 数据，§2.2 触发条件）+ Widget cross-origin direct mode + shadow DOM 形态 | [RFC 0006](./docs/rfcs/0006-failure-query-diagnostic-aplus.md) / [RFC 0005](./docs/rfcs/0005-citation-semantic-validation.md) H 系列 / RFC 0004 0.4.1+ |
 | **0.5+** | 2026-Q3+ | Widget 企业接入（user token + multi-tenant） + Reranker 数据驱动启用（≥ 200 条门槛后 shadow → 上线） | RFC 0004 Phase 4 / RFC 待立项 |
 | **远期**（v1.x / v2） | 待定 | DSPy 编译、MCP 接口、Ollama 选项、意图分流 + 摘要层、实体表 + query expansion 整合为"query 理解增强"线 | 待立项 |
 
@@ -411,7 +411,7 @@ v1 立项时的叙事是"读懂目录结构的文档问答服务"。0.1.0 上线
 | [0003](./docs/rfcs/0003-multi-turn-session-rewrite.md) | 多轮对话 + Session 重写 | **M1-M6 已接通**（0.2.0 默认开启 / 0.4 主线收尾） | 0.4 |
 | [0004](./docs/rfcs/0004-embedded-ask-widget.md) | 嵌入式 Ask Widget | **Accepted, alpha.0→alpha.3 已落地**（0.3.0 widget MVP + 跨域 gate + chat polish + bubble/theme/docsBaseUrl polish） | 0.3 / 0.4 cross-origin direct mode 续 |
 | [0005](./docs/rfcs/0005-citation-semantic-validation.md) | Citation 语义校验（B.2 复用主 LLM） | **alpha.2 全链路接通**（0.3.0 V3+V4+V6 pipeline + V5 Studio 展示；H 升级硬门槛进 0.4） | 0.3 / 0.4 H 系列 |
-| [0006](./docs/rfcs/0006-failure-query-diagnostic-aplus.md) | 失败查询诊断（A+，PRD §11.3 F2 展开） | Draft 起草中（A1-A8 alpha 链路待启动；产品门槛 ≥ 50 反馈 + 4 周观察窗） | 0.4 |
+| [0006](./docs/rfcs/0006-failure-query-diagnostic-aplus.md) | 失败查询诊断（A+，PRD §11.3 F2 展开） | **Accepted, alpha.0/.1/.2 已落地**（schema + CLI 接通聚类 + 建议生成 pipeline，默认 `aplus.enabled=false`；alpha.3 Studio 视图 + 0.4.0 flip enabled 待产品门槛 ≥ 50 反馈 + 4 周观察窗达成） | 0.4 |
 
 ---
 

@@ -2,7 +2,14 @@
 
 为 [anydocs](https://github.com/cregis-dev/anydocs) 项目提供的本地问答服务。读取 `pages/{lang}/*.json` 和 `navigation/{lang}.json`，向 Reader 站点返回带完整面包屑引用的结构化答案。
 
-> **v1（0.1.0）** — 索引、查询、HTTP 接口（含 SSE 流式 `POST /v1/ask/stream`）、Web 控制台、评测闭环均已就绪。
+> **0.3.1（2026-05-24）当前能力**
+> - 索引、查询、HTTP 接口（SSE 流式 `POST /v1/ask/stream` + 多轮 session round-trip）、Web 控制台、评测闭环（0.1.x）
+> - β/γ 反馈回路 + Console Studio Feedback / Index / Traffic tab（0.2.0，RFC 0001 + 0002）
+> - 多轮对话默认开启（0.2.0，RFC 0003）
+> - Citation 语义校验全链路 + Studio verdict 展示（0.3.0，RFC 0005 alpha.2，默认 off）
+> - 嵌入式 Ask Widget MVP（0.3.0，RFC 0004 alpha.3，默认 off）
+> - A+ 失败查询诊断 CLI 链路 `feedback diagnose`（0.3.1，RFC 0006 alpha.2，默认 off）
+>
 > 速览 ask 操作 / 原理 / 测评 / 优化方向：[`docs/ask-overview.md`](./docs/ask-overview.md)。
 > 产品背景见 [`PRD.md`](./PRD.md)，集成细节见 [`ARCHITECTURE.md`](./ARCHITECTURE.md)，版本历史见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
@@ -82,6 +89,16 @@ curl http://127.0.0.1:4100/         # 应返回工作区首页 HTML
 - **Golden Workshop** — 逐条审核候选条目，批准或拒绝后一键刷入 golden 集（等价于 `golden review` + `golden flush`）。生成候选默认走 LLM 改写以提升查询质量，无凭据/调用失败时自动降级为模板原句；UI 实时流式展示每个 batch 的进度。
 
 > **生成候选耗时提示：** Console 默认开启 LLM 改写。小项目（≤ 50 页）通常 30–90 秒完成（含网关偶发的 1–2 次重试），大项目按 50 条/批处理，整体随项目规模线性增长。需更快产出可在 CLI 用 `--no-llm-rewrite` 跳过 LLM 步骤。
+
+### Studio 反馈闭环（0.2+）
+
+项目页加 **Feedback** / **Traffic** tab + **Index** tab 反向标注，把反馈数据消费成可行动信号（RFC 0002 T1–T4）：
+
+- **Feedback tab** — 4 状态视图（disabled / enabled-empty / onboarding / healthy）+ 6 KPI tile（feedback·7d / explicit% / mean confidence / non-answer rate / A+ candidates / cit-check failed）+ 5 filter chip（all / 👍 / 👎 / implicit / no_citations / ⚠ cit-check）+ 行级 breadcrumb + Drawer META/ANSWER/CORRECTION/CITATIONS（含 verdict 徽章）/RETRIEVAL/ACTIONS。
+- **Traffic tab** — 最近 7 天 query 列表 + Re-ask + jump-to-Ask；Console 写入 runs 默认排除分析。
+- **Index tab** — 每行末尾显示"近 7 天命中 N 次 + 中位 confidence"，可跳到对应 Traffic 过滤。
+
+打开方式：在 anydocs.ask.json 设 `feedback.enabled=true`（写库 + 反馈先验上线）。详见 [ARCHITECTURE.md §15](./ARCHITECTURE.md)。
 
 ### 配置
 
@@ -164,6 +181,7 @@ pnpm dev serve /Users/me/work/product-docs
 {
   "type": "answer",
   "answer_id": "ans_…",
+  "session_id": "sess_…",       // 0.2+ multi-turn round-trip；client 回传同值即续聊
   "answer_md": "…markdown…",
   "answer_lang": "zh",
   "citations": [
@@ -182,7 +200,22 @@ pnpm dev serve /Users/me/work/product-docs
 { "type": "error", "code": "invalid_question", "message": "…" }
 ```
 
-**`POST /v1/ask/feedback`** — 提交 👍 / 👎 反馈（详见 ARCHITECTURE.md §5.2）。
+**`POST /v1/ask/stream`** — 与 `/v1/ask` 同 body，返回 SSE token-by-token。事件类型：`token` / `citations` / `answer` / `error`。Reader 公网 UI 和 Widget chat-page 均走该端点。
+
+**`POST /v1/ask/feedback`** — 提交 👍 / 👎 / 答错纠正（β 显式反馈）。需 `feedback.enabled=true` 才落 SQLite。
+
+```jsonc
+// 请求
+{
+  "answer_id": "ans_…",          // 必填
+  "rating": "up" | "down",       // 必填
+  "comment": "答错了，应该是 …", // 可选，答错纠正文本
+  "session_id": "sess_…"         // 可选，关联 multi-turn 会话
+}
+// 响应：{ "ok": true } 或 { "ok": false, "code": "...", "message": "..." }
+```
+
+**`GET /widget/v1.js`** + **`GET /widget/chat`** — 嵌入式 Widget 的 host bundle 与 iframe chat 页（RFC 0004）。需 `widget.enabled=true` 才挂；调用必须带 `X-Project-Key` header + origin 在 `widget.allowedOrigins` 白名单内，否则按 `widget_disabled` / `invalid_project_key` / `origin_not_allowed` / `rate_limited` 拒绝。
 
 **`GET /v1/health`** — 预热完成后返回 `{"status":"ok"}`，预热期间返回 `{"status":"warming"}`；Reader 发起首次提问前应轮询此接口。
 
@@ -213,6 +246,16 @@ anydocs-ask golden review    <projectRoot> [--reviewer <name>]
 anydocs-ask golden import    <projectRoot> --file <jsonl> [--replace]
 anydocs-ask eval             <projectRoot> [--baseline <path>]
 anydocs-ask analyze runs     <projectRoot> [--since 7d]
+
+# 反馈闭环（0.2+，RFC 0001 / 0006；详见 ARCH §15）
+anydocs-ask feedback status   <projectRoot>                    # 计数 β/γ 行 + 反馈先验状态
+anydocs-ask feedback export   <projectRoot>                    # SQLite → inbox/*.md，git 友好
+anydocs-ask feedback import   <projectRoot>                    # 审过 inbox/*.md → approved.jsonl
+anydocs-ask feedback diagnose <projectRoot>                    # RFC 0006 A+ 失败查询聚类 → suggestions/cluster_*.md
+                                            [--threshold N]        # 反馈数量下限（默认 aplus.threshold=50）
+                                            [--observation-window 28d] # 时间窗（默认 aplus.observationWindow）
+                                            [--shadow]             # 强制写到 suggestions/.shadow/ 子目录
+                                            [--dry-run]            # 跑全流程不写盘
 ```
 
 `golden import` is intended for source-controlled, hand-curated eval sets.
@@ -236,6 +279,48 @@ the runtime workspace under `<workspace>/state/<projectId>/golden/cases.jsonl`.
       "WaaS 主要用于钱包、地址、充值、归集、提币和链上资产管理。",
       "回答时先给直接结论，再给必要步骤或注意事项。"
     ]
+  }
+}
+```
+
+#### 0.2+ 新增配置段一览
+
+按 RFC 引入顺序列；所有段默认 **整段 off**，flip enabled 后才生效。完整字段语义与默认值见 [ARCHITECTURE.md §9](./ARCHITECTURE.md)。
+
+```jsonc
+{
+  // RFC 0001 §3 — β 显式 + γ 隐式反馈通道（写库 + reranker 先验）
+  "feedback": {
+    "enabled": false,                  // 整段开关
+    "implicitSignals": "session-only", // γ 信号范围
+    "rerankerWeight": 0.15             // 反馈先验进 §6 步骤 4 的权重
+  },
+
+  // RFC 0003 — 多轮对话（默认 ON，0.2.0 起 design partner 自然多轮可用）
+  "multiTurn": {
+    "enabled": true,
+    "historyTurns": 3                  // history 拼进 prompt 的最近轮数 [1, 20]
+  },
+
+  // RFC 0005 — citation 语义校验（异步 fire-and-forget，复用主 LLM）
+  "citationSemanticCheck": {
+    "enabled": false,
+    "mode": "shadow"                   // "shadow" | "enforce"（0.4 H1 升级才接通 enforce）
+  },
+
+  // RFC 0004 — 嵌入式 Ask Widget（host bundle + iframe chat）
+  "widget": {
+    "enabled": false,
+    "rateLimitPerMinute": 60,          // per (project_key, origin) token bucket
+    "allowedOrigins": []               // 白名单 origin，空数组 = 一律拒
+  },
+
+  // RFC 0006 — A+ 失败查询诊断（聚类 + 建议生成）
+  "aplus": {
+    "enabled": false,                  // 0.4.0 GA 由 operator flip
+    "threshold": 50,                   // 反馈数量产品门槛
+    "observationWindow": "28d",        // 4 周观察窗
+    "embedSimilarityThreshold": 0.65   // bge-m3 cosine 聚类阈值
   }
 }
 ```
