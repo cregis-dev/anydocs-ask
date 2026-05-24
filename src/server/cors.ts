@@ -13,11 +13,14 @@
 
 import { cors } from 'hono/cors';
 import type { MiddlewareHandler } from 'hono';
-import type { ServerConfig } from '../config.ts';
+import type { ServerConfig, WidgetConfig } from '../config.ts';
 
 const DEV_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
 
-export function buildCorsMiddleware(config: ServerConfig): MiddlewareHandler {
+export function buildCorsMiddleware(
+  config: ServerConfig,
+  widget: WidgetConfig,
+): MiddlewareHandler {
   const isProd = process.env.NODE_ENV === 'production';
   const configured = config.cors.allowedOrigins;
 
@@ -28,15 +31,25 @@ export function buildCorsMiddleware(config: ServerConfig): MiddlewareHandler {
     );
   }
 
+  // RFC 0004 W4 — widget callers come from `widget.allowedOrigins`. Same
+  // browser-level CORS plumbing; the widget gate (server-gate.ts) does the
+  // per-request rate-limit + project-key checks after the preflight passes.
+  // `widget.enabled=false` keeps widget origins out, so the alignment PR's
+  // "zero behaviour change" promise survives.
+  const widgetOrigins = widget.enabled ? widget.allowedOrigins : [];
+
   return cors({
     origin: (origin) => {
       if (!origin) return null; // same-origin / curl — let it through implicitly
       if (configured.includes(origin)) return origin;
+      if (widgetOrigins.includes(origin)) return origin;
       if (!isProd && DEV_ORIGIN_RE.test(origin)) return origin;
       return null;
     },
     allowMethods: ['GET', 'POST', 'OPTIONS'],
-    allowHeaders: ['Content-Type'],
+    // X-Project-Key only goes out the wire when the widget is on; harmless
+    // (and forward-compatible) to advertise it always.
+    allowHeaders: ['Content-Type', 'X-Project-Key'],
     credentials: false,
   });
 }
