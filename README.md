@@ -10,7 +10,7 @@
 
 ## 快速上手
 
-> 包尚未发布到 npm，0.1.x 期间请通过源码运行。
+> 全局安装：`npm install -g @anydocs/ask`。如需开发本仓库或运行 fixtures，按下方源码模式走。
 
 ```bash
 # 1. 克隆并安装依赖
@@ -188,7 +188,7 @@ pnpm dev serve /Users/me/work/product-docs
 
 ### 完整子命令参考
 
-> **0.1.x 阶段：** 包尚未发布，`anydocs-ask` 全局命令暂不可用。请将下方所有 `anydocs-ask <cmd>` 替换为 `pnpm dev <cmd>`（在本仓库根目录执行），或 `pnpm build` 后通过 `node dist/cli.js <cmd>` 调用。
+> 全局安装（`npm install -g @anydocs/ask`）后 `anydocs-ask <cmd>` 直接可用。从源码运行时，把下方所有 `anydocs-ask <cmd>` 换成 `pnpm dev <cmd>`（仓库根目录），或 `pnpm build` 后用 `node dist/cli.js <cmd>`。
 
 ```bash
 # 服务
@@ -220,8 +220,6 @@ Relative `--file` paths are resolved from `<projectRoot>`, then written into
 the runtime workspace under `<workspace>/state/<projectId>/golden/cases.jsonl`.
 
 `--since` 接受 ISO 日期（`2026-04-01`）、ISO 时间戳，或时长简写（`7d` / `48h` / `30m`）。
-
-> 正式发布后可通过 `npm install -g @anydocs/ask` 全局安装。
 
 ### `anydocs.ask.json`（可选）
 
