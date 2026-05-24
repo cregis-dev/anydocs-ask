@@ -411,6 +411,7 @@ v1 立项时的叙事是"读懂目录结构的文档问答服务"。0.1.0 上线
 | [0003](./docs/rfcs/0003-multi-turn-session-rewrite.md) | 多轮对话 + Session 重写 | **M1-M6 已接通**（0.2.0 默认开启 / 0.4 主线收尾） | 0.4 |
 | [0004](./docs/rfcs/0004-embedded-ask-widget.md) | 嵌入式 Ask Widget | **Accepted, alpha.0→alpha.3 已落地**（0.3.0 widget MVP + 跨域 gate + chat polish + bubble/theme/docsBaseUrl polish） | 0.3 / 0.4 cross-origin direct mode 续 |
 | [0005](./docs/rfcs/0005-citation-semantic-validation.md) | Citation 语义校验（B.2 复用主 LLM） | **alpha.2 全链路接通**（0.3.0 V3+V4+V6 pipeline + V5 Studio 展示；H 升级硬门槛进 0.4） | 0.3 / 0.4 H 系列 |
+| [0006](./docs/rfcs/0006-failure-query-diagnostic-aplus.md) | 失败查询诊断（A+，PRD §11.3 F2 展开） | Draft 起草中（A1-A8 alpha 链路待启动；产品门槛 ≥ 50 反馈 + 4 周观察窗） | 0.4 |
 
 ---
 
