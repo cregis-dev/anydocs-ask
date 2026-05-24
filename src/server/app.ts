@@ -28,6 +28,8 @@ import { observeAsk } from '../feedback/gamma.ts';
 import { renderAskPage, getMarkedScript } from './web-ask.ts';
 import { extractClaimChunkPairs } from '../query/claim-extractor.ts';
 import { validateCitations } from '../query/citation-validator.ts';
+import { renderWidgetHostScript } from '../widget/host-sdk.ts';
+import { renderWidgetChatPage } from '../widget/chat-page.ts';
 
 const SSE_HEARTBEAT_MS = 2_000;
 const SSE_INITIAL_PADDING_BYTES = 4_096;
@@ -78,6 +80,33 @@ export function createApp(deps: AppDeps): Hono {
     c.header('Content-Type', asset.contentType);
     c.header('Cache-Control', 'public, max-age=3600');
     return c.body(asset.body);
+  });
+
+  // -----------------------------------------------------------------------
+  // Widget — RFC 0004 W3 alpha.1 MVP. Two endpoints serve the embeddable
+  // ask widget: the host-side SDK bundle (loaded by the operator's
+  // `<script src="...">`) and the iframe chat page it points at. Same-
+  // origin only at alpha.1 — alpha.2 W4 adds CORS / project-key validation.
+  //
+  // Gated on `widget.enabled` so the alpha.0 alignment-PR promise — "config
+  // flip default off, no behaviour change" — survives. Operators have to
+  // opt in explicitly before either endpoint responds.
+  // -----------------------------------------------------------------------
+  app.get('/widget/v1.js', (c) => {
+    if (!runtime.config.widget.enabled) {
+      return c.json({ type: 'error', code: 'widget_disabled' }, 404);
+    }
+    const js = renderWidgetHostScript({});
+    c.header('Content-Type', 'application/javascript; charset=utf-8');
+    c.header('Cache-Control', 'public, max-age=300');
+    return c.body(js);
+  });
+  app.get('/widget/chat', (c) => {
+    if (!runtime.config.widget.enabled) {
+      return c.json({ type: 'error', code: 'widget_disabled' }, 404);
+    }
+    const html = renderWidgetChatPage({ prompt: runtime.config.prompt });
+    return c.html(html);
   });
 
   // -----------------------------------------------------------------------
