@@ -1,24 +1,28 @@
 /**
- * RFC 0004 W3 alpha.1 — Widget iframe chat page.
+ * RFC 0004 W3 alpha.2b — Widget iframe chat page.
  *
  * The page served at `GET /widget/chat`. The host-side SDK
  * ([[renderWidgetHostScript]]) creates an `<iframe src="…/widget/chat?…">`
  * pointing at this page, and the page talks back via postMessage.
  *
- * Scope (alpha.1 minimum viable):
- *   - Question textarea + send button + answer area
- *   - Calls `/v1/ask` on the same origin
- *   - Reads URL params: `projectKey`, `locale`, `contextSources`
- *   - Reads host `setContext` payloads via postMessage
- *   - Emits `ready` / `session-id` / `error` / `resize` events back to host
+ * Scope (alpha.2b incremental):
+ *   - SSE streaming via `/v1/ask/stream` (token-by-token answer rendering)
+ *   - β feedback bar (👍 / 👎 + "答错了" correction)
+ *   - History persistence in widget-namespaced localStorage
+ *     (`anydocs-ask:widget:history:v1`) — same-origin iframe storage, NEVER
+ *     touches host cookies/localStorage (RFC §5 Q3 + PRD §10.7 第 7 条)
  *
- * Out of scope (alpha.2+):
- *   - SSE streaming (alpha.1 uses POST /v1/ask non-stream)
- *   - β feedback buttons inside the widget
- *   - History drawer
- *   - CORS / project-key validation on /v1/ask (alpha.2 W4)
- *   - Citation visual deduplication (Reader uses this; widget will get it
- *     via shared helper in alpha.2 polish)
+ * Out of scope (alpha.3+):
+ *   - Cross-origin host → /v1/ask direct mode (chat-page is iframe-internal
+ *     same-origin traffic and intentionally does NOT send `X-Project-Key`;
+ *     adding it would trip the widget gate's `origin_not_allowed` check
+ *     because the iframe's Origin is the ask server, not the host page's
+ *     domain. Direct cross-origin SDK mode lands in 0.5+ Phase 4.)
+ *   - Citation visual deduplication (use Reader's shared helper in a
+ *     future polish PR)
+ *   - Multi-turn within widget session (the server-side multi-turn logic
+ *     already runs via the session_id round-trip; chat-page just preserves
+ *     the id across turns)
  */
 
 import type { PromptConfig } from '../config.ts';
@@ -54,6 +58,8 @@ const CHAT_HTML = `<!doctype html>
   --fg-soft: #5a5b56;
   --fg-mute: #8a8b85;
   --accent: #2747c4;
+  --ok: #1f7a3a;
+  --warn: #8a5a00;
   --err: #b41f2a;
   --err-soft: #fbe6e6;
   --font: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", "PingFang SC", sans-serif;
@@ -74,6 +80,22 @@ html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: 
 .cit { font-size: 11px; color: var(--fg-soft); margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
 .cit a { color: var(--accent); text-decoration: none; }
 .cit a:hover { text-decoration: underline; }
+.fb { display: flex; gap: 6px; margin-top: 6px; font-size: 11px; align-items: center; flex-wrap: wrap; }
+.fb button {
+  border: 1px solid var(--bd); background: #fff; cursor: pointer;
+  padding: 2px 8px; border-radius: 6px; font: inherit; font-size: 11px; line-height: 1.4;
+  color: var(--fg-soft);
+}
+.fb button:hover { background: var(--bg-soft); color: var(--fg); }
+.fb button.sel-up { background: #e6f1e7; border-color: var(--ok); color: var(--ok); }
+.fb button.sel-down { background: var(--err-soft); border-color: var(--err); color: var(--err); }
+.fb button:disabled { opacity: 0.5; cursor: default; }
+.fb .corr { display: flex; gap: 4px; width: 100%; margin-top: 4px; }
+.fb .corr input {
+  flex: 1; border: 1px solid var(--bd); padding: 4px 6px; border-radius: 6px;
+  font: inherit; font-size: 11px;
+}
+.fb .corr input:focus { border-color: var(--accent); outline: none; }
 .composer { display: flex; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--bd-soft); }
 .composer textarea {
   flex: 1; resize: none; border: 1px solid var(--bd); border-radius: 8px;
@@ -106,13 +128,18 @@ html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: 
   'use strict';
   var PROTOCOL = 'anydocs-ask';
   var VERSION = 1;
+  // alpha.2b — widget-scoped localStorage namespace; never touches the host
+  // page's storage (PRD §10.7 第 7 条 / RFC §5 Q3). The iframe origin is
+  // the ask server, so this storage is isolated from the embedding host.
+  var STORE_KEY = 'anydocs-ask:widget:history:v1';
+  var STORE_MAX_TURNS = 20;
 
   function $(id) { return document.getElementById(id); }
   function post(payload) {
     if (!window.parent || window.parent === window) return;
     var msg = Object.assign({ protocol: PROTOCOL, version: VERSION }, payload);
-    // Same-origin alpha.1 — '*' is documented (RFC §4.4 alpha.2 will narrow
-    // to the parent baseUrl).
+    // Same-origin alpha.x — '*' is documented (RFC §4.4 alpha.3 will narrow
+    // to the parent baseUrl once the host SDK passes it via init).
     window.parent.postMessage(msg, '*');
   }
 
@@ -122,13 +149,25 @@ html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: 
 
   var hostContext = null; // last setContext payload from parent
   var sessionId = null;
+  var turns = []; // { q, a, citations, answerId, fb? }
 
-  function readAutoContext() {
-    // alpha.1: parent's URL + title come from postMessage in alpha.2 when we
-    // formalise the host meta channel. For now we leave the slot empty and
-    // let host send via setContext(). The 'url'/'title' sources are
-    // therefore informational only in this MVP.
-    return { sources: contextSources };
+  function loadStored() {
+    try {
+      var raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return null;
+      var parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return null;
+      if (!Array.isArray(parsed.turns)) return null;
+      return parsed;
+    } catch (_e) { return null; }
+  }
+  function saveStored() {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify({
+        sessionId: sessionId,
+        turns: turns.slice(-STORE_MAX_TURNS),
+      }));
+    } catch (_e) { /* quota / private mode — silent */ }
   }
 
   function escapeHtml(s) {
@@ -149,7 +188,7 @@ html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: 
     el.title = text;
   }
 
-  function appendTurn(q) {
+  function startTurn(q) {
     var empty = $('empty');
     if (empty && empty.parentNode) empty.parentNode.removeChild(empty);
     var wrap = document.createElement('div');
@@ -159,14 +198,118 @@ html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: 
     qEl.textContent = q;
     var aEl = document.createElement('div');
     aEl.className = 'a loading';
-    aEl.textContent = 'Thinking…';
+    aEl.textContent = '';
     wrap.appendChild(qEl);
     wrap.appendChild(aEl);
     $('body').appendChild(wrap);
-    return aEl;
+    return { wrap: wrap, aEl: aEl };
   }
 
-  function finalizeAnswer(aEl, result) {
+  function appendCitations(aEl, citations) {
+    if (!Array.isArray(citations) || citations.length === 0) return;
+    var cit = document.createElement('div');
+    cit.className = 'cit';
+    citations.forEach(function (c, i) {
+      var line = document.createElement('div');
+      var n = i + 1;
+      var title = c.title || c.page_id || '';
+      if (c.url) {
+        var a = document.createElement('a');
+        a.href = c.url;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.textContent = n + '. ' + title;
+        a.addEventListener('click', function (e) {
+          e.preventDefault();
+          post({ kind: 'navigate', href: c.url, target: '_blank' });
+        });
+        line.appendChild(a);
+      } else {
+        line.textContent = n + '. ' + title;
+      }
+      cit.appendChild(line);
+    });
+    aEl.appendChild(cit);
+  }
+
+  function appendFeedbackBar(turnIdx, aEl, answerId) {
+    // alpha.2b β feedback. Three actions: 👍 / 👎 / 答错了 (correction).
+    // POST /v1/ask/feedback with rating + optional correction; once
+    // submitted the buttons are sticky (re-click does nothing — alpha.2b
+    // doesn't yet support "change my mind").
+    var bar = document.createElement('div');
+    bar.className = 'fb';
+    var up = document.createElement('button');
+    up.type = 'button';
+    up.textContent = '👍 helpful';
+    var down = document.createElement('button');
+    down.type = 'button';
+    down.textContent = '👎 not helpful';
+    var fix = document.createElement('button');
+    fix.type = 'button';
+    fix.textContent = 'answered wrong…';
+    bar.appendChild(up);
+    bar.appendChild(down);
+    bar.appendChild(fix);
+
+    var locked = false;
+    function lockButtons() {
+      locked = true;
+      up.disabled = true; down.disabled = true; fix.disabled = true;
+    }
+    function submit(rating, correction) {
+      if (locked) return;
+      var body = {
+        answer_id: answerId,
+        session_id: sessionId,
+        rating: rating,
+      };
+      if (typeof correction === 'string' && correction.length > 0) {
+        body.correction = correction;
+      }
+      // Note: NOT sending X-Project-Key. Same-origin iframe traffic; the
+      // widget gate is reserved for direct cross-origin SDK calls in 0.5+
+      // Phase 4. Sending X-Project-Key here would trip 'origin_not_allowed'
+      // because the iframe Origin is the ask server, not the host page.
+      fetch('/v1/ask/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }).catch(function () { /* fire-and-forget */ });
+      if (turns[turnIdx]) turns[turnIdx].fb = { rating: rating, correction: correction || null };
+      saveStored();
+      lockButtons();
+      if (rating > 0) up.classList.add('sel-up');
+      else if (rating < 0) down.classList.add('sel-down');
+    }
+    up.addEventListener('click', function () { submit(1); });
+    down.addEventListener('click', function () { submit(-1); });
+    fix.addEventListener('click', function () {
+      if (locked) return;
+      // Inline correction box. Submitting blank just sends rating=-1 with
+      // no correction so we still capture the negative signal.
+      var box = document.createElement('div');
+      box.className = 'corr';
+      var input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = 'What did the answer get wrong? (optional)';
+      var go = document.createElement('button');
+      go.type = 'button';
+      go.textContent = 'send';
+      box.appendChild(input);
+      box.appendChild(go);
+      bar.appendChild(box);
+      input.focus();
+      function sendCorr() { submit(-1, input.value.trim()); }
+      go.addEventListener('click', sendCorr);
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); sendCorr(); }
+      });
+    });
+    aEl.appendChild(bar);
+  }
+
+  function finalizeAnswer(turnIdx, wrap, aEl, result, accumulated) {
     aEl.classList.remove('loading');
     if (!result || result.type === 'error') {
       aEl.classList.add('err');
@@ -177,40 +320,36 @@ html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: 
       aEl.textContent = result.message || 'Please clarify your question.';
       return;
     }
-    // type === 'answer'
-    aEl.textContent = result.answer_md || '';
-    if (Array.isArray(result.citations) && result.citations.length > 0) {
-      var cit = document.createElement('div');
-      cit.className = 'cit';
-      result.citations.forEach(function (c, i) {
-        var line = document.createElement('div');
-        var n = i + 1;
-        var pageId = c.page_id || '';
-        var title = c.title || pageId || '';
-        if (c.url) {
-          var a = document.createElement('a');
-          a.href = c.url;
-          a.target = '_blank';
-          a.rel = 'noopener';
-          a.textContent = n + '. ' + title;
-          a.addEventListener('click', function (e) {
-            // Defer to host's navigate decision so the embedded iframe
-            // doesn't unilaterally pop a window.
-            e.preventDefault();
-            post({ kind: 'navigate', href: c.url, target: '_blank' });
-          });
-          line.appendChild(a);
-        } else {
-          line.textContent = n + '. ' + title;
-        }
-        cit.appendChild(line);
-      });
-      aEl.appendChild(cit);
+    // type === 'answer'. The SSE deltas already painted the body; result
+    // carries the final answer_md (canonical) + citations.
+    aEl.textContent = result.answer_md || accumulated || '';
+    appendCitations(aEl, result.citations);
+    if (result.answer_id) {
+      appendFeedbackBar(turnIdx, aEl, result.answer_id);
+    }
+    if (turns[turnIdx]) {
+      turns[turnIdx].a = result.answer_md || '';
+      turns[turnIdx].citations = result.citations || [];
+      turns[turnIdx].answerId = result.answer_id || null;
+      saveStored();
     }
   }
 
   function reportError(code, message, status) {
     post({ kind: 'error', error: { code: code, message: message, status: status } });
+  }
+
+  function parseSseFrame(frame) {
+    // SSE per RFC 7693-ish. Minimal parser — only need 'event' + 'data'.
+    var event = 'message';
+    var data = '';
+    var lines = frame.split(/\\r?\\n/);
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (line.startsWith('event:')) event = line.slice(6).trim();
+      else if (line.startsWith('data:')) data += (data ? '\\n' : '') + line.slice(5).trim();
+    }
+    return { event: event, data: data };
   }
 
   async function send() {
@@ -220,50 +359,81 @@ html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: 
     qEl.value = '';
     qEl.disabled = true;
     $('send').disabled = true;
-    var aEl = appendTurn(question);
+
+    var turn = startTurn(question);
+    var turnIdx = turns.length;
+    turns.push({ q: question, a: '', citations: [], answerId: null });
+    saveStored();
+
     var body = {
       question: question,
       session_id: sessionId,
       context: {},
     };
     if (hostContext) {
-      // alpha.1: stash the entire context blob under context.widget so server
-      // can ignore it (until alpha.2 W4 actually reads it). This makes the
-      // wire format forward-compatible.
       body.context.widget = {
         host: { page: hostContext.page || undefined, topic: hostContext.topic || undefined },
         data: hostContext.data || undefined,
       };
     }
+    var accumulated = '';
+    var lastResult = null;
+
     try {
-      var headers = { 'Content-Type': 'application/json' };
-      if (projectKey) headers['X-Project-Key'] = projectKey;
-      var res = await fetch('/v1/ask', {
+      var res = await fetch('/v1/ask/stream', {
         method: 'POST',
-        headers: headers,
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      var parsed;
-      try { parsed = await res.json(); } catch (_e) { parsed = null; }
-      if (!res.ok && (!parsed || parsed.type !== 'error')) {
+      if (!res.ok || !res.body) {
         reportError('client_network', 'request failed', res.status);
-        finalizeAnswer(aEl, { type: 'error', code: 'client_network', message: 'Request failed (' + res.status + ')' });
-      } else {
-        if (parsed && typeof parsed.session_id === 'string' && parsed.session_id !== sessionId) {
-          sessionId = parsed.session_id;
-          post({ kind: 'session-id', sessionId: sessionId });
-        }
-        finalizeAnswer(aEl, parsed);
+        finalizeAnswer(turnIdx, turn.wrap, turn.aEl, { type: 'error', message: 'Request failed (' + res.status + ')' }, accumulated);
+        return;
       }
+      var reader = res.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = '';
+      while (true) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        var idx;
+        while ((idx = buffer.indexOf('\\n\\n')) >= 0) {
+          var frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          if (!frame) continue;
+          var ev = parseSseFrame(frame);
+          if (ev.event === 'delta') {
+            try {
+              var d = JSON.parse(ev.data);
+              if (d && typeof d.text === 'string') {
+                accumulated += d.text;
+                turn.aEl.textContent = accumulated;
+                var b = $('body');
+                b.scrollTop = b.scrollHeight;
+              }
+            } catch (_e) { /* skip malformed delta */ }
+          } else if (ev.event === 'result') {
+            try { lastResult = JSON.parse(ev.data); } catch (_e) { /* keep prior */ }
+          } else if (ev.event === 'done') {
+            break;
+          }
+        }
+      }
+      if (lastResult && typeof lastResult.session_id === 'string' && lastResult.session_id !== sessionId) {
+        sessionId = lastResult.session_id;
+        post({ kind: 'session-id', sessionId: sessionId });
+      }
+      finalizeAnswer(turnIdx, turn.wrap, turn.aEl, lastResult, accumulated);
     } catch (err) {
       reportError('client_network', String((err && err.message) || err));
-      finalizeAnswer(aEl, { type: 'error', code: 'client_network', message: 'Network error' });
+      finalizeAnswer(turnIdx, turn.wrap, turn.aEl, { type: 'error', message: 'Network error' }, accumulated);
     } finally {
       qEl.disabled = false;
       $('send').disabled = false;
       qEl.focus();
-      var b = $('body');
-      b.scrollTop = b.scrollHeight;
+      var b2 = $('body');
+      b2.scrollTop = b2.scrollHeight;
     }
   }
 
@@ -281,13 +451,30 @@ html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: 
     if (ev.data.kind === 'set-context') {
       hostContext = ev.data.context === null ? null : (ev.data.context || null);
       renderCtxLine();
-    } else if (ev.data.kind === 'close' || ev.data.kind === 'destroy') {
-      // alpha.1 nothing to clean up inside the iframe; parent removes it.
     }
   });
 
-  // Surface the auto-context once for visual confirmation.
-  void readAutoContext();
+  // Restore prior session if any.
+  var stored = loadStored();
+  if (stored) {
+    if (typeof stored.sessionId === 'string') sessionId = stored.sessionId;
+    if (Array.isArray(stored.turns)) {
+      // Render each prior turn statically — no SSE replay, just final state.
+      stored.turns.forEach(function (t) {
+        if (!t || typeof t.q !== 'string') return;
+        var turn = startTurn(t.q);
+        turn.aEl.classList.remove('loading');
+        turn.aEl.textContent = t.a || '';
+        appendCitations(turn.aEl, t.citations || []);
+        turns.push({ q: t.q, a: t.a || '', citations: t.citations || [], answerId: t.answerId || null, fb: t.fb });
+      });
+    }
+  }
+
+  // Force at least one source flag to be referenced so the params parse
+  // above stays "live" (linters in alpha.3+ may complain otherwise).
+  void contextSources;
+  void projectKey;
 
   post({ kind: 'ready' });
 })();
