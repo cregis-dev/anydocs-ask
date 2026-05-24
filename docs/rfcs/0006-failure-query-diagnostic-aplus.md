@@ -1,6 +1,6 @@
 # RFC 0006 — 失败查询诊断（A+）
 
-> Status: Accepted（2026-05-24 升档 + alpha.0 alignment 落 schema 留位 + CLI stub）
+> Status: Accepted（2026-05-24 升档 + alpha.0/.1/.2 全链路落 main；2026-05-25 alpha.3 Studio A+ 视图接通）
 > Author: @shawndslee
 > Date: 2026-05-24（Accepted 同日）
 > 范围版本: `@anydocs/ask` 0.4
@@ -303,3 +303,6 @@ Feedback tab：
 |---|---|---|
 | 2026-05-24 | 起草（0.4 alpha 链路 + 5 决策点 + 4 永不做）| @shawndslee |
 | 2026-05-24 | **升档 Accepted + alpha.0 alignment**：`anydocs.ask.json.aplus` schema 留位 + CLI `feedback diagnose` stub。零行为变化。详见 §1.4 升档论证 + §3 里程碑首行 alignment PR | @shawndslee |
+| 2026-05-24 | **alpha.1 聚类 pure 模块 + simulator**：`src/feedback/diagnose-cluster.ts` threshold-based union-find on bge-m3 cosine；`synthesize60()` 4 主题 × 15 query 验证默认阈值精确 4 簇 | @shawndslee |
+| 2026-05-24 | **alpha.2 建议生成 + CLI pipeline**：`src/feedback/diagnose-suggest.ts` 调主 LLM（B.2 复用 Anthropic 通道）按 §4.4 prompt；`diagnose-runner.ts` 串 DB → embedding_cache → clusterFeedback → generateSuggestion → 写 `suggestions/c_*.{md,json}` 或 `.shadow/` | @shawndslee |
+| 2026-05-25 | **alpha.3 Studio A+ 视图接通**（A7）：`feedback/suggestions-loader.ts` 扫盘 + parse；Feedback tab KPI `A+ candidates` 接通真数（shadow/live 两态）+ `aplus_candidates` chip 过滤到 cluster 成员 + Drawer 新增 SUGGESTION 段（cluster_id / center / peer queries / markdown 预览 / 绝对路径）。无 LLM 调用；纯前端 + 读盘 | @shawndslee |

@@ -4,6 +4,15 @@
 
 ## Unreleased
 
+### 新增
+
+- **RFC 0006 0.4.0-alpha.3 — Studio A+ 视图接通**（A7）—— `feedback/suggestions-loader.ts` 扫 `<stateRoot>/feedback/suggestions/{c_*.json,.shadow/c_*.json}` + 解析为 UI VM。Console Feedback tab 三件事：
+  - KPI tile `A+ candidates` 从硬编码 "—" 接通真数；区分 `shadow mode` vs `live · operator flipped`（aplus.enabled=true 时）；无 suggestions 时回退到 `unlocks at 50` 占位
+  - 新增 `aplus_candidates` filter chip，过滤到出现在任意 cluster 的 feedback 行（chip 计数 + 列表 narrowing 与 no_citations / cit-check 同形态）
+  - Drawer 新增 SUGGESTION 段：cluster_id + center question + peer queries（≤ 8 条）+ shadow/live 徽章 + suggestion markdown 预览（≤ 1600 chars 折叠）+ 绝对文件路径（operator 在编辑器里打开）
+
+  **不依赖反馈量门槛** —— 即使 hermes-docs ≤ 15 条反馈，operator 跑 `feedback diagnose --shadow` 后 Studio 就能看到效果。`aplus.enabled=true` flip 留给 0.4.0 GA（≥ 50 反馈 + 4 周观察窗后由 operator 决定）。
+
 ## 0.3.1 — 2026-05-24
 
 补丁版：**RFC 0006 A+ 失败查询诊断 alpha 链路（alignment + alpha.1 + alpha.2）+ npm publish 准备**。无 breaking change（aplus 段默认 off）；纯加 alpha 通道 + 发布前手续修整。

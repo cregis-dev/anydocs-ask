@@ -35,6 +35,7 @@ const FILTER_LABELS: Record<FeedbackFilter, string> = {
   // tooltip on the chip carries the full taxonomy ('partially' or
   // 'not_supports').
   semantic_check_failed: '⚠ cit-check',
+  aplus_candidates: 'A+ cluster',
 };
 
 export function renderFeedbackTab(vm: FeedbackTabViewModel): Html {
@@ -178,11 +179,32 @@ function kpiStrip(snap: FeedbackTabSnapshot): Html {
             : 'partially + not_supports'}
         </div>
       </div>
+      ${aplusCandidatesTile(k.aplusCandidates)}
+    </div>
+  `;
+}
+
+function aplusCandidatesTile(aplus: FeedbackTabSnapshot['kpi']['aplusCandidates']): Html {
+  // RFC 0006 A7 — three render states:
+  //   - null              → "—" + "unlocks at 50 (PRD §10.3)" (no suggestions)
+  //   - shadow mode       → N + "shadow mode" (aplus.enabled=false, --shadow runs)
+  //   - enabled mode      → N + "live · operator flipped"
+  if (!aplus) {
+    return html`
       <div class="kpi">
         <div class="k-lab">A+ candidates</div>
         <div class="k-val">—</div>
         <div class="k-foot">unlocks at 50 (PRD §10.3)</div>
       </div>
+    `;
+  }
+  const isShadow = aplus.mode === 'shadow';
+  const foot = isShadow ? 'shadow mode' : 'live · operator flipped';
+  return html`
+    <div class="kpi" data-feedback-aplus-mode="${aplus.mode}">
+      <div class="k-lab">A+ candidates</div>
+      <div class="k-val">${String(aplus.total)}</div>
+      <div class="k-foot" style="${isShadow ? 'color: var(--fg-mute);' : ''}">${foot}</div>
     </div>
   `;
 }
@@ -247,6 +269,7 @@ function chipBar(counts: FilterCounts, active: FeedbackFilter): Html {
     'implicit',
     'no_citations',
     'semantic_check_failed',
+    'aplus_candidates',
   ];
   return html`
     <nav class="feedback-chips"
@@ -448,6 +471,7 @@ const CHIP_LABELS = {
   implicit: 'implicit',
   no_citations: 'no citations',
   semantic_check_failed: '⚠ cit-check',
+  aplus_candidates: 'A+ cluster',
 };
 const FILTER_FALLBACK_HINT = 'Try another chip or widen the window with <code class="inline">?days=30</code>.';
 
@@ -773,6 +797,58 @@ function drawerSec(title, sub, body) {
     '<div class="drawer-sec-bd">' + body + '</div></div>';
 }
 
+function renderSuggestionBlock(c) {
+  // RFC 0006 A7 — SUGGESTION block. The cluster ID is the file basename
+  // so the operator can copy it and cat / open the file. peerQuestions are
+  // the other turns that ended up in the same cluster — strongly hints at
+  // the common failure surface.
+  const modeBadge = c.shadow
+    ? '<span class="tag" title="aplus.enabled=false; trace lives under .shadow/">shadow</span>'
+    : '<span class="tag ok" title="operator flipped aplus.enabled=true">live</span>';
+  const sub =
+    '· cluster ' + escapeHtml(c.clusterId) + ' · ' + c.size + ' rows · density ' + c.density.toFixed(2);
+  let peers = '';
+  if (Array.isArray(c.peerQuestions) && c.peerQuestions.length > 0) {
+    peers = '<div style="margin-top: var(--s-2); font-size: var(--t-12); color: var(--fg-soft);">' +
+      '<div class="meta" style="margin-bottom: 4px;">peer queries · ' + c.peerQuestions.length + '</div>' +
+      '<ul style="list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:2px;">' +
+      c.peerQuestions
+        .map(
+          (q) =>
+            '<li style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="' +
+            escapeHtml(q) + '">· ' + escapeHtml(q) + '</li>',
+        )
+        .join('') +
+      '</ul></div>';
+  }
+  const center =
+    '<div style="font-size: var(--t-12); color: var(--fg-soft); margin-top: var(--s-1);">' +
+    '<span class="meta">center · </span>' + escapeHtml(c.centerQuestion) + '</div>';
+  let body = '';
+  if (c.suggestionMarkdown && c.suggestionMarkdown.length > 0) {
+    body =
+      '<details style="margin-top: var(--s-3);"' + (c.suggestionTruncated ? '' : ' open') + '>' +
+      '<summary style="cursor:pointer; font-size: var(--t-12); color: var(--fg-soft);">' +
+        'suggestion markdown' + (c.suggestionTruncated ? ' (preview)' : '') + '</summary>' +
+      '<pre style="white-space:pre-wrap; font-family:inherit; font-size:var(--t-13); margin: var(--s-2) 0 0;' +
+        ' max-height: 240px; overflow:auto;">' + escapeHtml(c.suggestionMarkdown) + '</pre>' +
+      '</details>';
+  } else {
+    body =
+      '<p class="muted" style="font-size: var(--t-12); margin: var(--s-2) 0 0;">' +
+      'suggestion markdown file unavailable (deleted, unreadable, or LLM step skipped this cluster)' +
+      '</p>';
+  }
+  const path =
+    '<div style="margin-top: var(--s-2); font-size: var(--t-11); color: var(--fg-mute);">' +
+    'file · <code class="inline" style="user-select:all;">' + escapeHtml(c.suggestionPath) + '</code>' +
+    '</div>';
+  const inner =
+    '<div style="display:flex; gap: var(--s-2); align-items:center; flex-wrap:wrap;">' + modeBadge + center + '</div>' +
+    peers + body + path;
+  return drawerSec('SUGGESTION', sub, inner);
+}
+
 function renderDrawerHead(d) {
   return (
     '<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:var(--s-3);">' +
@@ -821,6 +897,13 @@ function renderDrawerBody(d) {
       renderFusedTable(d.run.fused));
   } else {
     out += drawerSec('RETRIEVAL', '', '<p class="muted" style="font-size:var(--t-12); margin:0;">no linked run line (rolled out of 30d window or runs disabled)</p>');
+  }
+  // RFC 0006 A7 — A+ cluster block (when this row was clustered by the
+  // feedback diagnose CLI). suggestionMarkdown body is rendered as plain
+  // <pre> (no markdown parser in the inline JS); full file path sits
+  // below for the operator to open in their editor.
+  if (d.aplusCluster) {
+    out += renderSuggestionBlock(d.aplusCluster);
   }
   // RFC 0002 §5.1 cross-journey jumps. Payloads are serialised onto data-
   // attrs and consumed by bindDrawerControls so the JSON-encoding stays
