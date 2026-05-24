@@ -579,7 +579,7 @@ test('GET /api/projects/:name/feedback: returns rows + filterCounts; respects ?f
     };
     assert.equal(allBody.ok, true);
     assert.equal(allBody.rows.length, 4);
-    assert.deepEqual(allBody.filterCounts, { all: 4, thumbs_up: 2, thumbs_down: 1, implicit: 1, no_citations: 0, semantic_check_failed: 0 });
+    assert.deepEqual(allBody.filterCounts, { all: 4, thumbs_up: 2, thumbs_down: 1, implicit: 1, no_citations: 0, semantic_check_failed: 0, aplus_candidates: 0 });
 
     // filter=thumbs_up — 2 rows.
     const upRes = await app.request('/api/projects/docs-zh/feedback?filter=thumbs_up');
@@ -633,7 +633,7 @@ test('GET /api/projects/:name/feedback: curated rows excluded from all chip + KP
       rows: Array<{ signal_source: string }>;
       filterCounts: Record<string, number>;
     };
-    assert.deepEqual(body.filterCounts, { all: 3, thumbs_up: 1, thumbs_down: 1, implicit: 1, no_citations: 0, semantic_check_failed: 0 });
+    assert.deepEqual(body.filterCounts, { all: 3, thumbs_up: 1, thumbs_down: 1, implicit: 1, no_citations: 0, semantic_check_failed: 0, aplus_candidates: 0 });
     // List rows when filter='all' must also stay at 3 (curated suppressed
     // by the SQL filter; counts and list must agree).
     assert.equal(body.rows.length, 3);
@@ -694,7 +694,7 @@ test('GET /api/projects/:name/feedback: disabled project returns enabled=false, 
     assert.equal(body.ok, true);
     assert.equal(body.enabled, false);
     assert.equal(body.rows.length, 0);
-    assert.deepEqual(body.filterCounts, { all: 0, thumbs_up: 0, thumbs_down: 0, implicit: 0, no_citations: 0, semantic_check_failed: 0 });
+    assert.deepEqual(body.filterCounts, { all: 0, thumbs_up: 0, thumbs_down: 0, implicit: 0, no_citations: 0, semantic_check_failed: 0, aplus_candidates: 0 });
   } finally {
     await cleanup();
   }
@@ -3970,6 +3970,258 @@ test('GET /p/:name: Feedback tab SSR — semantic_check_failed chip is in the ch
     assert.match(body, /⚠ cit-check/);
     // KPI tile.
     assert.match(body, /cit-check failed/);
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// RFC 0006 A7 alpha.3 — A+ visibility in Studio Feedback tab
+// ---------------------------------------------------------------------------
+
+async function seedAplusCluster(
+  stateRoot: string,
+  args: {
+    clusterId: string;
+    members: number[];
+    memberQuestions: string[];
+    shadow?: boolean;
+    size?: number;
+    density?: number;
+    markdown?: string;
+  },
+): Promise<{ tracePath: string; mdPath: string }> {
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const dir = args.shadow
+    ? join(stateRoot, 'feedback', 'suggestions', '.shadow')
+    : join(stateRoot, 'feedback', 'suggestions');
+  await mkdir(dir, { recursive: true });
+  const tracePath = join(dir, `${args.clusterId}.json`);
+  const mdPath = join(dir, `${args.clusterId}.md`);
+  await writeFile(
+    tracePath,
+    JSON.stringify(
+      {
+        cluster_id: args.clusterId,
+        size: args.size ?? args.members.length,
+        density: args.density ?? 0.82,
+        center_question: args.memberQuestions[0],
+        center_feedback_id: args.members[0],
+        members: args.members,
+        member_questions: args.memberQuestions,
+        suggestion: { model: 'mock', latency_ms: 100 },
+      },
+      null,
+      2,
+    ),
+  );
+  await writeFile(
+    mdPath,
+    args.markdown ??
+      `# Suggested doc fix\n\nCluster ${args.clusterId} groups ${args.members.length} similar failed queries.\n`,
+  );
+  return { tracePath, mdPath };
+}
+
+test('GET /api/projects/:name/feedback: aplus_candidates filter narrows rows to cluster members (RFC 0006 A7)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: -1, question: 'how to retry refund?' });
+    insertFeedback(db, { answer_id: 'a2', rating: -1, question: 'retry policy on refunds?' });
+    insertFeedback(db, { answer_id: 'a3', rating: 1, question: 'how to check status?' });
+    db.close();
+    // Two rows (1, 2) are in the cluster; row 3 is not.
+    await seedAplusCluster(stateRoot, {
+      clusterId: 'c_aplus0000001',
+      members: [1, 2],
+      memberQuestions: ['how to retry refund?', 'retry policy on refunds?'],
+    });
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+
+    // filterCounts.aplus_candidates = 2; all = 3.
+    const all = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      filterCounts: Record<string, number>;
+      kpi: { aplusCandidates: { total: number; mode: string } | null };
+    };
+    assert.equal(all.filterCounts.aplus_candidates, 2);
+    assert.equal(all.filterCounts.all, 3);
+    assert.deepEqual(all.kpi.aplusCandidates, { total: 1, mode: 'enabled' });
+
+    // filter=aplus_candidates narrows to the 2 cluster members.
+    const narrowed = (await (
+      await app.request('/api/projects/docs-zh/feedback?filter=aplus_candidates')
+    ).json()) as { rows: Array<{ feedback_id: number; aplusCluster: unknown }> };
+    assert.equal(narrowed.rows.length, 2);
+    assert.ok(narrowed.rows.every((r) => r.aplusCluster !== null));
+    const fids = new Set(narrowed.rows.map((r) => r.feedback_id));
+    assert.ok(fids.has(1));
+    assert.ok(fids.has(2));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback: aplus KPI shows shadow mode when traces live under .shadow/', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: -1, question: 'q1' });
+    insertFeedback(db, { answer_id: 'a2', rating: -1, question: 'q2' });
+    db.close();
+    await seedAplusCluster(stateRoot, {
+      clusterId: 'c_shadow000001',
+      members: [1, 2],
+      memberQuestions: ['q1', 'q2'],
+      shadow: true,
+    });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      kpi: { aplusCandidates: { total: number; mode: string } | null };
+      filterCounts: Record<string, number>;
+    };
+    assert.deepEqual(body.kpi.aplusCandidates, { total: 1, mode: 'shadow' });
+    assert.equal(body.filterCounts.aplus_candidates, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback: aplus KPI is null when no suggestions dir exists', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: -1 });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      kpi: { aplusCandidates: unknown };
+      filterCounts: Record<string, number>;
+    };
+    assert.equal(body.kpi.aplusCandidates, null);
+    assert.equal(body.filterCounts.aplus_candidates, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback/:id: drawer detail carries SUGGESTION block when row is in a cluster (RFC 0006 A7)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: -1, question: 'how to retry refund?' });
+    insertFeedback(db, { answer_id: 'a2', rating: -1, question: 'retry policy on refunds?' });
+    db.close();
+    await seedAplusCluster(stateRoot, {
+      clusterId: 'c_drawer000001',
+      members: [1, 2],
+      memberQuestions: ['how to retry refund?', 'retry policy on refunds?'],
+      markdown: '# Suggested fix\n\nDocument the retry-after-refund flow under Refunds → Errors.\n',
+    });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const detailRes = await app.request('/api/projects/docs-zh/feedback/1');
+    assert.equal(detailRes.status, 200);
+    const body = (await detailRes.json()) as {
+      ok: boolean;
+      detail: {
+        aplusCluster: {
+          clusterId: string;
+          shadow: boolean;
+          centerQuestion: string;
+          peerQuestions: string[];
+          size: number;
+          density: number;
+          suggestionMarkdown: string | null;
+          suggestionTruncated: boolean;
+          suggestionPath: string;
+        } | null;
+      };
+    };
+    assert.equal(body.ok, true);
+    assert.ok(body.detail.aplusCluster, 'row 1 should carry an aplusCluster');
+    const c = body.detail.aplusCluster!;
+    assert.equal(c.clusterId, 'c_drawer000001');
+    assert.equal(c.shadow, false);
+    assert.equal(c.size, 2);
+    // peerQuestions excludes this row's own question.
+    assert.equal(c.peerQuestions.length, 1);
+    assert.match(c.peerQuestions[0]!, /retry policy/);
+    // suggestionMarkdown was loaded inline.
+    assert.match(c.suggestionMarkdown ?? '', /Suggested fix/);
+    assert.equal(c.suggestionTruncated, false);
+    assert.match(c.suggestionPath, /c_drawer000001\.md$/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab SSR — aplus_candidates chip + KPI render (RFC 0006 A7)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: -1, question: 'q1' });
+    insertFeedback(db, { answer_id: 'a2', rating: -1, question: 'q2' });
+    db.close();
+    await seedAplusCluster(stateRoot, {
+      clusterId: 'c_ssr00000001',
+      members: [1, 2],
+      memberQuestions: ['q1', 'q2'],
+    });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    // Chip is in the chip bar.
+    assert.match(body, /data-feedback-chip="aplus_candidates"/);
+    assert.match(body, /A\+ cluster/);
+    // KPI tile shows real count + live mode (not placeholder).
+    assert.match(body, /data-feedback-aplus-mode="enabled"/);
+    assert.match(body, /A\+ candidates[\s\S]*?>1<[\s\S]*?live · operator flipped/);
+    // Placeholder copy is NOT present.
+    assert.equal(body.includes('unlocks at 50 (PRD §10.3)'), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab SSR — KPI placeholder when no suggestions dir', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: 1 });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    // Placeholder copy is back in place (no clusters yet).
+    assert.match(body, /A\+ candidates[\s\S]*?>—<[\s\S]*?unlocks at 50/);
+    assert.equal(body.includes('data-feedback-aplus-mode'), false);
   } finally {
     await cleanup();
   }

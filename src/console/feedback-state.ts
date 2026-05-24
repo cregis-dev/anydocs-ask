@@ -29,6 +29,11 @@ import {
   type RunRecord,
   type RunsLine,
 } from '../runs/types.ts';
+import {
+  loadSuggestions,
+  readSuggestionMarkdown,
+  type SuggestionsSnapshot,
+} from '../feedback/suggestions-loader.ts';
 
 const DAY_MS = 86_400_000;
 const DEFAULT_DAYS = 7;
@@ -51,7 +56,8 @@ export type FeedbackFilter =
   | 'thumbs_down'
   | 'implicit'
   | 'no_citations'
-  | 'semantic_check_failed';
+  | 'semantic_check_failed'
+  | 'aplus_candidates';
 export const FEEDBACK_FILTERS: readonly FeedbackFilter[] = [
   'all',
   'thumbs_up',
@@ -59,6 +65,7 @@ export const FEEDBACK_FILTERS: readonly FeedbackFilter[] = [
   'implicit',
   'no_citations',
   'semantic_check_failed',
+  'aplus_candidates',
 ] as const;
 
 export type FeedbackKpi = {
@@ -72,8 +79,12 @@ export type FeedbackKpi = {
   meanConfidence: number | null;
   /** (error + clarify) / runs-with-feedback. 0 when no runs-with-feedback. */
   nonAnswerRate: number;
-  /** Reserved for 0.3 A+ clustering (PRD §10.3, ≥50 threshold). */
-  aplusCandidates: null;
+  /** RFC 0006 A7 — A+ cluster count surfaced by [[loadSuggestions]] from
+   *  `<stateRoot>/feedback/suggestions/`. `null` when the dir is missing or
+   *  every trace failed to parse (= no clusters to show). `mode` distinguishes
+   *  operator-flipped (`aplus.enabled=true` so traces sit at the dir root)
+   *  from shadow-only runs (traces under `.shadow/`). */
+  aplusCandidates: { total: number; mode: 'enabled' | 'shadow' } | null;
   /** RFC 0005 V5 — runs in window with ≥1 citation verdict !== 'supports'.
    *  Same denominator as the semantic_check_failed chip badge. null when
    *  no tail in the window had any verdict (feature off, or zero shadow
@@ -127,6 +138,11 @@ export type FeedbackRowVM = {
    *  validator failed silently, or pre-alpha.2 row). Drives the
    *  semantic_check_failed chip badge + per-row affordance. */
   semanticCheckFailed: boolean | null;
+  /** RFC 0006 A7 — non-null when this row's `feedback_id` participates in a
+   *  cluster surfaced by [[loadSuggestions]]. Drives the row-level "A+
+   *  cluster" tag + the drawer's SUGGESTION section join key. `shadow=true`
+   *  when the trace lived under `.shadow/`. */
+  aplusCluster: { clusterId: string; shadow: boolean } | null;
 };
 
 export type FilterCounts = Record<FeedbackFilter, number>;
@@ -226,11 +242,13 @@ function computeSnapshot(
 
   const inWindow = db
     .prepare(
-      `SELECT signal_source, rating, answer_id
+      `SELECT feedback_id, signal_source, rating, answer_id
          FROM feedback
         WHERE created_at >= ?`,
     )
-    .all(sinceMs) as Array<Pick<FeedbackRow, 'signal_source' | 'rating' | 'answer_id'>>;
+    .all(sinceMs) as Array<
+    Pick<FeedbackRow, 'feedback_id' | 'signal_source' | 'rating' | 'answer_id'>
+  >;
 
   // `all` is the union of the four chips, NOT a raw row count — curated
   // rows are deliberately outside the chip taxonomy (post-review, surfaced
@@ -249,6 +267,11 @@ function computeSnapshot(
   }
   const runIndex = buildRunIndex(stateRoot, sinceMs, inWindowFeedbackIds);
 
+  // RFC 0006 A7 — pull A+ cluster traces once per snapshot. Both the KPI
+  // tile and the `aplus_candidates` filter chip read from this; per-row
+  // attribution (aplusCluster) is a lookup in memberIndex.
+  const suggestions = loadSuggestions(stateRoot);
+
   const filterCounts: FilterCounts = {
     all: 0,
     thumbs_up: 0,
@@ -256,6 +279,7 @@ function computeSnapshot(
     implicit: 0,
     no_citations: 0,
     semantic_check_failed: 0,
+    aplus_candidates: 0,
   };
   let explicitCount = 0;
   let implicitCount = 0;
@@ -289,6 +313,12 @@ function computeSnapshot(
         filterCounts.semantic_check_failed++;
       }
     }
+    // RFC 0006 A7 — count rows whose feedback_id participates in any A+
+    // cluster surfaced by [[loadSuggestions]]. Cross-cutting with the other
+    // chips: a row can be both 👎 AND in an A+ cluster.
+    if (suggestions.memberIndex.has(r.feedback_id)) {
+      filterCounts.aplus_candidates++;
+    }
     // 'curated' rows skip every counter; see chip-taxonomy comment above.
   }
 
@@ -312,6 +342,21 @@ function computeSnapshot(
           }),
         )
       : null;
+  // RFC 0006 A7 — narrow `aplus_candidates` filter to feedback_ids covered
+  // by the suggestions memberIndex. Same shape as no_citations/cit-check
+  // but keyed on feedback_id (cluster member) rather than answer_id.
+  const aplusFeedbackIds =
+    filter === 'aplus_candidates'
+      ? new Set<number>(
+          inWindow
+            .filter(
+              (r) =>
+                (r.signal_source === 'explicit' || r.signal_source === 'implicit') &&
+                suggestions.memberIndex.has(r.feedback_id),
+            )
+            .map((r) => r.feedback_id),
+        )
+      : null;
   const rowsRaw = selectRows(
     db,
     sinceMs,
@@ -319,6 +364,7 @@ function computeSnapshot(
     limit,
     noCitationAnswerIds,
     semanticFailedAnswerIds,
+    aplusFeedbackIds,
   );
 
   // Breadcrumb JOIN: pages.breadcrumb is JSON-encoded and already lives in
@@ -348,6 +394,10 @@ function computeSnapshot(
     const meta = sessionId ? sessionTurnIndex.get(sessionId) : undefined;
     const turnIndex = meta ? meta.orderedIds.indexOf(r.feedback_id) + 1 : 1;
     const semanticChecks = runMeta?.semanticChecks ?? null;
+    const clusterId = suggestions.memberIndex.get(r.feedback_id) ?? null;
+    const clusterEntry = clusterId
+      ? suggestions.entries.find((e) => e.clusterId === clusterId) ?? null
+      : null;
     return {
       feedback_id: r.feedback_id,
       ts: new Date(r.created_at).toISOString(),
@@ -364,6 +414,10 @@ function computeSnapshot(
       turnIndex: turnIndex > 0 ? turnIndex : 1,
       sessionTurnCount: meta ? meta.orderedIds.length : 1,
       semanticCheckFailed: semanticChecks === null ? null : hasFailedVerdict(semanticChecks),
+      aplusCluster:
+        clusterEntry !== null
+          ? { clusterId: clusterEntry.clusterId, shadow: clusterEntry.shadow }
+          : null,
     };
   });
 
@@ -418,7 +472,16 @@ function computeSnapshot(
       explicitShare,
       meanConfidence: confN > 0 ? confSum / confN : null,
       nonAnswerRate: ratedN > 0 ? nonAnswer / ratedN : 0,
-      aplusCandidates: null,
+      aplusCandidates:
+        suggestions.entries.length > 0
+          ? {
+              total: suggestions.entries.length,
+              // Enabled wins on collision (suggestions-loader contract);
+              // if any entry is non-shadow, the operator has flipped at
+              // least once — present as "enabled". Otherwise shadow-only.
+              mode: suggestions.entries.some((e) => !e.shadow) ? 'enabled' : 'shadow',
+            }
+          : null,
       semanticCheckFailed:
         semanticCheckSeen > 0 ? filterCounts.semantic_check_failed : null,
     },
@@ -442,6 +505,10 @@ function selectRows(
    *  answer_ids whose linked run has ≥1 verdict !== 'supports'. Empty set
    *  short-circuits, same pattern as `no_citations`. */
   semanticFailedAnswerIds: Set<string> | null,
+  /** Required when filter='aplus_candidates' — precomputed set of
+   *  feedback_ids that participate in an A+ cluster (suggestions
+   *  memberIndex). Empty set short-circuits. */
+  aplusFeedbackIds: Set<number> | null,
 ): FeedbackRow[] {
   if (filter === 'no_citations' || filter === 'semantic_check_failed') {
     const ids =
@@ -455,6 +522,21 @@ function selectRows(
           WHERE created_at >= ?
             AND signal_source IN ('explicit', 'implicit')
             AND answer_id IN (${placeholders})
+          ORDER BY created_at DESC
+          LIMIT ?`,
+      )
+      .all(sinceMs, ...ids, limit) as FeedbackRow[];
+  }
+  if (filter === 'aplus_candidates') {
+    const ids = aplusFeedbackIds ?? new Set<number>();
+    if (ids.size === 0) return [];
+    const placeholders = Array(ids.size).fill('?').join(',');
+    return db
+      .prepare(
+        `SELECT * FROM feedback
+          WHERE created_at >= ?
+            AND signal_source IN ('explicit', 'implicit')
+            AND feedback_id IN (${placeholders})
           ORDER BY created_at DESC
           LIMIT ?`,
       )
@@ -484,8 +566,9 @@ function filterToWhere(filter: FeedbackFilter): string {
       return `signal_source = 'implicit'`;
     case 'no_citations':
     case 'semantic_check_failed':
-      // Handled out-of-line by selectRows (needs runIndex JOIN); this
-      // branch keeps the switch exhaustive for TypeScript.
+    case 'aplus_candidates':
+      // Handled out-of-line by selectRows (needs runIndex / suggestions
+      // join); this branch keeps the switch exhaustive for TypeScript.
       return `signal_source IN ('explicit', 'implicit')`;
   }
 }
@@ -744,6 +827,7 @@ function emptySnapshot(
       implicit: 0,
       no_citations: 0,
       semantic_check_failed: 0,
+      aplus_candidates: 0,
     },
     filter,
     rows: [],
@@ -834,6 +918,28 @@ export type FeedbackRowDetail = {
     signal_source: 'explicit' | 'implicit' | 'curated';
     historyWindow: number | null;
   }>;
+  /** RFC 0006 A7 — non-null when this row's `feedback_id` participates in a
+   *  cluster surfaced by [[loadSuggestions]]. Renders the drawer's
+   *  SUGGESTION section: cluster_id / peer queries / suggestion markdown
+   *  preview / absolute file path. `suggestionMarkdown` is the file body
+   *  truncated to ~1600 chars; the rest sits on disk. */
+  aplusCluster: {
+    clusterId: string;
+    shadow: boolean;
+    centerQuestion: string;
+    /** Same-cluster questions, excluding this row's own question. Capped
+     *  at 8 entries to keep the drawer scannable. */
+    peerQuestions: string[];
+    size: number;
+    density: number;
+    suggestionMarkdown: string | null;
+    /** True when suggestionMarkdown was truncated (full body still on
+     *  disk at suggestionPath). */
+    suggestionTruncated: boolean;
+    /** Absolute filesystem path to `c_<id>.md` — the operator opens this
+     *  in their editor of choice. */
+    suggestionPath: string;
+  } | null;
 };
 
 export function loadFeedbackRowDetail(
@@ -889,6 +995,11 @@ export function loadFeedbackRowDetail(
       ? loadSessionTurns(db, stateRoot, sinceMs, sessionId, row.feedback_id, runIndex)
       : { turnIndex: 1, sessionTurnCount: 1, sessionTurns: [] };
 
+    // RFC 0006 A7 — attach the A+ cluster body when this row participates
+    // in one. The suggestions snapshot is best-effort; missing dir / parse
+    // failures leave aplusCluster=null and the drawer hides the section.
+    const aplusCluster = buildDrawerAplusCluster(stateRoot, row);
+
     return {
       feedback_id: row.feedback_id,
       ts: new Date(row.created_at).toISOString(),
@@ -926,6 +1037,7 @@ export function loadFeedbackRowDetail(
       turnIndex,
       sessionTurnCount,
       sessionTurns,
+      aplusCluster,
     };
   } catch {
     return null;
@@ -936,6 +1048,48 @@ export function loadFeedbackRowDetail(
       /* ignore */
     }
   }
+}
+
+const APLUS_PEER_LIMIT = 8;
+const APLUS_MD_TRUNCATE = 1600;
+
+/**
+ * RFC 0006 A7 — assemble the drawer's SUGGESTION block for a single feedback
+ * row. Returns null when no cluster covers this row, or when the suggestions
+ * dir is missing / malformed. Best-effort: even when the trace exists but the
+ * markdown file is unreadable, we still return the cluster shape with
+ * `suggestionMarkdown=null` so the drawer renders the metadata + path.
+ */
+function buildDrawerAplusCluster(
+  stateRoot: string,
+  row: FeedbackRow,
+): FeedbackRowDetail['aplusCluster'] {
+  const suggestions = loadSuggestions(stateRoot);
+  const clusterId = suggestions.memberIndex.get(row.feedback_id);
+  if (!clusterId) return null;
+  const entry = suggestions.entries.find((e) => e.clusterId === clusterId);
+  if (!entry) return null;
+
+  const peerQuestions = entry.memberQuestions
+    .filter((_q, i) => entry.members[i] !== row.feedback_id)
+    .slice(0, APLUS_PEER_LIMIT);
+
+  const md = readSuggestionMarkdown(entry.markdownPath);
+  const truncated = md !== null && md.length > APLUS_MD_TRUNCATE;
+  const suggestionMarkdown =
+    md === null ? null : truncated ? md.slice(0, APLUS_MD_TRUNCATE) : md;
+
+  return {
+    clusterId: entry.clusterId,
+    shadow: entry.shadow,
+    centerQuestion: entry.centerQuestion,
+    peerQuestions,
+    size: entry.size,
+    density: entry.density,
+    suggestionMarkdown,
+    suggestionTruncated: truncated,
+    suggestionPath: entry.markdownPath,
+  };
 }
 
 /**
