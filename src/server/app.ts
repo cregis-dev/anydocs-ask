@@ -30,6 +30,12 @@ import { extractClaimChunkPairs } from '../query/claim-extractor.ts';
 import { validateCitations } from '../query/citation-validator.ts';
 import { renderWidgetHostScript } from '../widget/host-sdk.ts';
 import { renderWidgetChatPage } from '../widget/chat-page.ts';
+import {
+  gateWidgetRequest,
+  InProcessRateLimiter,
+  isWidgetRequest,
+  type WidgetGateOutcome,
+} from '../widget/server-gate.ts';
 
 const SSE_HEARTBEAT_MS = 2_000;
 const SSE_INITIAL_PADDING_BYTES = 4_096;
@@ -63,7 +69,25 @@ export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
   const { runtime } = deps;
 
-  app.use('*', buildCorsMiddleware(runtime.config.server));
+  app.use('*', buildCorsMiddleware(runtime.config.server, runtime.config.widget));
+
+  // RFC 0004 W4 — single rate-limiter shared across the three /v1/ask*
+  // endpoints. Outlives a request but lives with the Hono app instance
+  // (so test setup/teardown gets a fresh one per Runtime).
+  const widgetRateLimiter = new InProcessRateLimiter();
+
+  // Gate runs before each widget-flavoured /v1/ask call. Non-widget
+  // callers (no X-Project-Key header) skip the gate and behave exactly
+  // like 0.3.x.
+  const widgetGate = (c: Context): WidgetGateOutcome | null => {
+    if (!isWidgetRequest(c.req.raw.headers)) return null;
+    return gateWidgetRequest(c.req.raw.headers, {
+      enabled: runtime.config.widget.enabled,
+      allowedOrigins: runtime.config.widget.allowedOrigins,
+      rateLimitPerMinute: runtime.config.widget.rateLimitPerMinute,
+      rateLimiter: widgetRateLimiter,
+    });
+  };
 
   // -----------------------------------------------------------------------
   // Web Ask reader — minimal end-user HTML at GET /ask. Designed so the
@@ -127,6 +151,10 @@ export function createApp(deps: AppDeps): Hono {
   // Ask
   // -----------------------------------------------------------------------
   app.post('/v1/ask', async (c) => {
+    const gated = widgetGate(c);
+    if (gated && !gated.ok) {
+      return c.json({ type: 'error', code: gated.code }, gated.status);
+    }
     const prepared = await prepareAskCall(runtime, c);
     if (!prepared.ok) {
       return c.json(prepared.result, prepared.status);
@@ -171,6 +199,10 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.post('/v1/ask/stream', (c) => {
+    const gated = widgetGate(c);
+    if (gated && !gated.ok) {
+      return c.json({ type: 'error', code: gated.code }, gated.status);
+    }
     c.header('X-Accel-Buffering', 'no');
     return streamSSE(c, async (stream) => {
       let writeQueue = Promise.resolve();
@@ -277,6 +309,10 @@ export function createApp(deps: AppDeps): Hono {
   // Feedback
   // -----------------------------------------------------------------------
   app.post('/v1/ask/feedback', async (c) => {
+    const gated = widgetGate(c);
+    if (gated && !gated.ok) {
+      return c.json({ type: 'error', code: gated.code }, gated.status);
+    }
     let body: unknown;
     try {
       body = await c.req.json();

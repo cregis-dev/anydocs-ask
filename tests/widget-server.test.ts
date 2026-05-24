@@ -35,12 +35,13 @@ async function buildProject(): Promise<{ root: string; cleanup: () => Promise<vo
       id: 'p',
       lang: 'zh',
       slug: 'p',
-      title: '页面',
+      title: '鉴权',
       status: 'published',
       content: {
         version: 1,
         blocks: [
-          { type: 'heading', id: 'h1', level: 1, children: [{ type: 'text', text: '页面' }] },
+          { type: 'heading', id: 'h1', level: 1, children: [{ type: 'text', text: '鉴权' }] },
+          { type: 'paragraph', id: 'p1', children: [{ type: 'text', text: '使用 JWT bearer token 完成鉴权。' }] },
         ],
       },
     }),
@@ -165,4 +166,193 @@ test('renderWidgetHostScript: defaultBaseUrl is stringified safely', async () =>
   const match = /var DEFAULT_BASE_URL = (".*?");/.exec(js);
   assert.ok(match, 'expected a DEFAULT_BASE_URL literal');
   assert.equal(JSON.parse(match[1]!), malicious);
+});
+
+// ---------------------------------------------------------------------------
+// alpha.2 W4 — widget gate e2e
+// ---------------------------------------------------------------------------
+
+async function setupWithAllowed(origin: string) {
+  const { root, cleanup: rmTmp } = await buildProject();
+  const stateRoot = await fs.mkdtemp(join(tmpdir(), 'anydocs-widget-state-'));
+  const { config } = await loadConfig(root);
+  config.runs.enabled = false;
+  config.widget.enabled = true;
+  config.widget.allowedOrigins = [origin];
+  // Generous default for the happy-path test; the rate-limit test uses
+  // a smaller config inline.
+  config.widget.rateLimitPerMinute = 60;
+  const db = openDatabase({ dbPath: ':memory:' });
+  const runtime = new Runtime({
+    projectRoot: root,
+    stateRoot,
+    config,
+    db,
+    embedder: new MockEmbedder(),
+    llm: new MockLLM({ model: 'mock-llm' }),
+    skipWatcher: true,
+  });
+  await runtime.start();
+  return {
+    runtime,
+    cleanup: async () => {
+      await runtime.stop();
+      await rmTmp();
+      await fs.rm(stateRoot, { recursive: true, force: true });
+    },
+  };
+}
+
+test('POST /v1/ask with X-Project-Key + allowed Origin → 200 (widget happy path)', async () => {
+  const origin = 'https://app.example.com';
+  const { runtime, cleanup } = await setupWithAllowed(origin);
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Project-Key': 'pk_test_1',
+        Origin: origin,
+      },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    assert.equal(res.status, 200);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /v1/ask with X-Project-Key but disallowed Origin → 403 origin_not_allowed', async () => {
+  const { runtime, cleanup } = await setupWithAllowed('https://app.example.com');
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Project-Key': 'pk_test_1',
+        Origin: 'https://evil.example',
+      },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    assert.equal(res.status, 403);
+    const body = (await res.json()) as { code: string };
+    assert.equal(body.code, 'origin_not_allowed');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /v1/ask with X-Project-Key empty → 400 invalid_project_key', async () => {
+  const origin = 'https://app.example.com';
+  const { runtime, cleanup } = await setupWithAllowed(origin);
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Project-Key': '',
+        Origin: origin,
+      },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { code: string };
+    assert.equal(body.code, 'invalid_project_key');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /v1/ask without X-Project-Key bypasses widget gate (Reader / Console unchanged)', async () => {
+  // alpha.0 promise: no X-Project-Key = no gate. Even disallowed Origin
+  // here is fine because the regular CORS layer would have rejected it
+  // at preflight if it were truly a browser call.
+  const { runtime, cleanup } = await setupWithAllowed('https://app.example.com');
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    assert.equal(res.status, 200, 'non-widget path is untouched');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /v1/ask widget calls share a rate limiter — second call beyond cap → 429', async () => {
+  const origin = 'https://app.example.com';
+  const { runtime, cleanup } = await setupWithAllowed(origin);
+  try {
+    // Tighten to 1/min so the second call exhausts. Setting the config in
+    // place is fine because the gate reads it per-request.
+    runtime.config.widget.rateLimitPerMinute = 1;
+    const app = createApp({ runtime });
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-Project-Key': 'pk_test_1',
+      Origin: origin,
+    };
+    const body = JSON.stringify({ question: 'q' });
+    const first = await app.request('/v1/ask', { method: 'POST', headers, body });
+    assert.equal(first.status, 200);
+    const second = await app.request('/v1/ask', { method: 'POST', headers, body });
+    assert.equal(second.status, 429);
+    const parsed = (await second.json()) as { code: string };
+    assert.equal(parsed.code, 'rate_limited');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('OPTIONS /v1/ask widget preflight allows X-Project-Key + the widget Origin', async () => {
+  // Browsers send an OPTIONS preflight when a cross-origin POST carries
+  // non-simple headers (X-Project-Key is non-simple). The CORS layer must
+  // reflect the widget origin + advertise the custom header.
+  const origin = 'https://app.example.com';
+  const { runtime, cleanup } = await setupWithAllowed(origin);
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask', {
+      method: 'OPTIONS',
+      headers: {
+        Origin: origin,
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'X-Project-Key, Content-Type',
+      },
+    });
+    assert.equal(res.status, 204);
+    assert.equal(res.headers.get('access-control-allow-origin'), origin);
+    const allowHeaders = (res.headers.get('access-control-allow-headers') ?? '').toLowerCase();
+    assert.match(allowHeaders, /x-project-key/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('widget.enabled=false plus X-Project-Key → 404 widget_disabled on /v1/ask too', async () => {
+  // Belt-and-braces: even if a sneak header gets past CORS, the gate
+  // returns the same 404 widget_disabled the static endpoints serve.
+  const { runtime, cleanup } = await setup(false);
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Project-Key': 'pk_x',
+        Origin: 'https://app.example.com',
+      },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    assert.equal(res.status, 404);
+    const body = (await res.json()) as { code: string };
+    assert.equal(body.code, 'widget_disabled');
+  } finally {
+    await cleanup();
+  }
 });
