@@ -4,12 +4,26 @@
 
 ## Unreleased
 
+## 0.3.1 — 2026-05-24
+
+补丁版：**RFC 0006 A+ 失败查询诊断 alpha 链路（alignment + alpha.1 + alpha.2）+ npm publish 准备**。无 breaking change（aplus 段默认 off）；纯加 alpha 通道 + 发布前手续修整。
+
+5 个 PR / commit 自 v0.3.0（[#86 release wf](https://github.com/cregis-dev/anydocs-ask/pull/86) / [#87 RFC 0006 draft](https://github.com/cregis-dev/anydocs-ask/pull/87) / [#88 alignment](https://github.com/cregis-dev/anydocs-ask/pull/88) / [#89 cluster pure](https://github.com/cregis-dev/anydocs-ask/pull/89) / [#90 suggest + CLI pipeline](https://github.com/cregis-dev/anydocs-ask/pull/90)）。
+
 ### 新增
 
-- **RFC 0006 0.4.0-alpha.2 — A+ 建议生成 + CLI pipeline 接通** —— 把 alpha.0 schema + alpha.1 聚类 pure 模块串成端到端：`src/feedback/diagnose-suggest.ts` 调主 LLM（B.2 复用 Anthropic 通道）按 RFC §4.4 prompt 生成补文档建议草稿（带 yaml frontmatter / 硬约束「不引入外部知识」/ 2000 字符上限 / `\`\`\`markdown` fence 自动剥），`src/feedback/diagnose-runner.ts` 串：feedback 表读 → embedding_cache (write-through `getOrEmbed`) → clusterFeedback → generateSuggestion → 写 `<stateRoot>/feedback/suggestions/cluster_<id>.{md,json}` 或 `.shadow/` 子目录。CLI `feedback diagnose` 从 alpha.0 stub 升级到真跑：feature_off / data_insufficient / invalid_window 三个守卫产生友好提示 + 真跑路径打印 candidate/cluster/suggestion 计数 + 文件路径列表。`--dry-run` 跑全流程但不写盘。9 个新测试：8 个 generateSuggestion 单元（happy / shadow flag / LLM throw silent / 空 body / fence 剥 / prompt 形状 / 长度上限 / system prompt 含硬约束）+ 4 个 CLI e2e（aplus disabled / data insufficient / shadow + threshold 写真文件 / dry-run / invalid window 退 2）。**alpha.2 自然降级**：`aplus.enabled=false` + 无 `--shadow` 整段不跑 LLM；embedding cache miss 即时补算并写回；LLM 抛错单簇跳过 + stderr warn 不污染主流。
+- **`anydocs-ask feedback diagnose` CLI** —— [RFC 0006](docs/rfcs/0006-failure-query-diagnostic-aplus.md) A+ 失败查询诊断的完整管道接通。
+  - **alignment (PR #87, #88)**：RFC Status: Draft → Accepted；`anydocs.ask.json` 增 `aplus.{enabled:false, threshold:50, observationWindow:'28d', embedSimilarityThreshold:0.65}` 段（PRD §10.3 双门槛 + RFC §4.2 聚类阈值）。CLI 注册 `feedback diagnose <projectRoot> [--threshold N] [--observation-window 28d] [--shadow] [--dry-run]`。零行为变化。
+  - **alpha.1 聚类 (PR #89)**：`src/feedback/diagnose-cluster.ts` `clusterFeedback(rows, options?)` —— threshold-based union-find on bge-m3 cosine；`cluster_id` sha256-12 hex of center question 跨次稳定；`synthesize60()` simulator 用 4 主题 × 15 query 验证管道 + 默认阈值精确 4 簇。
+  - **alpha.2 建议生成 + pipeline (PR #90)**：`src/feedback/diagnose-suggest.ts` 调主 LLM (B.2 复用 Anthropic 通道) 按 RFC §4.4 prompt 生成补文档建议草稿；`src/feedback/diagnose-runner.ts` orchestrator 串 feedback 表读 → embedding_cache (write-through `getOrEmbed`) → clusterFeedback → generateSuggestion → 写 `<stateRoot>/feedback/suggestions/cluster_<id>.{md,json}` 或 `.shadow/` 子目录。CLI 从 stub 升级到真跑：feature_off / data_insufficient / invalid_window 三个守卫 + `--dry-run` 跑全流程不写盘。
+  - **未启用门槛**：`aplus.enabled=false` 默认 + 无 `--shadow` 整段不跑 LLM；PRD §10.3 启动门槛 ≥ 50 反馈 + 4 周观察窗未到时由 operator 决定。Studio Feedback tab `aplusCandidates` 接通是 alpha.3。
 
-- **RFC 0006 0.4.0-alpha.1 — A+ 聚类 pure 模块 + simulator** —— `src/feedback/diagnose-cluster.ts` 落 threshold-based union-find on bge-m3 cosine（RFC §4.2 选型 + 0.65 默认阈值）。`clusterFeedback(rows, options?)` 输入预备好的嵌入向量行（β 显式负反馈过滤是调用方责任），输出 `FeedbackCluster[]`（cluster_id sha256-12 hex / members / center_question / size / density）。`cosineSimilarity()` 兼容非归一化输入。`tests/feedback-diagnose-cluster.test.ts` 用 `synthesize60()` 模拟 4 主题 × 15 query × 32 维 orthogonal-anchor + 0.85 topicSignal + 0.15 噪声 → 默认阈值下精确 4 簇、size 13-15、cross-topic 0 边。17 个新测试覆盖：cosineSimilarity 4 sanity / cluster 空/单/孤立行 / 60 行模拟 / threshold 极值 (0→1 cluster of 60, 1→0 clusters) / cluster_id 跨次稳定 + 输入置换不变 / center 总属簇内 / minClusterSize 过滤 / 排序 size DESC + density DESC / density 反映 spread。**仍是 alpha.1**：纯函数，不读 DB、不调 LLM、不写 disk；CLI alpha.2 才接通 pipeline。
-- **RFC 0006 alignment — 失败查询诊断（A+）Accepted + schema 留位 + CLI `feedback diagnose` stub** —— [RFC 0006](docs/rfcs/0006-failure-query-diagnostic-aplus.md) Status: Draft → Accepted。`anydocs.ask.json` 增 `aplus.{enabled:false, threshold:50, observationWindow:'28d', embedSimilarityThreshold:0.65}` 段（PRD §10.3 双门槛 + RFC §4.2 聚类阈值）。CLI 注册 `feedback diagnose <projectRoot> [--threshold N] [--observation-window 28d] [--shadow] [--dry-run]` stub —— 读 `feedback` 表的 β 显式负反馈行计数 + 与配置门槛对比 + 友好输出 "feature off / data insufficient / would diagnose N rows"；**不读 embedding、不跑聚类、不写 `suggestions/`**（那些都进 alpha.1）。设计契约：design partner 可以今天就把 CLI 接到 cron 或 Studio 按钮，alpha.1+ 静默升级。10 个新测试覆盖 config schema 5 字段 + CLI stub 4 状态 + duration parser。
+- **GitHub Actions release workflow (PR #86)** —— `.github/workflows/release.yml` tag-triggered (`v*`) + manual workflow_dispatch；OIDC trusted publishing + `--provenance` + `npm-publish` GitHub environment 人工 Approve 闸门 + tag/version match check + typecheck + test + build 串好。`engines.pnpm` 已从 package.json 移除（仅作用于本仓库开发，对 consumer 误导）。
+
+### 修复
+
+- **LICENSE 文件补充** —— package.json 声明 `license: "MIT"` 但仓库根无 LICENSE 文件；本版本补上标准 MIT 文本。
+- **package.json `files` 收敛** —— 不再把 `PRD.md` + `ARCHITECTURE.md` 进 npm tarball（内部决策文档对 consumer 无价值；包尺寸虚大）。文件保留：`dist/` + `README.md` + `CHANGELOG.md` + `LICENSE`。
 
 ## 0.3.0 — 2026-05-24
 

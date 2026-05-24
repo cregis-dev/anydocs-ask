@@ -1,6 +1,6 @@
 {
   "name": "@anydocs/ask",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Local-first Q&A service for anydocs projects — respects authoring intent, supports multilingual",
   "type": "module",
   "license": "MIT",
@@ -24,8 +24,7 @@
     "dist",
     "README.md",
     "CHANGELOG.md",
-    "PRD.md",
-    "ARCHITECTURE.md"
+    "LICENSE"
   ],
   "publishConfig": {
     "access": "public"
