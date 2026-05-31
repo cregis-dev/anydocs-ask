@@ -56,5 +56,35 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # Dump OIDC token claims to logs before publish — pure取证，便于事后比对 npm
+      # trusted publisher 配置（owner / repo / environment / workflow_ref / sub）。
+      # continue-on-error 保证它本身故障不阻断真实 publish。
+      # 背景见 memory: project_npm_publish_oidc_404.md。
+      - name: Dump OIDC claims (forensic for npm E404 debugging)
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              const token = await core.getIDToken('npm:registry.npmjs.org');
+              const payload = JSON.parse(
+                Buffer.from(token.split('.')[1], 'base64url').toString('utf8')
+              );
+              const fields = [
+                'sub', 'repository', 'repository_owner',
+                'repository_id', 'repository_owner_id',
+                'workflow', 'workflow_ref', 'job_workflow_ref',
+                'environment', 'ref', 'ref_type',
+                'event_name', 'actor', 'runner_environment',
+              ];
+              core.startGroup('OIDC claims for npm:registry.npmjs.org');
+              for (const f of fields) {
+                console.log(`${f.padEnd(22)} ${payload[f]}`);
+              }
+              core.endGroup();
+            } catch (e) {
+              core.warning(`Failed to dump OIDC claims: ${e.message}`);
+            }
+
       - name: Publish to npm (OIDC + provenance)
         run: npm publish --provenance --access public
