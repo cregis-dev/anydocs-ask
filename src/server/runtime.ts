@@ -84,6 +84,15 @@ export class Runtime {
    * config.feedback.{enabled, implicitSignals} (PRD §11.4 #6).
    */
   readonly sessions: SessionTable;
+  /**
+   * Tracker for fire-and-forget background work the request path kicks off
+   * (currently: RFC 0005 V3 citation-check tails). Pure plumbing for
+   * testability — `awaitPendingTasks()` lets integration tests flush the
+   * queue before asserting on side-effects (runs.jsonl tails, db rows).
+   * Production code never reads this; lifecycle stop() also drains it for
+   * a graceful shutdown.
+   */
+  private readonly pendingBackgroundTasks = new Set<Promise<unknown>>();
   private watcher: ProjectWatcher | null = null;
   private warmFlag = false;
   private startedAt: number | null = null;
@@ -191,6 +200,10 @@ export class Runtime {
 
   async stop(): Promise<void> {
     this.warmFlag = false;
+    // Drain in-flight fire-and-forget tails (RFC 0005 V3 citation-check, etc.)
+    // before tearing the DB / sessions down — otherwise a late append would
+    // race with the close() below and lose its row to a swallowed write error.
+    await this.awaitPendingTasks();
     if (this.watcher) {
       await this.watcher.stop();
       this.watcher = null;
@@ -208,6 +221,26 @@ export class Runtime {
     } catch {
       // already closed; ignore.
     }
+  }
+
+  /**
+   * Register a fire-and-forget background promise so test code can flush
+   * it via `awaitPendingTasks()`. Auto-cleans on settle. Caller is
+   * responsible for catching its own errors before passing in — anything
+   * left unhandled will still surface as an UnhandledPromiseRejection.
+   */
+  trackBackgroundTask(p: Promise<unknown>): void {
+    this.pendingBackgroundTasks.add(p);
+    void p.finally(() => {
+      this.pendingBackgroundTasks.delete(p);
+    });
+  }
+
+  /** Settle every currently-tracked background task. Used by tests; also
+   *  called by stop() to give in-flight tails a chance to land. */
+  async awaitPendingTasks(): Promise<void> {
+    if (this.pendingBackgroundTasks.size === 0) return;
+    await Promise.allSettled(this.pendingBackgroundTasks);
   }
 
   /** Run a full reindex on demand (POST /v1/index/rebuild). */

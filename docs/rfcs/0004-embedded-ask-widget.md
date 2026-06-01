@@ -1,8 +1,8 @@
 # RFC 0004 — 嵌入式 Ask Widget
 
-> Status: Draft (起草中)
+> Status: Accepted（2026-05-24 升档；0.4 设计稿 + 原型范围锁定）
 > Author: @shawndslee
-> Date: 2026-05-20
+> Date: 2026-05-20（Accepted 于 2026-05-24）
 > 范围版本: `@anydocs/ask` 0.4（设计稿）/ 0.5+（落地）
 > 设计依据: [PRD §10.2](../../PRD.md#102-版本路线按时间顺序) / [PRD §10.7](../../PRD.md#107-新增明确不做与-112-红线一致) 第 7 条
 > 阻塞依赖: [RFC 0003](./0003-multi-turn-session-rewrite.md)（多轮 + session 重写必须先 GA）
@@ -27,6 +27,17 @@
 - 多轮（RFC 0003）必须先就绪——嵌入式场景几乎必然多轮；
 - Studio 反馈闭环（RFC 0002）需要先在 0.2 完成基础，嵌入式数据才有消费端；
 - 0.4 期间和 design partner 联调原型，验证 IA、上下文协议、鉴权方案，避免 GA 后大改。
+
+### 1.3 为什么 2026-05-24 升档 Accepted
+
+阻塞依赖已全部解除：
+
+- **RFC 0003 multi-turn** 2026-05-22 alpha.1 全 M1-M6 落地，默认 `enabled: true` 已在 hermes-docs 跑过 5-turn 真机回归
+- **RFC 0002 Studio Feedback tab** 0.2.0 发布版含 T1-d 抽屉 + 跨 journey jump，是嵌入式反馈的现成消费端
+- **RFC 0005 V5** 2026-05-24 接通 Studio 展示 verdict，嵌入式 Widget 场景下"答案 vs chunk 对得上吗"信号有直接读端
+- **0.2.0 已发**：design partner 拿到的版本里 ask 后端、Reader UI、Studio 全套就绪，嵌入式 Widget 只是把入口从文档站 iframe 扩到客户产品 UI
+
+按 RFC 0003 / 0005 一致的对齐 PR 节奏推进：先 Status 升档 + `anydocs.ask.json.widget` schema 留位（零行为变化），后续 alpha.0/alpha.1/alpha.2 按 W1-W5 顺序落地。
 
 ---
 
@@ -65,10 +76,19 @@
 ### 3.1 0.4 设计 / 原型阶段
 
 ```
-0.4.0-alpha.0 (≈ 2026-07-04)  W1 协议规格 + W2 形态决策            设计敲定
-0.4.0-alpha.1 (≈ 2026-07-18)  W3 MVP 原型可跑                     dogfood
-0.4.0         (≈ 2026-07-25)  W4 CORS + W5 联调确认                与 partner 对齐
+alignment PR   (2026-05-24, 本 PR)  Status 升档 + widget schema 留位       零行为变化
+0.4.0-alpha.0  (≈ 2026-06)         W1 协议规格 + W2 形态决策              设计敲定
+0.4.0-alpha.1  (≈ 2026-06–07)      W3 MVP 原型可跑                       dogfood
+0.4.0          (≈ 2026-07)         W4 CORS + W5 联调确认                  与 partner 对齐
 ```
+
+绝对日期不预设；里程碑顺序锁定。alignment PR 的范围严格限于：
+
+- 本文档 Status: Draft → Accepted
+- `anydocs.ask.json` 增 `widget` 段，默认 `{ enabled:false, rateLimitPerMinute:60, allowedOrigins:[] }`
+- 三字段都不被任何代码路径消费（pipeline / server / console 都不读）
+- 配套 5 个 config 测试覆盖
+- 后续 alpha.0 才落地 W1（接口规格 + TS 类型）
 
 ### 3.2 0.5+ 实装阶段（拆独立子 RFC，本 RFC 仅占位）
 
@@ -194,3 +214,4 @@ Widget 在 `init` 时自动取 `localStorage.anydocs.ask.session_id`；每次 as
 | 日期 | 变更 | 作者 |
 |---|---|---|
 | 2026-05-20 | 起草（0.4 设计稿范围） | @shawndslee |
+| 2026-05-24 | **升档 Accepted**。依据：RFC 0003 multi-turn 已 GA + RFC 0002 Studio + RFC 0005 V5 全部落到 main，嵌入式 Widget 阻塞依赖全部解除。同步加 §1.3 升档论证 + §3.1 alignment PR 行，规定本对齐 PR 仅 RFC Accept + `widget` schema 留位（`enabled:false / rateLimitPerMinute:60 / allowedOrigins:[]`），零代码消费、零行为变化 | @shawndslee |

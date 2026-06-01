@@ -23,9 +23,19 @@ import { askWithTrace, askWithTraceStream, type AskTrace } from '../query/answer
 import { persistAnswer } from './answer-cache.ts';
 import type { AskRequest, AskResult, Citation } from '../query/types.ts';
 import type { LLM } from '../llm/types.ts';
-import type { RunCitation, RunRecord } from '../runs/types.ts';
+import type { RunCitation, RunCitationCheckUpdate, RunRecord } from '../runs/types.ts';
 import { observeAsk } from '../feedback/gamma.ts';
 import { renderAskPage, getMarkedScript } from './web-ask.ts';
+import { extractClaimChunkPairs } from '../query/claim-extractor.ts';
+import { validateCitations } from '../query/citation-validator.ts';
+import { renderWidgetHostScript } from '../widget/host-sdk.ts';
+import { renderWidgetChatPage } from '../widget/chat-page.ts';
+import {
+  gateWidgetRequest,
+  InProcessRateLimiter,
+  isWidgetRequest,
+  type WidgetGateOutcome,
+} from '../widget/server-gate.ts';
 
 const SSE_HEARTBEAT_MS = 2_000;
 const SSE_INITIAL_PADDING_BYTES = 4_096;
@@ -59,7 +69,25 @@ export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
   const { runtime } = deps;
 
-  app.use('*', buildCorsMiddleware(runtime.config.server));
+  app.use('*', buildCorsMiddleware(runtime.config.server, runtime.config.widget));
+
+  // RFC 0004 W4 — single rate-limiter shared across the three /v1/ask*
+  // endpoints. Outlives a request but lives with the Hono app instance
+  // (so test setup/teardown gets a fresh one per Runtime).
+  const widgetRateLimiter = new InProcessRateLimiter();
+
+  // Gate runs before each widget-flavoured /v1/ask call. Non-widget
+  // callers (no X-Project-Key header) skip the gate and behave exactly
+  // like 0.3.x.
+  const widgetGate = (c: Context): WidgetGateOutcome | null => {
+    if (!isWidgetRequest(c.req.raw.headers)) return null;
+    return gateWidgetRequest(c.req.raw.headers, {
+      enabled: runtime.config.widget.enabled,
+      allowedOrigins: runtime.config.widget.allowedOrigins,
+      rateLimitPerMinute: runtime.config.widget.rateLimitPerMinute,
+      rateLimiter: widgetRateLimiter,
+    });
+  };
 
   // -----------------------------------------------------------------------
   // Web Ask reader — minimal end-user HTML at GET /ask. Designed so the
@@ -76,6 +104,33 @@ export function createApp(deps: AppDeps): Hono {
     c.header('Content-Type', asset.contentType);
     c.header('Cache-Control', 'public, max-age=3600');
     return c.body(asset.body);
+  });
+
+  // -----------------------------------------------------------------------
+  // Widget — RFC 0004 W3 alpha.1 MVP. Two endpoints serve the embeddable
+  // ask widget: the host-side SDK bundle (loaded by the operator's
+  // `<script src="...">`) and the iframe chat page it points at. Same-
+  // origin only at alpha.1 — alpha.2 W4 adds CORS / project-key validation.
+  //
+  // Gated on `widget.enabled` so the alpha.0 alignment-PR promise — "config
+  // flip default off, no behaviour change" — survives. Operators have to
+  // opt in explicitly before either endpoint responds.
+  // -----------------------------------------------------------------------
+  app.get('/widget/v1.js', (c) => {
+    if (!runtime.config.widget.enabled) {
+      return c.json({ type: 'error', code: 'widget_disabled' }, 404);
+    }
+    const js = renderWidgetHostScript({});
+    c.header('Content-Type', 'application/javascript; charset=utf-8');
+    c.header('Cache-Control', 'public, max-age=300');
+    return c.body(js);
+  });
+  app.get('/widget/chat', (c) => {
+    if (!runtime.config.widget.enabled) {
+      return c.json({ type: 'error', code: 'widget_disabled' }, 404);
+    }
+    const html = renderWidgetChatPage({ prompt: runtime.config.prompt });
+    return c.html(html);
   });
 
   // -----------------------------------------------------------------------
@@ -96,10 +151,15 @@ export function createApp(deps: AppDeps): Hono {
   // Ask
   // -----------------------------------------------------------------------
   app.post('/v1/ask', async (c) => {
+    const gated = widgetGate(c);
+    if (gated && !gated.ok) {
+      return c.json({ type: 'error', code: gated.code }, gated.status);
+    }
     const prepared = await prepareAskCall(runtime, c);
     if (!prepared.ok) {
       return c.json(prepared.result, prepared.status);
     }
+    injectMultiTurnHistory(runtime, prepared.req, prepared.requestedSessionId);
     const t0 = performance.now();
     let ask: Awaited<ReturnType<typeof askWithTrace>>;
     try {
@@ -139,6 +199,10 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.post('/v1/ask/stream', (c) => {
+    const gated = widgetGate(c);
+    if (gated && !gated.ok) {
+      return c.json({ type: 'error', code: gated.code }, gated.status);
+    }
     c.header('X-Accel-Buffering', 'no');
     return streamSSE(c, async (stream) => {
       let writeQueue = Promise.resolve();
@@ -182,6 +246,7 @@ export function createApp(deps: AppDeps): Hono {
         await write('done', { ok: true });
         return;
       }
+      injectMultiTurnHistory(runtime, prepared.req, prepared.requestedSessionId);
 
       const abortController = new AbortController();
       stream.onAbort(() => {
@@ -244,6 +309,10 @@ export function createApp(deps: AppDeps): Hono {
   // Feedback
   // -----------------------------------------------------------------------
   app.post('/v1/ask/feedback', async (c) => {
+    const gated = widgetGate(c);
+    if (gated && !gated.ok) {
+      return c.json({ type: 'error', code: gated.code }, gated.status);
+    }
     let body: unknown;
     try {
       body = await c.req.json();
@@ -278,6 +347,7 @@ export function createApp(deps: AppDeps): Hono {
     let question = '';
     let model = '';
     let retrieved: unknown = null;
+    let generated = '';
     if (original) {
       question = original.question;
       try {
@@ -288,6 +358,13 @@ export function createApp(deps: AppDeps): Hono {
         };
         retrieved = parsed.citations ?? null;
         model = parsed.model ?? '';
+        // F7 (dogfood 2026-05-23): backfill answer_md into feedback.generated so
+        // the Console drawer's ANSWER section has body to render. Pre-fix the
+        // column was always '' because the handler never plumbed it through —
+        // Reader / curl callers do not send `generated` in the request body.
+        // Parallel to the `question` backfill above; same trade-off (24h TTL
+        // race covered by body override below).
+        if (typeof parsed.answer_md === 'string') generated = parsed.answer_md;
       } catch {
         // ignore — partial feedback is still useful.
       }
@@ -300,20 +377,45 @@ export function createApp(deps: AppDeps): Hono {
       // behaviour.
       question = obj.question;
     }
+    // Explicit body `generated` always wins (e.g. when client edited the
+    // answer locally before reporting feedback). The check is on TYPE only,
+    // NOT length: pre-F7 the handler stored whatever the client sent —
+    // including an empty string used as an explicit "clear stored answer"
+    // opt-out — so the F7 backfill must not eat that signal. Caller
+    // omitting the key entirely (undefined) is the only path that falls
+    // through to the answers.payload backfill.
+    if (typeof obj.generated === 'string') {
+      generated = obj.generated;
+    }
+
+    // RFC 0003 M6 follow-up: persist the client's session_id on the β row
+    // so Console grouping doesn't depend on the runs.jsonl JOIN for long
+    // dialogues. γ + curated paths have always written this column (see
+    // gamma.ts and store.ts). Reader / Widget clients echo session_id in
+    // every /v1/ask request (RFC 0001 §4.1) and the same value belongs on
+    // any feedback row that follows. Accept the `sessionId` camelCase alias
+    // for symmetry with other Reader payload fields.
+    const sessionIdRaw =
+      typeof obj.session_id === 'string'
+        ? obj.session_id
+        : typeof obj.sessionId === 'string'
+          ? obj.sessionId
+          : null;
+    const sessionId = sessionIdRaw && sessionIdRaw.length > 0 ? sessionIdRaw : null;
 
     runtime.db
       .prepare(
         `INSERT INTO feedback (
            answer_id, question, current_page_id, retrieved, generated, rating,
-           correction, bad_citation_ids, tags, model_used, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           correction, bad_citation_ids, tags, model_used, created_at, session_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         answer_id,
         question,
         typeof obj.current_page_id === 'string' ? obj.current_page_id : null,
         retrieved !== null ? JSON.stringify(retrieved) : null,
-        typeof obj.generated === 'string' ? obj.generated : '',
+        generated,
         typeof obj.rating === 'number' ? obj.rating : null,
         typeof obj.correction === 'string' ? obj.correction : null,
         Array.isArray(obj.bad_citation_ids)
@@ -324,6 +426,7 @@ export function createApp(deps: AppDeps): Hono {
           : null,
         model,
         Date.now(),
+        sessionId,
       );
 
     return c.json({ ok: true });
@@ -445,6 +548,48 @@ async function prepareAskCall(runtime: Runtime, c: Context): Promise<PreparedAsk
   };
 }
 
+/**
+ * Multi-turn history injection (RFC 0003 M1). When `multiTurn.enabled` and
+ * the caller passed a `session_id` that the session table still knows about,
+ * pull the most recent `historyTurns` prior question strings and stuff them
+ * into `req.context.history`. The query pipeline ([src/query/answer.ts])
+ * then splices them into the embedding query.
+ *
+ * Order: chronological (oldest → newest, current question implicit at the
+ * tail). `getRecentEntries` hands back newest-first, so we reverse here.
+ *
+ * No-ops on:
+ *   - multiTurn.enabled === false (default; byte-equivalent to 0.1.x)
+ *   - no requested session_id (first ask in a session)
+ *   - unknown / expired session_id (treated as a fresh session)
+ *   - empty entry list (session minted but no prior `record()` yet)
+ *
+ * Mutates `req.context` in place — the caller passed us a `body as AskRequest`
+ * we parsed from JSON, so a direct mutation is safe and avoids a copy on the
+ * hot path.
+ */
+function injectMultiTurnHistory(
+  runtime: Runtime,
+  req: AskRequest,
+  requestedSessionId: string | null,
+): void {
+  if (!runtime.config.multiTurn.enabled) return;
+  if (!requestedSessionId) return;
+  const entries = runtime.sessions.getRecentEntries(
+    requestedSessionId,
+    runtime.config.multiTurn.historyTurns,
+  );
+  if (entries.length === 0) return;
+  // getRecentEntries returns newest → oldest; reverse for chronological order
+  // so embedding splice + prompt history block both see the dialogue as it
+  // actually happened (oldest → newest, current question implicit at the
+  // tail). Both consumers in the query pipeline assume this ordering.
+  const turns = entries
+    .map((e) => ({ question: e.question, answer_summary: e.answer_md_summary }))
+    .reverse();
+  req.context = { ...(req.context ?? {}), history: turns };
+}
+
 function finalizeAskCall(args: {
   runtime: Runtime;
   req: AskRequest;
@@ -457,14 +602,28 @@ function finalizeAskCall(args: {
 }): AskResult & { session_id: string; _dry_run?: true } {
   const { runtime, req, result, trace, t0, options, requestedSessionId, queryVector } = args;
 
+  // Resolve session_id once up front so both runs.jsonl (audit log) and
+  // /v1/ask response carry the SAME id. Dogfood 2026-05-22 caught the bug:
+  // runs.jsonl had session_id=null on every row even when multi-turn was
+  // clearly running, because appendRun used to hardcode null while gamma
+  // resolved its own id later. We now mint once and thread the id through
+  // both writes — observeAsk receives it via preResolvedSessionId to skip
+  // calling getOrCreate a second time (which would mint a different id
+  // when requestedSessionId is null).
+  const sessionId = runtime.sessions.getOrCreate(requestedSessionId);
+
   // Persist + log to runs.jsonl regardless of outcome — analyze needs
   // visibility into errors / clarifies / answers alike. Skipped for dry_run.
+  // requestId is minted up here (vs. inside appendRun) so the V3
+  // citation-check-update tail below can reference the SAME id — otherwise
+  // the update line couldn't be joined back to its source row.
+  const requestId = randomUUID();
   if (!options.dryRun) {
-    const requestId = randomUUID();
     const latencyMs =
       result.type === 'answer' ? result.latency_ms : Math.round(performance.now() - t0);
     appendRun(runtime, {
       requestId,
+      sessionId,
       query: req.question ?? '',
       filters: extractFilters(req),
       contextPageId: req.context?.current_page_id ?? null,
@@ -473,6 +632,41 @@ function finalizeAskCall(args: {
       latencyMs,
       source: options.source,
     });
+  }
+
+  // RFC 0005 V3 alpha.2 — citation semantic check (shadow mode).
+  // Fire-and-forget AFTER the RunRecord is written: the resulting tail line
+  // joins back via request_id, so we need the original row on disk first.
+  // Gating (RFC §4.6):
+  //   - citationSemanticCheck.enabled === true (config off → entire feature
+  //     never touches the LLM, zero extra calls — alpha.0 promise)
+  //   - !options.dryRun (probes shouldn't add LLM cost or pollute the audit
+  //     log; mirrors how dry_run already skips runs append + answer cache)
+  //   - result.type === 'answer' && result.citations.length > 0 (nothing to
+  //     check on clarify / error / cit-less answers)
+  //   - runtime.runs.isEnabled (no point firing if the tail can't land)
+  // Errors are fully swallowed inside validateCitations — but we wrap the
+  // whole tail in a try/catch anyway so the unawaited Promise never throws
+  // an UnhandledPromiseRejection on truly unexpected paths (e.g. claim
+  // extractor regex blowing up on adversarial markdown).
+  if (
+    !options.dryRun &&
+    result.type === 'answer' &&
+    result.citations.length > 0 &&
+    runtime.config.citationSemanticCheck.enabled &&
+    runtime.runs.isEnabled
+  ) {
+    const task = runCitationCheckTail({
+      runtime,
+      requestId,
+      answerMd: result.answer_md,
+      citations: result.citations,
+    }).catch((err: unknown) => {
+      process.stderr.write(
+        `[ask] citation-check tail crashed: ${(err as Error)?.message ?? String(err)}\n`,
+      );
+    });
+    runtime.trackBackgroundTask(task);
   }
 
   // Persist for feedback join (v1 doesn't dedupe; every call is its own row).
@@ -493,6 +687,7 @@ function finalizeAskCall(args: {
     config: runtime.config,
     sessionTable: runtime.sessions,
     requestedSessionId,
+    preResolvedSessionId: sessionId,
     question: (req.question ?? '').trim(),
     queryVector: options.dryRun ? null : queryVector,
     result,
@@ -526,6 +721,10 @@ function citationsForRun(citations: Citation[]): RunCitation[] {
     chunk_id: c.chunk_id,
     page: c.page_id,
     quote: c.snippet,
+    // RFC 0005 V4: surface citation_id so the V3 citation-check-update tail
+    // can join verdicts back without depending on positional order. Cheap and
+    // additive; readers that don't care simply ignore the field.
+    citation_id: c.citation_id,
   }));
 }
 
@@ -533,6 +732,12 @@ function appendRun(
   runtime: Runtime,
   args: {
     requestId: string;
+    /** Resolved by finalizeAskCall via sessionTable.getOrCreate — same id
+     *  echoed back in the /v1/ask response. Always non-null on the live
+     *  request path. RunRecord.session_id allows analyze/Studio to fold
+     *  per-dialogue runs (RFC 0003 M6 fallback for feedback rows whose
+     *  column is null — pre-PR #61 β rows). */
+    sessionId: string;
     query: string;
     filters: Record<string, unknown>;
     contextPageId: string | null;
@@ -570,7 +775,7 @@ function appendRun(
   const record: RunRecord = {
     ts: new Date().toISOString(),
     request_id: args.requestId,
-    session_id: null,
+    session_id: args.sessionId,
     query: args.query,
     filters: args.filters,
     context_pageId: args.contextPageId,
@@ -599,8 +804,68 @@ function appendRun(
       tokens_out: trace.tokens_out,
       model,
       error_code: errorCode,
+      ...(trace.history_window !== undefined ? { history_window: trace.history_window } : {}),
     },
     feedback: { beta: null, gamma: null },
   };
   runtime.runs.append(record);
+}
+
+// ---------------------------------------------------------------------------
+// RFC 0005 V3 — citation semantic check tail
+// ---------------------------------------------------------------------------
+
+/**
+ * Build claim/chunk pairs from the just-returned answer, batch-validate via
+ * the main LLM, and append one `citation-check-update` line to runs.jsonl
+ * keyed by the original request_id.
+ *
+ * Caller already gated on enabled / dry_run / has-citations / runs-enabled
+ * (see finalizeAskCall). All errors are non-throwing here — validateCitations
+ * itself swallows LLM / parse failures (RFC §4.6), so the only way to reach
+ * the outer catch is a programmer error (e.g. snippet-less Citation shape).
+ * Even that case logs to stderr and exits cleanly.
+ *
+ * Empty verdict array → no tail written. Same shape as the
+ * `enabled=false` path so downstream readers can't tell them apart, which
+ * is the §4.6 design.
+ */
+async function runCitationCheckTail(args: {
+  runtime: Runtime;
+  requestId: string;
+  answerMd: string;
+  citations: Citation[];
+}): Promise<void> {
+  const { runtime, requestId, answerMd, citations } = args;
+  const pairs = extractClaimChunkPairs({ answerMd, citations });
+  if (pairs.length === 0) return;
+
+  let llm: LLM;
+  try {
+    llm = runtime.llm;
+  } catch {
+    // LLM provider unavailable — same swallow semantics as runtime.llm
+    // throwing from the main request path; we just skip the tail.
+    return;
+  }
+
+  const verdicts = await validateCitations({ llm, pairs });
+  if (verdicts.length === 0) return;
+
+  const update: RunCitationCheckUpdate = {
+    type: 'citation-check-update',
+    ts: new Date().toISOString(),
+    request_id: requestId,
+    citations: verdicts.map((v) => ({
+      citation_id: v.citationId,
+      semantic_check: {
+        verdict: v.verdict,
+        reason: v.reason,
+        model: v.model,
+        checked_at: v.checkedAt,
+        latency_ms: v.latencyMs,
+      },
+    })),
+  };
+  runtime.runs.appendUpdate(update);
 }

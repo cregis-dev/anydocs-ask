@@ -14,9 +14,15 @@
 
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { loadConfig } from '../config.ts';
+import { loadConfig, resolveTransformersCacheDir } from '../config.ts';
 import { openDatabase, resolveDbPath } from '../db/index.ts';
 import { ensureFeedbackDirs } from '../workspace.ts';
+import { Bgem3Embedder } from '../embedding/bge-m3.ts';
+import { MockEmbedder } from '../embedding/mock.ts';
+import { buildDefaultLLM } from '../llm/factory.ts';
+import type { Embedder } from '../embedding/types.ts';
+import type { LLM } from '../llm/types.ts';
+import { runDiagnosePipeline } from '../feedback/diagnose-runner.ts';
 import { clusterIdFor } from '../feedback/cluster-id.ts';
 import { emitInbox, parseInbox, InboxParseError } from '../feedback/markdown.ts';
 import {
@@ -259,6 +265,155 @@ export async function runFeedbackStatus(opts: FeedbackCmdOptions): Promise<numbe
   } finally {
     db.close();
   }
+}
+
+// ---------------------------------------------------------------------------
+// `feedback diagnose` (RFC 0006 alpha.0 stub)
+// ---------------------------------------------------------------------------
+
+export type FeedbackDiagnoseOptions = FeedbackCmdOptions & {
+  /** RFC 0006 §4.6 — override the PRD §10.3 threshold. */
+  threshold?: number;
+  /** RFC 0006 §4.6 — override the 4-week observation window. ISO-ish
+   *  duration (`28d` / `48h` / `120m`). */
+  observationWindow?: string;
+  /** Skip threshold + aplus.enabled gates and write to suggestions/.shadow/. */
+  shadow?: boolean;
+  /** Don't write any files; just print what would be written. */
+  dryRun?: boolean;
+  /** Hard cap on output clusters (CLI `--limit`). Default 5 per RFC §4.6. */
+  limit?: number;
+  /** Inject LLM (tests use MockLLM). Falls back to `buildDefaultLLM(config)`. */
+  llm?: LLM;
+  /** Inject Embedder (tests use MockEmbedder). Falls back to
+   *  `buildDefaultEmbedder(config)`. */
+  embedder?: Embedder;
+};
+
+/**
+ * RFC 0006 alpha.2 — the full pipeline (cluster + suggest + write).
+ *
+ * Flow:
+ *   1. Load config + open DB
+ *   2. Build embedder + LLM (lazy; tests inject mocks)
+ *   3. Delegate to {@link runDiagnosePipeline} with a parsed window + threshold
+ *   4. Print a human summary based on the outcome (feature off / data
+ *      insufficient / would diagnose / wrote N suggestions)
+ *   5. Exit 0 on success, 1 on missing DB, 2 on invalid args
+ *
+ * Backwards-compatible with the alpha.0 stub: the same flag set + the
+ * same output-line scaffold (added: per-path line, suggestion counts).
+ */
+export async function runFeedbackDiagnose(opts: FeedbackDiagnoseOptions): Promise<number> {
+  const projectRoot = resolve(opts.projectRoot);
+  const stateRoot = resolve(opts.stateRoot);
+  const { config } = await loadConfig(projectRoot);
+
+  const dbPath = resolveDbPath(stateRoot);
+  if (!existsSync(dbPath)) {
+    process.stderr.write(
+      `no index DB at ${dbPath}; run 'anydocs-ask reindex ${projectRoot}' first.\n`,
+    );
+    return 1;
+  }
+
+  const db = openDatabase({ stateRoot, skipMigrations: true });
+  let llm: LLM;
+  try {
+    llm = opts.llm ?? buildDefaultLLM(config);
+  } catch (err) {
+    db.close();
+    process.stderr.write(`feedback diagnose: LLM unavailable: ${(err as Error).message}\n`);
+    return 2;
+  }
+  const embedder: Embedder = opts.embedder ?? buildEmbedderFor(config);
+
+  let outcome;
+  try {
+    outcome = await runDiagnosePipeline({
+      db,
+      embedder,
+      llm,
+      stateRoot,
+      aplus: config.aplus,
+      ...(opts.threshold !== undefined ? { threshold: opts.threshold } : {}),
+      ...(opts.observationWindow !== undefined
+        ? { observationWindow: opts.observationWindow }
+        : {}),
+      shadow: opts.shadow === true,
+      dryRun: opts.dryRun === true,
+      ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+    });
+  } finally {
+    db.close();
+  }
+
+  const threshold = opts.threshold ?? config.aplus.threshold;
+  const window = opts.observationWindow ?? config.aplus.observationWindow;
+  const candidateCount = outcome.ok ? outcome.candidateCount : outcome.candidateCount;
+  const lines: string[] = [
+    `anydocs-ask feedback diagnose`,
+    `  aplus.enabled:                ${config.aplus.enabled}`,
+    `  threshold:                    ${threshold} (config: ${config.aplus.threshold})`,
+    `  observation window:           ${window}`,
+    `  embed similarity threshold:   ${config.aplus.embedSimilarityThreshold} (RFC 0006 §4.2)`,
+    `  candidate β feedback rows:    ${candidateCount}`,
+    `  shadow flag:                  ${opts.shadow === true}`,
+    `  dry-run flag:                 ${opts.dryRun === true}`,
+    ``,
+  ];
+
+  if (!outcome.ok) {
+    if (outcome.reason === 'feature_off') {
+      lines.push(
+        `aplus.enabled is false; nothing to do. Flip to true in anydocs.ask.json after the threshold is met, or re-run with --shadow to bypass.`,
+      );
+    } else if (outcome.reason === 'data_insufficient') {
+      lines.push(
+        `data insufficient: ${candidateCount} of ${threshold} β feedback rows in the last ${window}. Re-run after more reviews land, or pass --shadow to bypass the gate.`,
+      );
+    } else if (outcome.reason === 'invalid_window') {
+      process.stderr.write(
+        `feedback diagnose: invalid observationWindow '${window}'; expected duration like '28d' / '48h' / '120m'.\n`,
+      );
+      return 2;
+    }
+    process.stdout.write(lines.join('\n') + '\n');
+    return 0;
+  }
+
+  lines.push(
+    `  clusters formed:              ${outcome.clustersFormed}`,
+    `  suggestions written:          ${outcome.suggestionsWritten}`,
+    `  suggestions skipped (LLM err):${outcome.suggestionsSkipped}`,
+    `  output dir:                   ${outcome.outputDir}`,
+  );
+  if (outcome.paths.length > 0) {
+    lines.push(``, `wrote:`);
+    for (const p of outcome.paths) lines.push(`  ${p}`);
+  } else if (opts.dryRun) {
+    lines.push(``, `(dry-run: no files written)`);
+  }
+  process.stdout.write(lines.join('\n') + '\n');
+  return 0;
+}
+
+/**
+ * Build an embedder for the diagnose CLI. Mirrors `runtime.ts` mapping —
+ * default `local` + `bge-m3` ⇒ real Bge-m3; anything else falls back to
+ * MockEmbedder with a stderr warning so the CLI works offline.
+ */
+function buildEmbedderFor(config: { embedding: { provider: string; model: string; preferQuantized: boolean; cacheDir: string | null } }): Embedder {
+  if (config.embedding.provider === 'local' && config.embedding.model === 'bge-m3') {
+    return new Bgem3Embedder({
+      preferQuantized: config.embedding.preferQuantized,
+      cacheDir: resolveTransformersCacheDir(config as never),
+    });
+  }
+  process.stderr.write(
+    `[ask] feedback diagnose: embedding.model "${config.embedding.model}" not recognized; using MockEmbedder (suggestions will use deterministic vectors and will not be useful)\n`,
+  );
+  return new MockEmbedder();
 }
 
 // ---------------------------------------------------------------------------

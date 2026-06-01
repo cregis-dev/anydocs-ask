@@ -14,7 +14,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { iterateRunsSince, listRunFiles, tailRuns } from '../runs/writer.ts';
-import type { RunRecord, RunsLine } from '../runs/types.ts';
+import { isRunRecord, type RunRecord, type RunsLine } from '../runs/types.ts';
 
 export type RunsTailOptions = {
   projectRoot: string;
@@ -43,10 +43,21 @@ export function runRunsTail(opts: RunsTailOptions): number {
 }
 
 function formatTailLine(line: RunsLine): string {
-  if ('type' in line && line.type === 'feedback-update') {
-    return `${line.ts} feedback ${line.request_id} ${JSON.stringify(line.feedback)}`;
+  if (!isRunRecord(line)) {
+    if (line.type === 'feedback-update') {
+      return `${line.ts} feedback ${line.request_id} ${JSON.stringify(line.feedback)}`;
+    }
+    // citation-check-update (RFC 0005 V3) / future tails — one-line summary.
+    if (line.type === 'citation-check-update') {
+      const counts = line.citations.reduce<Record<string, number>>((acc, c) => {
+        acc[c.semantic_check.verdict] = (acc[c.semantic_check.verdict] ?? 0) + 1;
+        return acc;
+      }, {});
+      return `${line.ts} cit-check ${line.request_id} ${JSON.stringify(counts)}`;
+    }
+    return `${(line as { ts?: string }).ts ?? ''} update (unknown shape)`;
   }
-  const r = line as RunRecord;
+  const r = line;
   const kind = r.answer.kind.padEnd(7);
   const conf = r.answer.confidence.toFixed(3);
   const lat = `${r.answer.latency_ms}ms`.padStart(7);
@@ -83,8 +94,8 @@ export function runRunsExport(opts: RunsExportOptions): number {
   }
   let count = 0;
   for (const line of iterateRunsSince({ stateRoot, sinceMs })) {
-    if ('type' in line && line.type === 'feedback-update') continue; // export is record-only
-    const r = line as RunRecord;
+    if (!isRunRecord(line)) continue; // export is record-only — drop all tails
+    const r = line;
     if (opts.format === 'jsonl') {
       process.stdout.write(JSON.stringify(r) + '\n');
     } else {

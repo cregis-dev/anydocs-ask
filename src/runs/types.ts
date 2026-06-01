@@ -57,6 +57,31 @@ export type RunCitation = {
   chunk_id: number | null;
   page: string;
   quote: string;
+  /** RFC 0005 V4 — "cit_N" marker as emitted in answer.md after postprocess
+   *  renumber. Optional in the on-disk JSON; absent on legacy rows. Lets the
+   *  citation-check-update tail (see RunCitationCheckUpdate) join verdicts
+   *  back to the source row without relying on positional order. */
+  citation_id?: string;
+  /** RFC 0005 V4 — semantic validity verdict for this citation. Written by
+   *  the alpha.2 fire-and-forget tail (see RunCitationCheckUpdate) and folded
+   *  into the record by readers that need it (analyze / Studio Feedback tab).
+   *  Always optional: absent when `citationSemanticCheck.enabled=false`, when
+   *  the LLM check failed silently (RFC §4.6), or on legacy rows. */
+  semantic_check?: RunCitationSemanticCheck;
+};
+
+export type RunCitationSemanticCheck = {
+  verdict: 'supports' | 'partially' | 'not_supports';
+  /** ≤ 100 chars per RFC §4.1; truncated upstream. */
+  reason: string;
+  /** Model id reported by the LLM that produced the verdict (e.g.
+   *  'claude-sonnet-4-6'). Same provenance as RunAnswer.model. */
+  model: string;
+  /** ISO 8601 — when the batch this cit belonged to completed. Same value
+   *  for every cit in one batch (§4.4). */
+  checked_at: string;
+  /** Batch latency in ms — same for every cit in one batch. */
+  latency_ms: number;
 };
 
 export type RunAnswer = {
@@ -75,6 +100,12 @@ export type RunAnswer = {
   model: string | null;
   /** Error code on kind='error'. */
   error_code: string | null;
+  /** RFC 0003 M4 — number of prior session turns consumed by this call
+   *  (embedding splice + prompt). Optional in the on-disk JSON; absent on
+   *  legacy rows and on single-turn / `multiTurn.enabled=false` paths.
+   *  Studio joins on (session_id, history_window) to fold a dialogue's
+   *  turns into one group. */
+  history_window?: number;
 };
 
 export type RunFeedback = {
@@ -95,7 +126,39 @@ export type RunFeedbackUpdate = {
   feedback: Partial<RunFeedback>;
 };
 
-export type RunsLine = RunRecord | RunFeedbackUpdate;
+/**
+ * RFC 0005 V3 alpha.2 — append-only tail record carrying semantic-check
+ * verdicts that arrived *after* the /v1/ask response was returned. The
+ * citation-validator runs fire-and-forget; when it completes, one of these
+ * lines is appended to the same week file as the original record. Readers
+ * (Studio Feedback tab in V5, analyze in 0.4 H3) join on `request_id` +
+ * `citations[].citation_id` to fold verdicts back onto the source row.
+ *
+ * `citations` length may be shorter than the original RunRecord's
+ * `answer.citations` — silent drops (LLM error / parse failure / unknown
+ * verdict) just leave the cit without a `semantic_check` field on join.
+ */
+export type RunCitationCheckUpdate = {
+  type: 'citation-check-update';
+  ts: string;
+  request_id: string;
+  citations: Array<{
+    citation_id: string;
+    semantic_check: RunCitationSemanticCheck;
+  }>;
+};
+
+export type RunsLine = RunRecord | RunFeedbackUpdate | RunCitationCheckUpdate;
+
+/**
+ * True when a parsed jsonl line is a full RunRecord, not an append-only
+ * update tail. Readers that walk runs.jsonl for record-level scans (analyze,
+ * golden, console feedback/index/traffic state, runs export) should gate on
+ * this so future tail types don't need touch-ups in N places.
+ */
+export function isRunRecord(line: RunsLine): line is RunRecord {
+  return !('type' in line);
+}
 
 /**
  * Safe accessor for RunRecord.source — returns `'reader'` for legacy

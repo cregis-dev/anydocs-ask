@@ -551,6 +551,10 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       rows: snapshot.rows,
       filterCounts: snapshot.filterCounts,
       hasMore: snapshot.hasMore,
+      // RFC 0005 V5 — surface KPI so client-side filter swaps don't need to
+      // re-render the SSR strip from scratch. Only the V5 tile reads this so
+      // far; future KPI animations can pick up the full object.
+      kpi: snapshot.kpi,
     });
   });
 

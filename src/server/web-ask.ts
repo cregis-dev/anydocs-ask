@@ -463,6 +463,14 @@ code, pre, .mono { font-family: var(--font-mono); }
   vertical-align: 2px;
   border: 1px solid color-mix(in srgb, var(--warn) 25%, transparent);
 }
+/* Section suffix appended to the cite title when two chunks of the same page
+   appear — keeps each row visually distinct without changing the bold title.
+   Mirrors the Console F4 fix (project.ts:citeSectionLabel). */
+.cite-ti .cite-section {
+  font-weight: 400;
+  color: var(--fg-mute);
+  margin-left: 4px;
+}
 .cite-slug {
   font-family: var(--font-mono);
   font-size: var(--t-12);
@@ -964,6 +972,12 @@ function upsertCurrent() {
     snapshot: turns,
   });
   saveHistory(list);
+  // F9 (dogfood 2026-05-23) — if the HISTORY drawer is already open when
+  // we land a turn, re-render so the user sees the new conversation appear
+  // instead of the stale "No conversations yet" empty state. openHistory()
+  // already reads fresh on each open, so the bug only bites the
+  // "drawer-open-then-first-answer" sequence.
+  if (histDrawer && !histDrawer.hidden) renderHistory();
 }
 function deleteLocal(localId) {
   saveHistory(loadHistory().filter((c) => c.localId !== localId));
@@ -1138,6 +1152,18 @@ function citNum(id) {
   return m ? m[1] : String(id || '');
 }
 
+// in_page_path is "<headingId>/p[N]" (section chunk) or "p[N]" (page-top
+// chunk). Pull the heading part so two citations from the same page render
+// with distinct section labels next to the title — otherwise two chunks of
+// one page look like a duplicate citation (dogfood 2026-05-14 F4, Reader-
+// side counterpart of console/pages/project.ts:citeSectionLabel). Bare
+// "p[N]" has no useful disambiguator, so return ''.
+function citeSectionLabel(inPath) {
+  if (!inPath) return '';
+  const i = String(inPath).lastIndexOf('/p[');
+  return i > 0 ? String(inPath).slice(0, i) : '';
+}
+
 function renderCitations(citations, turnIdx) {
   if (!Array.isArray(citations) || citations.length === 0) return null;
   const box = document.createElement('div');
@@ -1169,6 +1195,13 @@ function renderCitations(citations, turnIdx) {
       ti.appendChild(a);
     } else {
       ti.textContent = titleText;
+    }
+    const section = citeSectionLabel(c.in_page_path);
+    if (section) {
+      const sec = document.createElement('span');
+      sec.className = 'cite-section';
+      sec.textContent = '· §' + section;
+      ti.appendChild(sec);
     }
     if (c.source_lang && c.lang && c.source_lang !== c.lang) {
       const tag = document.createElement('span');

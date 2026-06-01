@@ -16,7 +16,9 @@ import { loadConfig } from '../src/config.ts';
 import { openDatabase } from '../src/db/index.ts';
 import { MockEmbedder } from '../src/embedding/mock.ts';
 import { MockLLM } from '../src/llm/mock.ts';
-import type { RunRecord } from '../src/runs/types.ts';
+import type { RunRecord, RunsLine } from '../src/runs/types.ts';
+import { isRunRecord } from '../src/runs/types.ts';
+import type { LLMGenerateInput } from '../src/llm/types.ts';
 
 async function buildProject(): Promise<{ root: string; cleanup: () => Promise<void> }> {
   const root = await fs.mkdtemp(join(tmpdir(), 'anydocs-ask-runs-'));
@@ -46,7 +48,11 @@ async function buildProject(): Promise<{ root: string; cleanup: () => Promise<vo
   return { root, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
 }
 
-async function setup(opts: { runsEnabled: boolean; llm?: MockLLM }): Promise<{
+async function setup(opts: {
+  runsEnabled: boolean;
+  llm?: MockLLM;
+  citationCheckEnabled?: boolean;
+}): Promise<{
   runtime: Runtime;
   llm: MockLLM;
   cleanup: () => Promise<void>;
@@ -57,6 +63,9 @@ async function setup(opts: { runsEnabled: boolean; llm?: MockLLM }): Promise<{
   const stateRoot = await fs.mkdtemp(join(tmpdir(), 'anydocs-ask-state-'));
   const { config } = await loadConfig(root);
   config.runs.enabled = opts.runsEnabled;
+  if (opts.citationCheckEnabled) {
+    config.citationSemanticCheck.enabled = true;
+  }
   const db = openDatabase({ dbPath: ':memory:' });
   const llm = opts.llm ?? new MockLLM({ model: 'mock-llm' });
   const runtime = new Runtime({
@@ -391,6 +400,254 @@ test('/v1/ask?dry_run=0 (or absent value) is NOT treated as dry-run', async () =
     assert.equal(body._dry_run, undefined);
     const file = findRunsFile(stateRoot);
     assert.ok(file, 'expected runs file');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('/v1/ask: RunRecord.session_id matches the id echoed in the response (dogfood 2026-05-22)', async () => {
+  // Dogfood 2026-05-22 against hermes-docs (5-turn multi-turn dialogue):
+  // runs.jsonl had session_id=null on every row even when multi-turn was
+  // clearly working (history_window 1→2→3). appendRun() used to hardcode
+  // null; the bug broke the M6 fallback path that backfills β rows whose
+  // feedback.session_id column is null (pre-PR #61). The id must now be
+  // resolved once and threaded through both writes.
+  const { runtime, cleanup, stateRoot } = await setup({ runsEnabled: true });
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Q' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { session_id: string };
+    assert.ok(body.session_id, 'response must echo session_id');
+
+    const file = findRunsFile(stateRoot);
+    assert.ok(file, 'expected runs file');
+    const lines = readFileSync(file!, 'utf8').trim().split('\n');
+    const rec = JSON.parse(lines[0]!) as RunRecord;
+    assert.equal(rec.session_id, body.session_id);
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// RFC 0005 V3 alpha.2 — citation semantic check tail
+// ---------------------------------------------------------------------------
+
+/** Mock LLM that branches on system prompt: validator prompt → JSON verdicts,
+ *  everything else → the default answer-with-cit-markers responder. Lets us
+ *  exercise the V3 tail in a single test runtime. */
+function buildSplitLLM(): MockLLM {
+  return new MockLLM({
+    model: 'mock-llm',
+    responder: (input: LLMGenerateInput) => {
+      if (/引用校验助手/.test(input.systemPrompt)) {
+        const parsed = JSON.parse(input.userPrompt) as Array<{ cit_id: string }>;
+        return JSON.stringify(
+          parsed.map((p) => ({
+            cit_id: p.cit_id,
+            verdict: 'supports' as const,
+            reason: '与原文一致',
+          })),
+        );
+      }
+      // Mirror the default mock responder so the citation marker chain still
+      // works for the main /v1/ask path.
+      const markers = Array.from(new Set(input.userPrompt.match(/\[cit_\d+\]/g) ?? []));
+      return markers.length === 0
+        ? 'No relevant context found.'
+        : `Based on the documentation: ${markers.join(' ')}`;
+    },
+  });
+}
+
+test('/v1/ask: citationSemanticCheck.enabled appends one citation-check-update tail', async () => {
+  // RFC 0005 V3 alpha.2 — shadow-mode happy path. Main response returns
+  // immediately; the validator fires fire-and-forget. After awaiting the
+  // pending task, runs.jsonl should hold (RunRecord, citation-check-update)
+  // joined by request_id.
+  const llm = buildSplitLLM();
+  const { runtime, cleanup, stateRoot } = await setup({
+    runsEnabled: true,
+    citationCheckEnabled: true,
+    llm,
+  });
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    assert.equal(res.status, 200);
+    await runtime.awaitPendingTasks();
+
+    const file = findRunsFile(stateRoot);
+    assert.ok(file, 'expected runs file');
+    const lines = readFileSync(file!, 'utf8').trim().split('\n');
+    assert.equal(lines.length, 2, 'one RunRecord + one citation-check-update tail');
+    const rec = JSON.parse(lines[0]!) as RunRecord;
+    const tail = JSON.parse(lines[1]!) as RunsLine;
+    assert.ok(rec.answer.kind === 'answer');
+    assert.ok(rec.answer.citations.length > 0, 'happy path must surface ≥1 citation');
+    // citation_id now present on every RunCitation (V4 additive schema).
+    assert.ok(typeof rec.answer.citations[0]!.citation_id === 'string');
+
+    assert.ok(!isRunRecord(tail), 'second line must be a tail update');
+    if (!isRunRecord(tail) && tail.type === 'citation-check-update') {
+      assert.equal(tail.request_id, rec.request_id, 'tail joins back via request_id');
+      assert.ok(tail.citations.length > 0);
+      const verdict = tail.citations[0]!.semantic_check;
+      assert.equal(verdict.verdict, 'supports');
+      assert.equal(verdict.model, 'mock-llm');
+      assert.ok(verdict.checked_at.length > 0);
+      assert.ok(typeof verdict.latency_ms === 'number');
+    } else {
+      assert.fail(`expected citation-check-update, got ${JSON.stringify(tail)}`);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('/v1/ask: citationSemanticCheck disabled (default) writes NO tail and skips validator LLM call', async () => {
+  // alpha.0 promise: `enabled=false` means the feature touches the LLM zero
+  // extra times. We assert call count rather than just the absence of the
+  // tail line so a future regression that builds-the-prompt-but-throws can't
+  // sneak past the test.
+  const llm = buildSplitLLM();
+  const { runtime, cleanup, stateRoot } = await setup({
+    runsEnabled: true,
+    llm,
+    // citationCheckEnabled omitted → defaults to false
+  });
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    assert.equal(res.status, 200);
+    await runtime.awaitPendingTasks();
+
+    const file = findRunsFile(stateRoot);
+    const lines = readFileSync(file!, 'utf8').trim().split('\n');
+    assert.equal(lines.length, 1, 'only the RunRecord; no tail');
+    // Exactly one LLM call (the answer); no validator call.
+    assert.equal(llm.calls.length, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('/v1/ask?dry_run=1 with citationCheck enabled writes NO tail (no runs dir at all)', async () => {
+  // dry_run shorts everything that has persistence side-effects — answer
+  // cache, runs append, AND the citation-check tail. Otherwise a probe
+  // would still spend an LLM call on validation, breaking the "dry probe"
+  // contract.
+  const llm = buildSplitLLM();
+  const { runtime, cleanup, stateRoot } = await setup({
+    runsEnabled: true,
+    citationCheckEnabled: true,
+    llm,
+  });
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask?dry_run=1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    assert.equal(res.status, 200);
+    await runtime.awaitPendingTasks();
+
+    assert.equal(existsSync(join(stateRoot, 'runs')), false);
+    assert.equal(llm.calls.length, 1, 'no validator LLM call on dry_run');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('/v1/ask: validator LLM throw is silent — RunRecord still lands, no tail', async () => {
+  // RFC §4.6 contract: "校验失败永远不影响 /v1/ask 主响应". A validator
+  // crash must (a) NOT poison the main response, (b) NOT bubble as
+  // UnhandledPromiseRejection, (c) leave runs.jsonl with just the RunRecord.
+  const llm = new MockLLM({
+    model: 'mock-llm',
+    responder: (input) => {
+      if (/引用校验助手/.test(input.systemPrompt)) {
+        throw new Error('upstream 503 (validator)');
+      }
+      const markers = Array.from(new Set(input.userPrompt.match(/\[cit_\d+\]/g) ?? []));
+      return markers.length === 0
+        ? 'No relevant context found.'
+        : `Based on the documentation: ${markers.join(' ')}`;
+    },
+  });
+  const { runtime, cleanup, stateRoot } = await setup({
+    runsEnabled: true,
+    citationCheckEnabled: true,
+    llm,
+  });
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    // Main response still 200 — validator failure is shadow-only.
+    assert.equal(res.status, 200);
+    await runtime.awaitPendingTasks();
+
+    const file = findRunsFile(stateRoot);
+    const lines = readFileSync(file!, 'utf8').trim().split('\n');
+    // No tail line: validator throw → swallowed empty verdicts → no
+    // appendUpdate call (see runCitationCheckTail early return).
+    assert.equal(lines.length, 1);
+    const rec = JSON.parse(lines[0]!) as RunRecord;
+    assert.equal(rec.answer.kind, 'answer');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('/v1/ask: second call in the same session reuses the same session_id on RunRecord', async () => {
+  // Multi-turn round-trip: turn 1 mints a session, turn 2 echoes it. The
+  // server must persist the echoed id (not mint a new one) and the runs
+  // ledger must match. Dogfood hermes-docs verified this end-to-end with
+  // 5 turns; this is the minimal mock-LLM regression.
+  const { runtime, cleanup, stateRoot } = await setup({ runsEnabled: true });
+  try {
+    const app = createApp({ runtime });
+    const a = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Q1' }),
+    });
+    const aBody = (await a.json()) as { session_id: string };
+    const sid = aBody.session_id;
+
+    const b = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Q2', session_id: sid }),
+    });
+    const bBody = (await b.json()) as { session_id: string };
+    assert.equal(bBody.session_id, sid, 'turn 2 must echo the same session_id');
+
+    const file = findRunsFile(stateRoot);
+    const lines = readFileSync(file!, 'utf8').trim().split('\n');
+    assert.equal(lines.length, 2);
+    const r1 = JSON.parse(lines[0]!) as RunRecord;
+    const r2 = JSON.parse(lines[1]!) as RunRecord;
+    assert.equal(r1.session_id, sid);
+    assert.equal(r2.session_id, sid);
   } finally {
     await cleanup();
   }

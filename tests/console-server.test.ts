@@ -442,20 +442,29 @@ function insertFeedback(
     signal_source?: 'explicit' | 'implicit' | 'curated';
     current_page_id?: string | null;
     created_at?: number;
+    /** RFC 0003 M6 — populated by γ + curated inserts; β path persists null
+     *  today (see app.ts:308). Tests use this to seed multi-turn dialogues. */
+    session_id?: string | null;
+    /** F8 — pre-JSON-encoded retrieved snapshot. Either Citation[] shape
+     *  (page_id/snippet) — what β handler writes — or RunCitation[]
+     *  (page/quote) — what runs.jsonl uses. Parser must accept both. */
+    retrieved?: string | null;
   },
 ): void {
   db.prepare(
     `INSERT INTO feedback
-       (answer_id, question, generated, rating, signal_source, current_page_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (answer_id, question, generated, retrieved, rating, signal_source, current_page_id, created_at, session_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     args.answer_id,
     args.question ?? 'q',
     'gen',
+    args.retrieved ?? null,
     args.rating ?? null,
     args.signal_source ?? 'explicit',
     args.current_page_id ?? null,
     args.created_at ?? Date.now(),
+    args.session_id ?? null,
   );
 }
 
@@ -570,7 +579,7 @@ test('GET /api/projects/:name/feedback: returns rows + filterCounts; respects ?f
     };
     assert.equal(allBody.ok, true);
     assert.equal(allBody.rows.length, 4);
-    assert.deepEqual(allBody.filterCounts, { all: 4, thumbs_up: 2, thumbs_down: 1, implicit: 1, no_citations: 0 });
+    assert.deepEqual(allBody.filterCounts, { all: 4, thumbs_up: 2, thumbs_down: 1, implicit: 1, no_citations: 0, semantic_check_failed: 0, aplus_candidates: 0 });
 
     // filter=thumbs_up — 2 rows.
     const upRes = await app.request('/api/projects/docs-zh/feedback?filter=thumbs_up');
@@ -624,7 +633,7 @@ test('GET /api/projects/:name/feedback: curated rows excluded from all chip + KP
       rows: Array<{ signal_source: string }>;
       filterCounts: Record<string, number>;
     };
-    assert.deepEqual(body.filterCounts, { all: 3, thumbs_up: 1, thumbs_down: 1, implicit: 1, no_citations: 0 });
+    assert.deepEqual(body.filterCounts, { all: 3, thumbs_up: 1, thumbs_down: 1, implicit: 1, no_citations: 0, semantic_check_failed: 0, aplus_candidates: 0 });
     // List rows when filter='all' must also stay at 3 (curated suppressed
     // by the SQL filter; counts and list must agree).
     assert.equal(body.rows.length, 3);
@@ -685,7 +694,7 @@ test('GET /api/projects/:name/feedback: disabled project returns enabled=false, 
     assert.equal(body.ok, true);
     assert.equal(body.enabled, false);
     assert.equal(body.rows.length, 0);
-    assert.deepEqual(body.filterCounts, { all: 0, thumbs_up: 0, thumbs_down: 0, implicit: 0, no_citations: 0 });
+    assert.deepEqual(body.filterCounts, { all: 0, thumbs_up: 0, thumbs_down: 0, implicit: 0, no_citations: 0, semantic_check_failed: 0, aplus_candidates: 0 });
   } finally {
     await cleanup();
   }
@@ -754,30 +763,78 @@ function makeRunRecord(args: {
   ts?: string;
   kind?: 'answer' | 'clarify' | 'error';
   confidence?: number;
-  citations?: Array<{ chunk_id: number | null; page: string; quote: string }>;
+  citations?: Array<{
+    chunk_id: number | null;
+    page: string;
+    quote: string;
+    /** RFC 0005 V4 — present on alpha.2+ runs. Drives the V5 verdict
+     *  join in the drawer. */
+    citation_id?: string;
+  }>;
+  /** RFC 0003 — populated by the multi-turn pipeline (alpha.0+). M6 tests
+   *  use this to exercise the runs.jsonl fallback for β rows whose
+   *  feedback.session_id column is null. */
+  session_id?: string | null;
+  history_window?: number;
+  /** RFC 0005 V5 — request_id override. Defaults to `req_<answer_id>` so
+   *  test fixtures can build a matching citation-check-update tail
+   *  without bookkeeping. */
+  request_id?: string;
 }): Record<string, unknown> {
+  const answerCore: Record<string, unknown> = {
+    kind: args.kind ?? 'answer',
+    answer_id: args.answer_id,
+    md: 'a',
+    citations: args.citations ?? [{ chunk_id: 1, page: 'p', quote: 'q' }],
+    confidence: args.confidence ?? 0.7,
+    latency_ms: 100,
+    tokens_in: null,
+    tokens_out: null,
+    model: 'mock',
+    error_code: null,
+  };
+  if (typeof args.history_window === 'number') {
+    answerCore.history_window = args.history_window;
+  }
   return {
     ts: args.ts ?? new Date().toISOString(),
-    request_id: 'req_' + args.answer_id,
-    session_id: null,
+    request_id: args.request_id ?? 'req_' + args.answer_id,
+    session_id: args.session_id ?? null,
     query: 'q',
     filters: {},
     context_pageId: null,
     source: 'reader',
     retrieval: { fused: [], subtree_ask_triggered: false },
-    answer: {
-      kind: args.kind ?? 'answer',
-      answer_id: args.answer_id,
-      md: 'a',
-      citations: args.citations ?? [{ chunk_id: 1, page: 'p', quote: 'q' }],
-      confidence: args.confidence ?? 0.7,
-      latency_ms: 100,
-      tokens_in: null,
-      tokens_out: null,
-      model: 'mock',
-      error_code: null,
-    },
+    answer: answerCore,
     feedback: { beta: null, gamma: null },
+  };
+}
+
+/** RFC 0005 V5 — build a citation-check-update tail keyed to a RunRecord's
+ *  request_id. Each verdict joins to its citation by `citation_id`. */
+function makeCitationCheckUpdate(args: {
+  request_id: string;
+  ts?: string;
+  verdicts: Array<{
+    citation_id: string;
+    verdict: 'supports' | 'partially' | 'not_supports';
+    reason?: string;
+  }>;
+}): Record<string, unknown> {
+  return {
+    type: 'citation-check-update',
+    ts: args.ts ?? new Date().toISOString(),
+    request_id: args.request_id,
+    citations: args.verdicts.map((v) => ({
+      citation_id: v.citation_id,
+      semantic_check: {
+        verdict: v.verdict,
+        reason: v.reason ?? 'reason placeholder',
+        model: 'mock-validator',
+        checked_at: args.ts ?? new Date().toISOString(),
+        latency_ms: 1234,
+      },
+    })),
   };
 }
 
@@ -1112,6 +1169,342 @@ test('GET /api/projects/:name/feedback/:id: row with no linked run → run=null,
     assert.equal(body.detail.run, null);
     assert.equal(body.detail.confidence, null);
     assert.equal(body.detail.breadcrumb, null);
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// RFC 0003 M6 — Feedback tab session grouping
+// ---------------------------------------------------------------------------
+
+test('GET /p/:name: Feedback tab — contiguous same-session rows fold into one block (RFC 0003 M6)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    const t0 = Date.now() - 60_000;
+    // 3-turn dialogue (session_id sess-a) interleaved on the timeline with
+    // a standalone row (no session). The SSR list is newest-first; the
+    // session block should still render in chronological order inside.
+    insertFeedback(db, {
+      answer_id: 'a-turn-1', question: 'Q1', rating: 1,
+      session_id: 'sess-a', created_at: t0,
+    });
+    insertFeedback(db, {
+      answer_id: 'standalone', question: 'standalone q', rating: -1,
+      session_id: null, created_at: t0 + 1_000,
+    });
+    insertFeedback(db, {
+      answer_id: 'a-turn-2', question: 'Q2', signal_source: 'implicit', rating: null,
+      session_id: 'sess-a', created_at: t0 + 2_000,
+    });
+    insertFeedback(db, {
+      answer_id: 'a-turn-3', question: 'Q3', rating: 1,
+      session_id: 'sess-a', created_at: t0 + 3_000,
+    });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+
+    // Session header carries the dialogue count + truncated session_id.
+    // Match on data-session-id="sess-a" — the literal value only appears
+    // in SSR output, not in the inline JS template (the JS escapes from
+    // a variable, leaving `data-session-id="` as a partial literal).
+    assert.match(body, /data-session-id="sess-a"/);
+    assert.match(body, /3-turn dialogue/);
+    // The 3-turn session emits exactly one SSR header — count unique
+    // session id attrs to avoid hitting the inline JS template's literal
+    // `class="feedback-session-hd"` substring.
+    const headerMatches = body.match(/data-session-id="sess-a"/g) ?? [];
+    assert.equal(headerMatches.length, 1, 'expected 1 session header for 3-turn dialogue');
+    // Each turn row has the grouped variant. Grouped rows also carry a
+    // matching data-feedback-session-id attribute on each <li>; count
+    // those to avoid the JS template noise.
+    const groupedSessionRows = body.match(/data-feedback-session-id="sess-a"/g) ?? [];
+    assert.equal(groupedSessionRows.length, 3, 'expected 3 turn rows for sess-a');
+    assert.match(body, /T1\/3/);
+    assert.match(body, /T2\/3/);
+    assert.match(body, /T3\/3/);
+
+    // Standalone row stays ungrouped + carries an empty session id attr.
+    assert.match(body, /data-feedback-session-id=""/);
+
+    // Inside the rendered HTML, the order of turns Q1 → Q2 → Q3 (chronological)
+    // must hold even though the global list is newest-first. The questions
+    // appear once each in the SSR (drawer is lazy-loaded, JS template noise
+    // doesn't contain these literal strings).
+    const q1 = body.indexOf('Q1');
+    const q2 = body.indexOf('Q2');
+    const q3 = body.indexOf('Q3');
+    assert.ok(q1 > 0, 'Q1 must appear in SSR body');
+    assert.ok(q2 > q1, 'Q2 must follow Q1 (chronological order inside group)');
+    assert.ok(q3 > q2, 'Q3 must follow Q2 (chronological order inside group)');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab — single-turn session does not render a session header (RFC 0003 M6)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'lone-1', rating: 1, session_id: 'sess-x' });
+    insertFeedback(db, { answer_id: 'lone-2', rating: -1, session_id: 'sess-y' });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = await (await app.request('/p/docs-zh')).text();
+    // No SSR session header — sessionTurnCount=1 for each row. We match on
+    // data-session-id="sess-x"/"sess-y" because the inline JS template
+    // contains the literal `class="feedback-session-hd"` substring.
+    assert.equal(body.includes('data-session-id="sess-x"'), false);
+    assert.equal(body.includes('data-session-id="sess-y"'), false);
+    // Standalone rows carry their session id on the row li (for replay /
+    // future linking) but never the `grouped` modifier class.
+    assert.match(body, /data-feedback-session-id="sess-x"/);
+    assert.match(body, /data-feedback-session-id="sess-y"/);
+    // The grouped marker only ever lands in SSR if a header was emitted;
+    // count distinct `data-feedback-session-id="sess-x"` to ensure no
+    // duplicate / grouped row was rendered.
+    const sessXRows = body.match(/data-feedback-session-id="sess-x"/g) ?? [];
+    assert.equal(sessXRows.length, 1, 'expected exactly one ungrouped sess-x row');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback: rows carry sessionId / turnIndex / sessionTurnCount / historyWindow (RFC 0003 M6)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    const t0 = Date.now() - 60_000;
+    // β explicit rows leave session_id NULL in the column (see app.ts:308);
+    // the runs.jsonl fallback must backfill them for the M6 grouping to
+    // work on real β data.
+    insertFeedback(db, {
+      answer_id: 'b1', rating: 1, session_id: null, created_at: t0,
+    });
+    insertFeedback(db, {
+      answer_id: 'b2', rating: -1, session_id: null, created_at: t0 + 1_000,
+    });
+    db.close();
+    await seedRunsFile(stateRoot, [
+      makeRunRecord({ answer_id: 'b1', session_id: 'sess-beta', history_window: 0 }),
+      makeRunRecord({ answer_id: 'b2', session_id: 'sess-beta', history_window: 1 }),
+    ]);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const json = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      rows: Array<{
+        sessionId: string | null;
+        turnIndex: number;
+        sessionTurnCount: number;
+        historyWindow: number | null;
+      }>;
+    };
+    assert.equal(json.rows.length, 2);
+    // Newest-first ordering — b2 is row 0.
+    const [row0, row1] = json.rows;
+    assert.equal(row0.sessionId, 'sess-beta');
+    assert.equal(row1.sessionId, 'sess-beta');
+    assert.equal(row0.sessionTurnCount, 2);
+    assert.equal(row1.sessionTurnCount, 2);
+    assert.equal(row0.turnIndex, 2);
+    assert.equal(row1.turnIndex, 1);
+    assert.equal(row0.historyWindow, 1);
+    assert.equal(row1.historyWindow, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback/:id: drawer detail carries peer sessionTurns (RFC 0003 M6)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    const t0 = Date.now() - 60_000;
+    insertFeedback(db, { answer_id: 't1', question: 'first',  rating: 1, session_id: 'sess-d', created_at: t0 });
+    insertFeedback(db, { answer_id: 't2', question: 'second', rating: -1, session_id: 'sess-d', created_at: t0 + 1_000 });
+    insertFeedback(db, { answer_id: 't3', question: 'third', signal_source: 'implicit', session_id: 'sess-d', created_at: t0 + 2_000 });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    // The middle row is feedback_id=2 (autoincrement; matches insert order).
+    const json = (await (await app.request('/api/projects/docs-zh/feedback/2')).json()) as {
+      detail: {
+        sessionId: string | null;
+        turnIndex: number;
+        sessionTurnCount: number;
+        sessionTurns: Array<{ feedback_id: number; turnIndex: number; question: string }>;
+      };
+    };
+    assert.equal(json.detail.sessionId, 'sess-d');
+    assert.equal(json.detail.sessionTurnCount, 3);
+    assert.equal(json.detail.turnIndex, 2);
+    // sessionTurns excludes the current row, ordered by turnIndex ASC.
+    assert.equal(json.detail.sessionTurns.length, 2);
+    assert.deepEqual(
+      json.detail.sessionTurns.map((t) => [t.turnIndex, t.question]),
+      [
+        [1, 'first'],
+        [3, 'third'],
+      ],
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// F8 — drawer parser accepts both Citation and RunCitation field names
+// ---------------------------------------------------------------------------
+
+test('GET /api/projects/:name/feedback/:id: parseRunCitations decodes Citation[] shape from β handler (F8)', async () => {
+  // Dogfood 2026-05-23 F8 root cause: β /v1/ask/feedback handler writes
+  // Citation[] (page_id + snippet) into feedback.retrieved, but the
+  // drawer parser only knew RunCitation[] (page + quote). All items got
+  // filtered out → drawer falsely showed "no citations on this answer"
+  // even though the column had a 960+-byte populated JSON snapshot.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    const retrieved = JSON.stringify([
+      {
+        citation_id: 'cit_1',
+        chunk_id: 26111,
+        page_id: 'ai-providers',
+        lang: 'en',
+        source_lang: 'en',
+        title: 'AI Providers',
+        breadcrumb: [],
+        url: null,
+        snippet: 'Hermes supports Anthropic / OpenAI / OpenRouter.',
+        in_page_path: 'provider-selection/p[1]',
+      },
+      {
+        citation_id: 'cit_2',
+        chunk_id: 25771,
+        page_id: 'quickstart',
+        lang: 'en',
+        source_lang: 'en',
+        title: 'Quickstart',
+        breadcrumb: [],
+        url: null,
+        snippet: 'Run `hermes model` to choose your LLM provider.',
+        in_page_path: '2-set-up-a-provider/p[1]',
+      },
+    ]);
+    insertFeedback(db, { answer_id: 'beta-1', rating: -1, retrieved });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const json = (await (await app.request('/api/projects/docs-zh/feedback/1')).json()) as {
+      detail: { citations: Array<{ page: string; quote: string; chunkId: number | null }> };
+    };
+    assert.equal(json.detail.citations.length, 2, 'Citation[] shape must decode to 2 items');
+    assert.equal(json.detail.citations[0]!.page, 'ai-providers', 'page_id maps to page');
+    assert.match(json.detail.citations[0]!.quote, /Anthropic/, 'snippet maps to quote');
+    assert.equal(json.detail.citations[0]!.chunkId, 26111);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback/:id: parseRunCitations still decodes RunCitation[] shape (F8 backward-compat)', async () => {
+  // Pin the pre-F8 RunCitation path so the dual-shape fix doesn't regress
+  // existing rows. Any analyze / golden code that round-trips RunCitation
+  // through this column keeps working.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    const retrieved = JSON.stringify([
+      { chunk_id: 42, page: 'auth', quote: 'JWT bearer tokens' },
+      { chunk_id: 43, page: 'auth-jwt', quote: 'Refresh tokens expire after 30 days' },
+    ]);
+    insertFeedback(db, { answer_id: 'run-style', rating: 1, retrieved });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const json = (await (await app.request('/api/projects/docs-zh/feedback/1')).json()) as {
+      detail: { citations: Array<{ page: string; quote: string; chunkId: number | null }> };
+    };
+    assert.equal(json.detail.citations.length, 2);
+    assert.equal(json.detail.citations[0]!.page, 'auth');
+    assert.equal(json.detail.citations[0]!.quote, 'JWT bearer tokens');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback/:id: parseRunCitations prefers RunCitation page/quote over Citation page_id/snippet when both present (F8 precedence)', async () => {
+  // Belt-and-suspenders for the rare case where a writer started emitting
+  // both field families (e.g. a future RunCitation+Citation merge). Pin
+  // the canonical-trace-source-wins rule.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    const retrieved = JSON.stringify([
+      { chunk_id: 99, page: 'canonical-page', page_id: 'legacy-page',
+        quote: 'canonical quote', snippet: 'legacy snippet' },
+    ]);
+    insertFeedback(db, { answer_id: 'mixed', rating: 1, retrieved });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const json = (await (await app.request('/api/projects/docs-zh/feedback/1')).json()) as {
+      detail: { citations: Array<{ page: string; quote: string }> };
+    };
+    assert.equal(json.detail.citations[0]!.page, 'canonical-page');
+    assert.equal(json.detail.citations[0]!.quote, 'canonical quote');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback/:id: parseRunCitations skips items missing both page identifiers (F8 sanity)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    const retrieved = JSON.stringify([
+      { chunk_id: 1 }, // no page / page_id → skip
+      { chunk_id: 2, page: 'valid', quote: 'ok' },
+      null,
+      'not an object',
+    ]);
+    insertFeedback(db, { answer_id: 'partial', rating: 1, retrieved });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const json = (await (await app.request('/api/projects/docs-zh/feedback/1')).json()) as {
+      detail: { citations: Array<{ page: string }> };
+    };
+    assert.equal(json.detail.citations.length, 1);
+    assert.equal(json.detail.citations[0]!.page, 'valid');
   } finally {
     await cleanup();
   }
@@ -3377,6 +3770,458 @@ test('POST /api/projects/:name/ask: touches lastUsedAt to defer reap', async () 
     });
     const after = registry.list()[0]!.lastUsedAt;
     assert.ok(after > before, `expected lastUsedAt to advance: before=${before} after=${after}`);
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// RFC 0005 V5 — Console Studio verdict display
+// ---------------------------------------------------------------------------
+
+test('GET /api/projects/:name/feedback: semantic_check_failed chip counts rows with ≥1 failing verdict', async () => {
+  // V5 happy path: 3 feedback rows linked to 3 runs.
+  //   ans_ok  — all supports → NOT counted
+  //   ans_partial — one partially → counted
+  //   ans_bad — one not_supports → counted
+  // Chip badge: filterCounts.semantic_check_failed = 2.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'ans_ok', rating: 1 });
+    insertFeedback(db, { answer_id: 'ans_partial', rating: 1 });
+    insertFeedback(db, { answer_id: 'ans_bad', rating: -1 });
+    db.close();
+    await seedRunsFile(stateRoot, [
+      makeRunRecord({
+        answer_id: 'ans_ok',
+        citations: [{ chunk_id: 1, page: 'p1', quote: 'q', citation_id: 'cit_1' }],
+      }),
+      makeCitationCheckUpdate({
+        request_id: 'req_ans_ok',
+        verdicts: [{ citation_id: 'cit_1', verdict: 'supports' }],
+      }),
+      makeRunRecord({
+        answer_id: 'ans_partial',
+        citations: [
+          { chunk_id: 1, page: 'p1', quote: 'q', citation_id: 'cit_1' },
+          { chunk_id: 2, page: 'p2', quote: 'q', citation_id: 'cit_2' },
+        ],
+      }),
+      makeCitationCheckUpdate({
+        request_id: 'req_ans_partial',
+        verdicts: [
+          { citation_id: 'cit_1', verdict: 'supports' },
+          { citation_id: 'cit_2', verdict: 'partially' },
+        ],
+      }),
+      makeRunRecord({
+        answer_id: 'ans_bad',
+        citations: [{ chunk_id: 1, page: 'p1', quote: 'q', citation_id: 'cit_1' }],
+      }),
+      makeCitationCheckUpdate({
+        request_id: 'req_ans_bad',
+        verdicts: [{ citation_id: 'cit_1', verdict: 'not_supports' }],
+      }),
+    ]);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const allBody = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      filterCounts: Record<string, number>;
+      kpi: { semanticCheckFailed: number | null };
+    };
+    assert.equal(allBody.filterCounts.semantic_check_failed, 2);
+    // KPI tile uses the same denominator.
+    assert.equal(allBody.kpi.semanticCheckFailed, 2);
+
+    // filter=semantic_check_failed narrows the SQL pull to those answer_ids.
+    const filtBody = (await (
+      await app.request('/api/projects/docs-zh/feedback?filter=semantic_check_failed')
+    ).json()) as {
+      filter: string;
+      rows: Array<{ answerId: string; semanticCheckFailed: boolean | null }>;
+    };
+    assert.equal(filtBody.filter, 'semantic_check_failed');
+    assert.equal(filtBody.rows.length, 2);
+    const ids = filtBody.rows.map((r) => r.answerId).sort();
+    assert.deepEqual(ids, ['ans_bad', 'ans_partial']);
+    for (const r of filtBody.rows) {
+      assert.equal(r.semanticCheckFailed, true);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback: with NO citation-check tails KPI semanticCheckFailed = null (feature off vs no failures distinct)', async () => {
+  // alpha.0 promise: `enabled=false` produces zero tails → KPI tile reads
+  // "—" not "0". Tests the distinction at the snapshot layer.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'ans_1', rating: 1 });
+    db.close();
+    await seedRunsFile(stateRoot, [
+      makeRunRecord({
+        answer_id: 'ans_1',
+        citations: [{ chunk_id: 1, page: 'p1', quote: 'q', citation_id: 'cit_1' }],
+      }),
+      // NO citation-check-update tail.
+    ]);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      filterCounts: Record<string, number>;
+      kpi: { semanticCheckFailed: number | null };
+    };
+    assert.equal(body.filterCounts.semantic_check_failed, 0);
+    assert.equal(body.kpi.semanticCheckFailed, null, 'null distinguishes "feature off" from "0 failures"');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback/:id: drawer citations carry semanticCheck verdict + reason', async () => {
+  // V5 drawer join: the citation snapshot in feedback.retrieved is
+  // β-style ({page_id, snippet, citation_id}). The runs.jsonl tail joins
+  // by citation_id and the drawer merges verdict + reason onto each cit.
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    // Write feedback.retrieved as β-shape JSON (Citation, not RunCitation).
+    const retrievedJson = JSON.stringify([
+      { citation_id: 'cit_1', page_id: 'p1', snippet: 'snippet1' },
+      { citation_id: 'cit_2', page_id: 'p2', snippet: 'snippet2' },
+    ]);
+    insertFeedback(db, {
+      answer_id: 'ans_x',
+      rating: -1,
+      retrieved: retrievedJson,
+    });
+    db.close();
+    await seedRunsFile(stateRoot, [
+      makeRunRecord({
+        answer_id: 'ans_x',
+        citations: [
+          { chunk_id: 1, page: 'p1', quote: 'q1', citation_id: 'cit_1' },
+          { chunk_id: 2, page: 'p2', quote: 'q2', citation_id: 'cit_2' },
+        ],
+      }),
+      makeCitationCheckUpdate({
+        request_id: 'req_ans_x',
+        verdicts: [
+          { citation_id: 'cit_1', verdict: 'supports', reason: '原文吻合' },
+          { citation_id: 'cit_2', verdict: 'not_supports', reason: '片段在讲别的' },
+        ],
+      }),
+    ]);
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    // Find the inserted feedback row's id (always 1 in a fresh schema).
+    const detailRes = await app.request('/api/projects/docs-zh/feedback/1');
+    assert.equal(detailRes.status, 200);
+    const body = (await detailRes.json()) as {
+      ok: boolean;
+      detail: {
+        citations: Array<{
+          citationId: string | null;
+          semanticCheck: { verdict: string; reason: string } | null;
+        }>;
+      };
+    };
+    assert.equal(body.ok, true);
+    assert.equal(body.detail.citations.length, 2);
+    const byCit = new Map(body.detail.citations.map((c) => [c.citationId, c]));
+    assert.equal(byCit.get('cit_1')?.semanticCheck?.verdict, 'supports');
+    assert.equal(byCit.get('cit_1')?.semanticCheck?.reason, '原文吻合');
+    assert.equal(byCit.get('cit_2')?.semanticCheck?.verdict, 'not_supports');
+    assert.equal(byCit.get('cit_2')?.semanticCheck?.reason, '片段在讲别的');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab SSR — semantic_check_failed chip is in the chip bar + cit-check KPI tile', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: 1 });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    // Chip in the chip bar.
+    assert.match(body, /data-feedback-chip="semantic_check_failed"/);
+    assert.match(body, /⚠ cit-check/);
+    // KPI tile.
+    assert.match(body, /cit-check failed/);
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// RFC 0006 A7 alpha.3 — A+ visibility in Studio Feedback tab
+// ---------------------------------------------------------------------------
+
+async function seedAplusCluster(
+  stateRoot: string,
+  args: {
+    clusterId: string;
+    members: number[];
+    memberQuestions: string[];
+    shadow?: boolean;
+    size?: number;
+    density?: number;
+    markdown?: string;
+  },
+): Promise<{ tracePath: string; mdPath: string }> {
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const dir = args.shadow
+    ? join(stateRoot, 'feedback', 'suggestions', '.shadow')
+    : join(stateRoot, 'feedback', 'suggestions');
+  await mkdir(dir, { recursive: true });
+  const tracePath = join(dir, `${args.clusterId}.json`);
+  const mdPath = join(dir, `${args.clusterId}.md`);
+  await writeFile(
+    tracePath,
+    JSON.stringify(
+      {
+        cluster_id: args.clusterId,
+        size: args.size ?? args.members.length,
+        density: args.density ?? 0.82,
+        center_question: args.memberQuestions[0],
+        center_feedback_id: args.members[0],
+        members: args.members,
+        member_questions: args.memberQuestions,
+        suggestion: { model: 'mock', latency_ms: 100 },
+      },
+      null,
+      2,
+    ),
+  );
+  await writeFile(
+    mdPath,
+    args.markdown ??
+      `# Suggested doc fix\n\nCluster ${args.clusterId} groups ${args.members.length} similar failed queries.\n`,
+  );
+  return { tracePath, mdPath };
+}
+
+test('GET /api/projects/:name/feedback: aplus_candidates filter narrows rows to cluster members (RFC 0006 A7)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: -1, question: 'how to retry refund?' });
+    insertFeedback(db, { answer_id: 'a2', rating: -1, question: 'retry policy on refunds?' });
+    insertFeedback(db, { answer_id: 'a3', rating: 1, question: 'how to check status?' });
+    db.close();
+    // Two rows (1, 2) are in the cluster; row 3 is not.
+    await seedAplusCluster(stateRoot, {
+      clusterId: 'c_aplus0000001',
+      members: [1, 2],
+      memberQuestions: ['how to retry refund?', 'retry policy on refunds?'],
+    });
+
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+
+    // filterCounts.aplus_candidates = 2; all = 3.
+    const all = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      filterCounts: Record<string, number>;
+      kpi: { aplusCandidates: { total: number; mode: string } | null };
+    };
+    assert.equal(all.filterCounts.aplus_candidates, 2);
+    assert.equal(all.filterCounts.all, 3);
+    assert.deepEqual(all.kpi.aplusCandidates, { total: 1, mode: 'enabled' });
+
+    // filter=aplus_candidates narrows to the 2 cluster members.
+    const narrowed = (await (
+      await app.request('/api/projects/docs-zh/feedback?filter=aplus_candidates')
+    ).json()) as { rows: Array<{ feedback_id: number; aplusCluster: unknown }> };
+    assert.equal(narrowed.rows.length, 2);
+    assert.ok(narrowed.rows.every((r) => r.aplusCluster !== null));
+    const fids = new Set(narrowed.rows.map((r) => r.feedback_id));
+    assert.ok(fids.has(1));
+    assert.ok(fids.has(2));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback: aplus KPI shows shadow mode when traces live under .shadow/', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: -1, question: 'q1' });
+    insertFeedback(db, { answer_id: 'a2', rating: -1, question: 'q2' });
+    db.close();
+    await seedAplusCluster(stateRoot, {
+      clusterId: 'c_shadow000001',
+      members: [1, 2],
+      memberQuestions: ['q1', 'q2'],
+      shadow: true,
+    });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      kpi: { aplusCandidates: { total: number; mode: string } | null };
+      filterCounts: Record<string, number>;
+    };
+    assert.deepEqual(body.kpi.aplusCandidates, { total: 1, mode: 'shadow' });
+    assert.equal(body.filterCounts.aplus_candidates, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback: aplus KPI is null when no suggestions dir exists', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: -1 });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const body = (await (await app.request('/api/projects/docs-zh/feedback')).json()) as {
+      kpi: { aplusCandidates: unknown };
+      filterCounts: Record<string, number>;
+    };
+    assert.equal(body.kpi.aplusCandidates, null);
+    assert.equal(body.filterCounts.aplus_candidates, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /api/projects/:name/feedback/:id: drawer detail carries SUGGESTION block when row is in a cluster (RFC 0006 A7)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: -1, question: 'how to retry refund?' });
+    insertFeedback(db, { answer_id: 'a2', rating: -1, question: 'retry policy on refunds?' });
+    db.close();
+    await seedAplusCluster(stateRoot, {
+      clusterId: 'c_drawer000001',
+      members: [1, 2],
+      memberQuestions: ['how to retry refund?', 'retry policy on refunds?'],
+      markdown: '# Suggested fix\n\nDocument the retry-after-refund flow under Refunds → Errors.\n',
+    });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const detailRes = await app.request('/api/projects/docs-zh/feedback/1');
+    assert.equal(detailRes.status, 200);
+    const body = (await detailRes.json()) as {
+      ok: boolean;
+      detail: {
+        aplusCluster: {
+          clusterId: string;
+          shadow: boolean;
+          centerQuestion: string;
+          peerQuestions: string[];
+          size: number;
+          density: number;
+          suggestionMarkdown: string | null;
+          suggestionTruncated: boolean;
+          suggestionPath: string;
+        } | null;
+      };
+    };
+    assert.equal(body.ok, true);
+    assert.ok(body.detail.aplusCluster, 'row 1 should carry an aplusCluster');
+    const c = body.detail.aplusCluster!;
+    assert.equal(c.clusterId, 'c_drawer000001');
+    assert.equal(c.shadow, false);
+    assert.equal(c.size, 2);
+    // peerQuestions excludes this row's own question.
+    assert.equal(c.peerQuestions.length, 1);
+    assert.match(c.peerQuestions[0]!, /retry policy/);
+    // suggestionMarkdown was loaded inline.
+    assert.match(c.suggestionMarkdown ?? '', /Suggested fix/);
+    assert.equal(c.suggestionTruncated, false);
+    assert.match(c.suggestionPath, /c_drawer000001\.md$/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab SSR — aplus_candidates chip + KPI render (RFC 0006 A7)', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: -1, question: 'q1' });
+    insertFeedback(db, { answer_id: 'a2', rating: -1, question: 'q2' });
+    db.close();
+    await seedAplusCluster(stateRoot, {
+      clusterId: 'c_ssr00000001',
+      members: [1, 2],
+      memberQuestions: ['q1', 'q2'],
+    });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    // Chip is in the chip bar.
+    assert.match(body, /data-feedback-chip="aplus_candidates"/);
+    assert.match(body, /A\+ cluster/);
+    // KPI tile shows real count + live mode (not placeholder).
+    assert.match(body, /data-feedback-aplus-mode="enabled"/);
+    assert.match(body, /A\+ candidates[\s\S]*?>1<[\s\S]*?live · operator flipped/);
+    // Placeholder copy is NOT present.
+    assert.equal(body.includes('unlocks at 50 (PRD §10.3)'), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('GET /p/:name: Feedback tab SSR — KPI placeholder when no suggestions dir', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const { db } = await seedFeedbackProject(ws, 'docs-zh');
+    insertFeedback(db, { answer_id: 'a1', rating: 1 });
+    db.close();
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    // Placeholder copy is back in place (no clusters yet).
+    assert.match(body, /A\+ candidates[\s\S]*?>—<[\s\S]*?unlocks at 50/);
+    assert.equal(body.includes('data-feedback-aplus-mode'), false);
   } finally {
     await cleanup();
   }

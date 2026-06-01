@@ -127,6 +127,95 @@ export type FeedbackConfig = {
   rerankerWeight: number;
 };
 
+/**
+ * Multi-turn / session rewrite — RFC 0003 (0.4.x). Schema登记 only in 0.2;
+ * pipeline does not read these values yet. Mirrors `FeedbackConfig` /
+ * `feedback.rerankerWeight` precedent of "register now, consume later".
+ *
+ * Default `enabled = false` is load-bearing: with this off, query pipeline
+ * behaviour is byte-equivalent to single-turn — no extra latency, no extra
+ * Claude tokens.
+ *
+ * Architecture (RFC 0003 §2.1, B.2 path locked 2026-05-21): the existing
+ * primary LLM (Claude / Anthropic provider) consumes a short session
+ * history alongside chunks in a single call. No external small-model
+ * runtime, no separate reformulation step. anydocs-ask therefore takes
+ * **zero new dependencies** to enable multi-turn — authors flip
+ * `enabled` and the pipeline starts feeding the existing LLM provider
+ * with prior turns.
+ */
+export type MultiTurnConfig = {
+  enabled: boolean;
+  /**
+   * History window length (RFC §4.3). The pipeline keeps the most recent
+   * N turns from the session table and injects them into the LLM prompt
+   * alongside retrieval chunks. 3 is enough to resolve typical pronoun
+   * chains without bloating context; > ~5 risks drowning current_q signal.
+   */
+  historyTurns: number;
+};
+
+/**
+ * RFC 0005 — citation 语义校验（B.2 复用主 LLM 路径）。0.3 起 shadow 模式
+ * 上线，事后异步校验每条 citation 的 claim_sentence ↔ chunk_text 是否语义
+ * 一致。
+ *
+ * 0.3 in-scope schema 仅暴露两个字段：`enabled` 控制整段功能，`mode` 留位
+ * 未来 0.4 H4（enforce 模式 — 校验失败立即重试）。0.3 alpha 阶段只实现
+ * `shadow`；`enforce` 在 schema 留位但运行时拒绝（warn + fallback shadow）
+ * 直到 0.4 真正接通。
+ *
+ * 与 RFC 0003 一致地走 B.2 路径 — 复用现有 Anthropic LLM 通道，不引入小
+ * 模型 / 本地推理服务 / 外部 SaaS 校验依赖。
+ */
+export type CitationSemanticCheckConfig = {
+  enabled: boolean;
+  mode: 'shadow' | 'enforce';
+};
+
+/**
+ * RFC 0006 — A+ 失败查询诊断（B.2 复用主 LLM 路径）。0.4 alignment PR
+ * (2026-05-24) 仅留 schema 位，四字段都不被代码路径消费（CLI stub 仅
+ * 读 `threshold` + `observationWindow` 做门槛检查输出）；alpha.1 才落
+ * 聚类 pure 模块。
+ *
+ * 设计依据：PRD §10.3 表（A+ 启动阈值 ≥ 50 条反馈 + ≥ 4 周观察窗）+
+ * PRD §11.3 F2（失败查询诊断概念）+ RFC 0006 §4.2（聚类阈值 0.65 推导）。
+ *
+ * - `enabled`: 整段功能开关。`false`（默认）= CLI / Studio 都跑门槛检查
+ *   提示但不真产 suggestions/；`true` 配合门槛达标后真跑聚类 + 建议。
+ * - `threshold`: feedback 行数门槛（默认 50，PRD §10.3）
+ * - `observationWindow`: 观察窗（ISO duration 字符串，默认 '28d' = 4 周）
+ * - `embedSimilarityThreshold`: bge-m3 cosine 聚类阈值（默认 0.65，
+ *   RFC §4.2 推导）
+ */
+export type AplusConfig = {
+  enabled: boolean;
+  threshold: number;
+  observationWindow: string;
+  embedSimilarityThreshold: number;
+};
+
+/**
+ * RFC 0004 — 嵌入式 Ask Widget。0.4 alignment PR (2026-05-24) 仅留 schema
+ * 位，三字段都不被代码路径消费；alpha.0 才接通 W1 协议规格 + TS 类型。
+ *
+ * - `enabled`: 整段功能开关。`false`（默认）= widget endpoint 不挂、CORS 不
+ *   动、运行时与 0.3.x 字节等价。
+ * - `rateLimitPerMinute`: 公开接入维度的 token bucket 上限（RFC §5 Q4）。
+ *   0.5+ Phase 1 才真消费。
+ * - `allowedOrigins`: 域名白名单，每条是合法 Origin 字符串（`https://app.example.com`
+ *   形态，不含路径）。空数组在 alpha.x 阶段意味"无任何外部源可用"；GA 后
+ *   作为强约束。
+ */
+export type WidgetConfig = {
+  enabled: boolean;
+  rateLimitPerMinute: number;
+  allowedOrigins: string[];
+};
+
+export const WIDGET_MAX_ALLOWED_ORIGINS = 50;
+
 export type PromptConfig = {
   /**
    * Optional project-specific assistant identity. This replaces only the
@@ -154,6 +243,10 @@ export type ResolvedConfig = {
   runs: RunsConfig;
   analyze: AnalyzeConfig;
   feedback: FeedbackConfig;
+  multiTurn: MultiTurnConfig;
+  citationSemanticCheck: CitationSemanticCheckConfig;
+  widget: WidgetConfig;
+  aplus: AplusConfig;
   prompt: PromptConfig;
 };
 
@@ -217,6 +310,40 @@ const DEFAULTS: ResolvedConfig = {
     enabled: false,
     implicitSignals: 'session-only',
     rerankerWeight: 0.15,
+  },
+  multiTurn: {
+    // RFC 0003 alpha.1 flip (2026-05-22). Default ON now that M1+M2+M3+M4
+    // are wired end-to-end — design partner queries get pronoun resolution
+    // on second turns without the operator needing to flip a knob. Per RFC
+    // §6 risk table this raises LLM input tokens by ~1–2k/query on multi-
+    // turn calls (~$0.003–0.006 on Sonnet 4.6); acceptable at design-partner
+    // volume (< 100 q/day). Operators can still pin to `false` in
+    // anydocs.ask.json to revert to the alpha.0 (M1-only) byte-equivalent
+    // single-turn behaviour.
+    enabled: true,
+    historyTurns: 3,
+  },
+  citationSemanticCheck: {
+    // RFC 0005 alpha.0: schema 留位，整段默认关闭。0.3 alpha.1+ 才接通实际
+    // 校验逻辑；当前 flip 到 true 也不产生效果（pipeline 还没读这两个字段）。
+    enabled: false,
+    mode: 'shadow',
+  },
+  widget: {
+    // RFC 0004 alignment PR (2026-05-24): schema 留位，三字段都不被代码消费。
+    // alpha.0 才接通 W1 协议规格。flip enabled=true 在此阶段不产生任何行为。
+    enabled: false,
+    rateLimitPerMinute: 60,
+    allowedOrigins: [],
+  },
+  aplus: {
+    // RFC 0006 alignment PR (2026-05-24): schema 留位，仅 CLI stub 读
+    // threshold / observationWindow 做门槛检查输出。alpha.1 才落聚类 pure
+    // 模块；alpha.2 接通 LLM 建议生成；0.4.0 operator flip enabled=true。
+    enabled: false,
+    threshold: 50,
+    observationWindow: '28d',
+    embedSimilarityThreshold: 0.65,
   },
   prompt: {
     assistantName: null,
@@ -331,6 +458,14 @@ function mergeWithDefaults(
   applyRuns(user.runs, out.runs, warnings);
   applyAnalyze(user.analyze, out.analyze, warnings);
   applyFeedback(user.feedback, out.feedback, warnings);
+  applyMultiTurn(user.multiTurn, out.multiTurn, warnings);
+  applyCitationSemanticCheck(
+    user.citationSemanticCheck,
+    out.citationSemanticCheck,
+    warnings,
+  );
+  applyWidget(user.widget, out.widget, warnings);
+  applyAplus(user.aplus, out.aplus, warnings);
   applyPrompt(user.prompt, out.prompt, warnings);
   return out;
 }
@@ -451,6 +586,189 @@ function applyFeedback(value: unknown, target: FeedbackConfig, warnings: string[
       target.rerankerWeight = v;
     } else {
       warnings.push(`anydocs.ask.json: feedback.rerankerWeight must be a number in [0, 1]; using default`);
+    }
+  }
+}
+
+function applyMultiTurn(value: unknown, target: MultiTurnConfig, warnings: string[]): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'multiTurn' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.enabled !== undefined) {
+    if (typeof obj.enabled === 'boolean') {
+      target.enabled = obj.enabled;
+    } else {
+      warnings.push(`anydocs.ask.json: multiTurn.enabled must be a boolean; using default`);
+    }
+  }
+  if (obj.historyTurns !== undefined) {
+    const v = obj.historyTurns;
+    if (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 20) {
+      target.historyTurns = v;
+    } else {
+      warnings.push(`anydocs.ask.json: multiTurn.historyTurns must be an integer in [1, 20]; using default`);
+    }
+  }
+}
+
+function applyCitationSemanticCheck(
+  value: unknown,
+  target: CitationSemanticCheckConfig,
+  warnings: string[],
+): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'citationSemanticCheck' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.enabled !== undefined) {
+    if (typeof obj.enabled === 'boolean') {
+      target.enabled = obj.enabled;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: citationSemanticCheck.enabled must be a boolean; using default`,
+      );
+    }
+  }
+  if (obj.mode !== undefined) {
+    if (obj.mode === 'shadow' || obj.mode === 'enforce') {
+      target.mode = obj.mode;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: citationSemanticCheck.mode must be 'shadow' or 'enforce'; using default`,
+      );
+    }
+  }
+}
+
+/**
+ * RFC 0004 alignment — schema 留位。三字段都不被代码消费；本函数仅做形
+ * 状校验 + 默认填充。`allowedOrigins` 仅做"合法 URL origin 形态"的字符
+ * 串检查，不去重 / 不规范化大小写；GA 后会有更严格的规范化处理。
+ */
+function applyWidget(value: unknown, target: WidgetConfig, warnings: string[]): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'widget' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.enabled !== undefined) {
+    if (typeof obj.enabled === 'boolean') {
+      target.enabled = obj.enabled;
+    } else {
+      warnings.push(`anydocs.ask.json: widget.enabled must be a boolean; using default`);
+    }
+  }
+  if (obj.rateLimitPerMinute !== undefined) {
+    const v = obj.rateLimitPerMinute;
+    if (typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v) && v >= 1 && v <= 10_000) {
+      target.rateLimitPerMinute = v;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: widget.rateLimitPerMinute must be an integer in [1, 10000]; using default`,
+      );
+    }
+  }
+  if (obj.allowedOrigins !== undefined) {
+    if (!Array.isArray(obj.allowedOrigins)) {
+      warnings.push(`anydocs.ask.json: widget.allowedOrigins must be an array of strings; using default`);
+      return;
+    }
+    const origins: string[] = [];
+    let rejected = 0;
+    for (const item of obj.allowedOrigins) {
+      if (typeof item !== 'string') {
+        rejected++;
+        continue;
+      }
+      const trimmed = item.trim();
+      // Origin = scheme + "://" + host + optional ":port", no path.
+      // Cheap shape check: must parse as URL and the parsed string must
+      // equal `<origin>/` or `<origin>` — anything trailing means the
+      // operator probably included a path by mistake.
+      let ok = false;
+      try {
+        const u = new URL(trimmed);
+        if ((u.protocol === 'http:' || u.protocol === 'https:') && u.pathname === '/' && !u.search && !u.hash) {
+          ok = true;
+        }
+      } catch {
+        // not a valid URL
+      }
+      if (!ok) {
+        rejected++;
+        continue;
+      }
+      origins.push(trimmed);
+      if (origins.length === WIDGET_MAX_ALLOWED_ORIGINS) {
+        const remaining = obj.allowedOrigins.length - obj.allowedOrigins.indexOf(item) - 1;
+        if (remaining > 0) {
+          warnings.push(
+            `anydocs.ask.json: widget.allowedOrigins keeps only first ${WIDGET_MAX_ALLOWED_ORIGINS} item(s); ignored ${remaining} extra item(s)`,
+          );
+        }
+        break;
+      }
+    }
+    target.allowedOrigins = origins;
+    if (rejected > 0) {
+      warnings.push(
+        `anydocs.ask.json: widget.allowedOrigins ignored ${rejected} non-string / non-origin item(s)`,
+      );
+    }
+  }
+}
+
+/**
+ * RFC 0006 alignment — schema 留位。四字段都不被代码消费；本函数仅做
+ * 形状校验 + 默认填充。alpha.1 才接通真聚类。
+ */
+function applyAplus(value: unknown, target: AplusConfig, warnings: string[]): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'aplus' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.enabled !== undefined) {
+    if (typeof obj.enabled === 'boolean') {
+      target.enabled = obj.enabled;
+    } else {
+      warnings.push(`anydocs.ask.json: aplus.enabled must be a boolean; using default`);
+    }
+  }
+  if (obj.threshold !== undefined) {
+    const v = obj.threshold;
+    if (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 100_000) {
+      target.threshold = v;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: aplus.threshold must be an integer in [1, 100000]; using default`,
+      );
+    }
+  }
+  if (obj.observationWindow !== undefined) {
+    if (typeof obj.observationWindow === 'string' && /^\d+[dhm]$/.test(obj.observationWindow)) {
+      target.observationWindow = obj.observationWindow;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: aplus.observationWindow must be a duration string (e.g. '28d', '48h', '120m'); using default`,
+      );
+    }
+  }
+  if (obj.embedSimilarityThreshold !== undefined) {
+    const v = obj.embedSimilarityThreshold;
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0 && v < 1) {
+      target.embedSimilarityThreshold = v;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: aplus.embedSimilarityThreshold must be a number in (0, 1); using default`,
+      );
     }
   }
 }

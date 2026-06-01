@@ -19,7 +19,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { toIsoWeek } from './iso-week.ts';
-import type { RunRecord, RunsLine } from './types.ts';
+import type { RunCitationCheckUpdate, RunFeedbackUpdate, RunRecord, RunsLine } from './types.ts';
 
 export type RunsWriterOptions = {
   stateRoot: string;
@@ -67,6 +67,28 @@ export class RunsWriter {
       return path;
     } catch (err) {
       process.stderr.write(`[ask] runs append failed: ${(err as Error).message}\n`);
+      return null;
+    }
+  }
+
+  /**
+   * Append an update tail (RFC 0005 V3 citation-check, or the reserved
+   * RFC 0001 feedback-update). Same disk semantics as `append` —
+   * `enabled=false` is a no-op, errors are swallowed to stderr, the line
+   * lands in the current ISO week's file.
+   *
+   * Truncation does NOT apply: tails carry verdict / feedback signals only,
+   * not user-controlled text that could blow up the file.
+   */
+  appendUpdate(update: RunCitationCheckUpdate | RunFeedbackUpdate): string | null {
+    if (!this.enabled) return null;
+    try {
+      this.ensureDir();
+      const path = this.fileFor(this.now());
+      appendFileSync(path, JSON.stringify(update) + '\n', 'utf8');
+      return path;
+    } catch (err) {
+      process.stderr.write(`[ask] runs appendUpdate failed: ${(err as Error).message}\n`);
       return null;
     }
   }

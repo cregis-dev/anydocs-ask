@@ -1,6 +1,6 @@
 {
   "name": "@anydocs/ask",
-  "version": "0.1.0",
+  "version": "0.3.1",
   "description": "Local-first Q&A service for anydocs projects — respects authoring intent, supports multilingual",
   "type": "module",
   "license": "MIT",
@@ -24,8 +24,7 @@
     "dist",
     "README.md",
     "CHANGELOG.md",
-    "PRD.md",
-    "ARCHITECTURE.md"
+    "LICENSE"
   ],
   "publishConfig": {
     "access": "public"
@@ -39,8 +38,7 @@
     "test": "node --experimental-strip-types --test --test-concurrency=1 'tests/**/*.test.ts'"
   },
   "engines": {
-    "node": ">=20.0.0",
-    "pnpm": ">=8.0.0"
+    "node": ">=20.0.0"
   },
   "packageManager": "pnpm@9.0.0",
   "pnpm": {

@@ -4,9 +4,140 @@
 
 ## Unreleased
 
+### 新增
+
+- **RFC 0006 0.4.0-alpha.3 — Studio A+ 视图接通**（A7）—— `feedback/suggestions-loader.ts` 扫 `<stateRoot>/feedback/suggestions/{c_*.json,.shadow/c_*.json}` + 解析为 UI VM。Console Feedback tab 三件事：
+  - KPI tile `A+ candidates` 从硬编码 "—" 接通真数；区分 `shadow mode` vs `live · operator flipped`（aplus.enabled=true 时）；无 suggestions 时回退到 `unlocks at 50` 占位
+  - 新增 `aplus_candidates` filter chip，过滤到出现在任意 cluster 的 feedback 行（chip 计数 + 列表 narrowing 与 no_citations / cit-check 同形态）
+  - Drawer 新增 SUGGESTION 段：cluster_id + center question + peer queries（≤ 8 条）+ shadow/live 徽章 + suggestion markdown 预览（≤ 1600 chars 折叠）+ 绝对文件路径（operator 在编辑器里打开）
+
+  **不依赖反馈量门槛** —— 即使 hermes-docs ≤ 15 条反馈，operator 跑 `feedback diagnose --shadow` 后 Studio 就能看到效果。`aplus.enabled=true` flip 留给 0.4.0 GA（≥ 50 反馈 + 4 周观察窗后由 operator 决定）。
+
+## 0.3.1 — 2026-05-24
+
+补丁版：**RFC 0006 A+ 失败查询诊断 alpha 链路（alignment + alpha.1 + alpha.2）+ npm publish 准备**。无 breaking change（aplus 段默认 off）；纯加 alpha 通道 + 发布前手续修整。
+
+5 个 PR / commit 自 v0.3.0（[#86 release wf](https://github.com/cregis-dev/anydocs-ask/pull/86) / [#87 RFC 0006 draft](https://github.com/cregis-dev/anydocs-ask/pull/87) / [#88 alignment](https://github.com/cregis-dev/anydocs-ask/pull/88) / [#89 cluster pure](https://github.com/cregis-dev/anydocs-ask/pull/89) / [#90 suggest + CLI pipeline](https://github.com/cregis-dev/anydocs-ask/pull/90)）。
+
+### 新增
+
+- **`anydocs-ask feedback diagnose` CLI** —— [RFC 0006](docs/rfcs/0006-failure-query-diagnostic-aplus.md) A+ 失败查询诊断的完整管道接通。
+  - **alignment (PR #87, #88)**：RFC Status: Draft → Accepted；`anydocs.ask.json` 增 `aplus.{enabled:false, threshold:50, observationWindow:'28d', embedSimilarityThreshold:0.65}` 段（PRD §10.3 双门槛 + RFC §4.2 聚类阈值）。CLI 注册 `feedback diagnose <projectRoot> [--threshold N] [--observation-window 28d] [--shadow] [--dry-run]`。零行为变化。
+  - **alpha.1 聚类 (PR #89)**：`src/feedback/diagnose-cluster.ts` `clusterFeedback(rows, options?)` —— threshold-based union-find on bge-m3 cosine；`cluster_id` sha256-12 hex of center question 跨次稳定；`synthesize60()` simulator 用 4 主题 × 15 query 验证管道 + 默认阈值精确 4 簇。
+  - **alpha.2 建议生成 + pipeline (PR #90)**：`src/feedback/diagnose-suggest.ts` 调主 LLM (B.2 复用 Anthropic 通道) 按 RFC §4.4 prompt 生成补文档建议草稿；`src/feedback/diagnose-runner.ts` orchestrator 串 feedback 表读 → embedding_cache (write-through `getOrEmbed`) → clusterFeedback → generateSuggestion → 写 `<stateRoot>/feedback/suggestions/cluster_<id>.{md,json}` 或 `.shadow/` 子目录。CLI 从 stub 升级到真跑：feature_off / data_insufficient / invalid_window 三个守卫 + `--dry-run` 跑全流程不写盘。
+  - **未启用门槛**：`aplus.enabled=false` 默认 + 无 `--shadow` 整段不跑 LLM；PRD §10.3 启动门槛 ≥ 50 反馈 + 4 周观察窗未到时由 operator 决定。Studio Feedback tab `aplusCandidates` 接通是 alpha.3。
+
+- **GitHub Actions release workflow (PR #86)** —— `.github/workflows/release.yml` tag-triggered (`v*`) + manual workflow_dispatch；OIDC trusted publishing + `--provenance` + `npm-publish` GitHub environment 人工 Approve 闸门 + tag/version match check + typecheck + test + build 串好。`engines.pnpm` 已从 package.json 移除（仅作用于本仓库开发，对 consumer 误导）。
+
+### 修复
+
+- **LICENSE 文件补充** —— package.json 声明 `license: "MIT"` 但仓库根无 LICENSE 文件；本版本补上标准 MIT 文本。
+- **package.json `files` 收敛** —— 不再把 `PRD.md` + `ARCHITECTURE.md` 进 npm tarball（内部决策文档对 consumer 无价值；包尺寸虚大）。文件保留：`dist/` + `README.md` + `CHANGELOG.md` + `LICENSE`。
+
+## 0.3.0 — 2026-05-24
+
+主线：**RFC 0005 citation 语义校验全链路接通（alpha.2 pipeline + V5 Studio 展示）+ RFC 0004 嵌入式 Ask Widget MVP（alpha.0→alpha.3 完整栈）**。次主线：**0.2.0 dogfood 留下的 F7 + F9 follow-up + RFC 0005 maxTokens CJK 修复**。两轮 dogfood（[2026-05-23 alpha.2 真机](docs/dogfood-2026-05-23-alpha2.md) / [2026-05-24 widget 真机](docs/dogfood-2026-05-24-widget.md)）锚定真实信号。
+
+13 个 PR / commit 自 v0.2.0（[#72-#84](https://github.com/cregis-dev/anydocs-ask/issues?q=is%3Apr+merged%3A%3E2026-05-23)）。
+
+`/v1/ask` / `/v1/ask/feedback` / `/v1/ask/stream` 协议向后兼容；新增 `GET /widget/v1.js` + `GET /widget/chat` 两个 endpoint（默认 gate 在 `widget.enabled=false`）；runs.jsonl 新增 `citation-check-update` tail 行（schema 向后兼容，`isRunRecord(line)` 守卫一处处理新旧两种行）。
+
+### 新增
+
+- **RFC 0005 alpha.2 — citation 语义校验 pipeline 接通（V3 + V4 + V6）**（PR [#72](https://github.com/cregis-dev/anydocs-ask/pull/72)）—— `finalizeAskCall` 在主响应返回后异步、批量、fire-and-forget 触发 [src/query/citation-validator.ts](src/query/citation-validator.ts)；校验结果以 `citation-check-update` tail 行追加进 runs.jsonl，按 `request_id` + `citations[].citation_id` 与原 RunRecord join。`anydocs.ask.json` 的 `citationSemanticCheck.enabled` 现在真接通——`false`（默认）整段不触发任何 LLM 调用；`true` 时每个 answer 多 1 次 Claude 调用，shadow 模式不阻塞主答案延迟。dry_run / 无 citations / 校验抛错均自然降级。配套：`RunCitation` schema 加 optional `citation_id` + `semantic_check`；新增 `RunCitationCheckUpdate` tail record 类型 + `isRunRecord(line)` 守卫；所有 runs.jsonl 读端（analyze / golden / runs export / Console feedback-state / index-state / traffic-state）切到守卫。
+
+- **RFC 0005 V5 — Console Studio 展示 verdict**（PR [#74](https://github.com/cregis-dev/anydocs-ask/pull/74)）—— Feedback tab 新增 `semantic_check_failed` 筛选 chip（"⚠ cit-check"，匹配任一 cit verdict !== `supports` 的行）+ 第 6 个 KPI tile（"cit-check failed"，feature off 时显示 "—" 区别于 "0 failures"）。Drawer CITATIONS 抽屉每个 cit 后挂彩色 verdict 徽章（supports=ok / partially=warn / not_supports=err）+ LLM 给出的 ≤100 字 reason 行。读端通过 `request_id` 把 `citation-check-update` tail merge 进 `runIndex`，按 `citation_id` 把 verdict 落到对应 cit；feature off / 无 tail / pre-alpha.2 行 → 全部 null 自然降级。
+
+- **RFC 0004 嵌入式 Ask Widget MVP（alpha.0→alpha.3 完整栈）**（PR [#77](https://github.com/cregis-dev/anydocs-ask/pull/77) / [#78](https://github.com/cregis-dev/anydocs-ask/pull/78) / [#79](https://github.com/cregis-dev/anydocs-ask/pull/79) / [#80](https://github.com/cregis-dev/anydocs-ask/pull/80) / [#81](https://github.com/cregis-dev/anydocs-ask/pull/81) / [#83](https://github.com/cregis-dev/anydocs-ask/pull/83)）—— 从 RFC Accepted 升档一路到可演示原型 + 跨域安全 + chat 体验补完 + 三项 polish 真机验完。
+  - **alignment + alpha.0**：RFC 0004 Status: Draft → Accepted；`anydocs.ask.json` 新增 `widget` 段（默认 `{ enabled:false, rateLimitPerMinute:60, allowedOrigins:[] }`）；`src/widget/types.ts` 落 Host API + postMessage envelope + server-side error codes + global namespace 全套 TS 类型；`src/widget/protocol.ts` 落 zero-dependency postMessage 守卫。
+  - **alpha.1 W3 MVP**：`src/widget/host-sdk.ts` 渲染 `GET /widget/v1.js`（IIFE bundle，注册 `window.anydocsAsk.init()` + 右下角浮层 + 380×560 px iframe）；`src/widget/chat-page.ts` 渲染 `GET /widget/chat`（textarea + send + answer + citations）。两端都 gate 在 `widget.enabled`，关闭时 404 `widget_disabled`。
+  - **alpha.2 W4 跨域安全**：`src/widget/server-gate.ts` 三层守卫（widget_disabled / invalid_project_key / origin_not_allowed / rate_limited），`InProcessRateLimiter` token bucket per (project_key, origin)，capacity 配置变更即生效，10 min 无活动 key auto-evict。CORS 接 `widget.allowedOrigins` + `allowHeaders` 加 `X-Project-Key`。所有 `/v1/ask*` 路径在 widget-flavoured 调用（带 `X-Project-Key`）时跑该 gate；不带 header 的 Reader / Console 调用一律 bypass。
+  - **alpha.2b chat polish**：chat-page 升 SSE 流式（POST `/v1/ask/stream` + parseSseFrame token-by-token），β 反馈栏（👍/👎/"answered wrong…" inline correction），widget-namespaced localStorage 历史持久化（`anydocs-ask:widget:history:v1`），重载 iframe 自动恢复最近 20 turn。
+  - **alpha.3 polish**：bubble 从 "?" 文字换 SVG 对话气泡 icon + 接通 `theme.baseColor` 让客户改主色；history restore 装回 β locked + 染色状态；新增 `WidgetInitOptions.docsBaseUrl` 让客户文档站基础 URL 作为 citation 相对路径的前缀。
+  - **真机回归**（[docs/dogfood-2026-05-24-widget.md](docs/dogfood-2026-05-24-widget.md)）：hermes-docs flip widget.enabled=true 后浏览器侧 F1-F6 + F10/F11/F12 全过：bubble SVG 紫色 / SSE 流式 / 5-cit 答案 / β 真写库 / iframe 跨源 widget gate 行为 / RFC 0005 verdict 同样作用在 widget 流量上。
+
+### 修复
+
+- **F6 — citation-validator maxTokens 对 CJK reason 不足（dogfood 2026-05-23 follow-up）**（PR [#73](https://github.com/cregis-dev/anydocs-ask/pull/73)）—— alpha.1 用 `Math.max(256, batch.length * 80)` 算 maxTokens；6-cit batch 仅 480 tokens 预算，中文 reason 一个 verdict 真实占 ~200 tokens，输出截在 cit_1 中间 → `parseLlmJsonArray` null → 整批静默 `[]`。修后 `Math.max(1024, batch.length * 300)`，CJK 充足余量；hermes-docs 真打 10 query × 32 verdicts 全部落库。回归测试加 maxTokens 下限断言守住。
+
+- **F7 — `validateCitations` 入口处按 `citationId` 去重（dogfood 2026-05-23 follow-up）**（PR [#75](https://github.com/cregis-dev/anydocs-ask/pull/75)）—— `extractClaimChunkPairs` 给同一答案里多次出现的 `[cit_N]` 标记各产一 pair（同 chunk、不同 claim 句）。alpha.1 这些 pair 会被分布到多批 LLM 调用：(1) 白烧 token，(2) 跨批共有 `cit_id` 时输出含重复 verdict 行，(3) V5 reader `applyTail` 按 last-write-wins 折叠，verdict 随机被选。修后：入口前 dedupe（first-write-wins，与既有 within-batch `seen` 语义一致），LLM 看到的每 batch 都唯一 `cit_id`、tail 行无重复。Token 节省与 claim 数成正比。
+
+- **F9 — Reader HISTORY 抽屉延迟刷新（0.2.0 dogfood follow-up）**（PR [#76](https://github.com/cregis-dev/anydocs-ask/pull/76)）—— 用户在第一次问答前打开 HISTORY 抽屉时显示 "No conversations yet"；答案落下后 `upsertCurrent` 写入 localStorage 但抽屉保留陈旧空态。修法：`upsertCurrent` 在 localStorage 写入后检查 `histDrawer.hidden`，若抽屉处于打开状态立刻 `renderHistory()` 触发重渲染。
+
+## 0.2.0 — 2026-05-23
+
+主线：**反馈回路铺通（RFC 0001）+ Console → Studio 升级（RFC 0002）**。次主线：**Query 质量回归**（基于 hermes-docs / cregis-developer-docs / anydocs-user-manual 三轮 dogfood + eval round-1 至 round-7）。同时落地：**早期多轮对话（RFC 0003 M1-M6）默认开启** + **citation 语义校验 schema 留位（RFC 0005 alpha.0/alpha.1）**——后两条本属于 0.3 / 0.4 的预告主线，但代码已经在 main 上跑过 dogfood 真证，作为本版本"early in-scope"一并发布。
+
+`/v1/ask` / `/v1/ask/feedback` / `/v1/ask/stream` 协议向后兼容；新增**可选** `session_id` round-trip 字段（首发由 Reader 客户端的 localStorage 维护），不传走单轮路径。
+
+### 新增
+
+- **β 显式反馈采集（RFC 0001 §3）**（PR [#30](https://github.com/cregis-dev/anydocs-ask/pull/30) / [#42](https://github.com/cregis-dev/anydocs-ask/pull/42) / [#48](https://github.com/cregis-dev/anydocs-ask/pull/48) / [#61](https://github.com/cregis-dev/anydocs-ask/pull/61)）—— `POST /v1/ask/feedback` 落 SQLite `feedback` 表（含 `signal_source` / `session_id` / `cluster_id` v1.5 schema），question 文本从 answers 表回填或从请求体兜底；Reader Ask UI 加 👍/👎/答错按钮 + 文本补正。Console Ask 体验台同款。配套 CLI：`feedback export / import / status` 走 `state/<projectId>/feedback/{inbox,approved,rejected,exports}` 目录，git 友好。
+
+- **γ 隐式信号 + session table（RFC 0001 §3 / ARCH §15.2.2）**（PR [#30](https://github.com/cregis-dev/anydocs-ask/pull/30)）—— 进程内 `SessionTable`（30min TTL + LRU 上限），每轮 ask 记 `{session_id, question, queryVector, answer_id, used_chunks}`。同 session 5min 内的"重问"如果与上一轮 query embedding cosine 相似度 ≥ 0.85，则写一条 `signal_source='implicit'` 的 implicit-negative 反馈行指向**上一轮** answer，喂 reranker 先验。`feedback.enabled = false` 默认关闭整段。
+
+- **`POST /v1/ask` 响应携带 `session_id`** —— 客户端按需 round-trip；Reader localStorage 维护，CLI / curl 用户可不理会。
+
+- **Console Feedback tab（RFC 0002 T1-a/b/c/d + close 尾）**（PR [#46](https://github.com/cregis-dev/anydocs-ask/pull/46) / [#47](https://github.com/cregis-dev/anydocs-ask/pull/47) / [#49](https://github.com/cregis-dev/anydocs-ask/pull/49) / [#50](https://github.com/cregis-dev/anydocs-ask/pull/50) / [#52](https://github.com/cregis-dev/anydocs-ask/pull/52)）—— 完整反馈视图：4 状态（disabled / enabled-empty / onboarding < 10 / healthy）+ 5 KPI tile（feedback·7d / explicit% / mean confidence / non-answer rate / A+ candidates 占位）+ 5 filter chip（all / 👍 / 👎 / implicit / no_citations）+ 每行 breadcrumb cell + 右侧 detail drawer（META / ANSWER / CORRECTION / CITATIONS / RETRIEVAL fused top-8 / ACTIONS replay-in-Ask + add-to-golden + jump-to-doc）。Drawer 含 stale-response token 防漂移。
+
+- **Console Index tab — ask-usage 反向标注（RFC 0002 T4）**（PR [#51](https://github.com/cregis-dev/anydocs-ask/pull/51)）—— Index 行末显示"近 7 天命中 N 次 + 中位 confidence"，page 级 ≥ 3 命中起；warn tint when median confidence < 0.5；page → 跳 Traffic 过滤同 page。
+
+- **Console 跨 journey jump**（PR [#44](https://github.com/cregis-dev/anydocs-ask/pull/44)）—— Traffic 行 / Feedback drawer 一键加 golden 候选；hash routing #index?focus=&lt;pageId&gt; / #ask?q=&lt;query&gt; 通用打通。
+
+- **Reader 公网 Ask UI**（`GET /ask`）（PR [#45](https://github.com/cregis-dev/anydocs-ask/pull/45) / [#63](https://github.com/cregis-dev/anydocs-ask/pull/63)）—— 单文件 SSR + 内嵌 SSE 客户端 + marked.esm.js；localStorage 维护 session_id；β 反馈按钮内置；citation 视觉去重（同 page 多 chunk 加 `· §<section>` 后缀）；可 iframe 嵌入（`position:fixed; inset:0`）。
+
+- **Console 项目级 prompt 配置**（commit e77fc10）—— `anydocs.ask.json` 的 `prompt.{assistantName, systemInstructions[]}` 在 Console Config drawer 可编辑；assistant 友好名 + 项目特定 system instructions 注入答案 prompt。
+
+- **早期多轮对话（RFC 0003 M1-M6）默认开启**（PR [#56](https://github.com/cregis-dev/anydocs-ask/pull/56) / [#57](https://github.com/cregis-dev/anydocs-ask/pull/57) / [#59](https://github.com/cregis-dev/anydocs-ask/pull/59) / [#60](https://github.com/cregis-dev/anydocs-ask/pull/60) / [#64](https://github.com/cregis-dev/anydocs-ask/pull/64)）—— 复用现有 Anthropic LLM 通道（B.2 单次消化路径，不引入小模型 / 本地推理服务）。M1 history-aware retrieve query（embedding query 拼最近 N 轮 question / BM25 query 不拼）；M2 multi-turn system prompt 加 5 条 zh+en 双语约束；M3 SessionEntry 增 `answer_md_summary`（200 字硬截断）；M4 接口 `history_window?: number`（AskAnswer / AskTrace / runs.jsonl 透出）；M6 Console Feedback tab 把连续同 session 行折叠成 dialogue 块（turn `T<N>/<M>` 徽章 + drawer SESSION 段列 peer turns + history_window 标记）。默认 `multiTurn.enabled=true / historyTurns=3`。
+
+- **citation 语义校验 schema 留位（RFC 0005 alpha.0/alpha.1）**（PR [#65](https://github.com/cregis-dev/anydocs-ask/pull/65) / [#66](https://github.com/cregis-dev/anydocs-ask/pull/66)）—— `anydocs.ask.json` 加 `citationSemanticCheck.{enabled:false, mode:'shadow'}`。两个 pure helper 落地：`src/query/claim-extractor.ts` 抽 `[cit_N]` 标记前的 claim 句；`src/query/citation-validator.ts` 批量调主 LLM 输出 verdict + reason JSON。**未接 pipeline**——alpha.2 才挂到 finalizeAskCall + 扩 RunRecord schema。
+
+- **Eval foundation + golden workshop 增强**（PR [#54](https://github.com/cregis-dev/anydocs-ask/pull/54)）—— Codex/cregis 评测基线脚本与 fixtures；`golden generate --from runs` / `--include-console` / `--since` 完善。
+
+### 修复
+
+- **Query 质量 — eval round-1 至 round-7 系列**（PR [#32](https://github.com/cregis-dev/anydocs-ask/pull/32) / [#33](https://github.com/cregis-dev/anydocs-ask/pull/33) / [#34](https://github.com/cregis-dev/anydocs-ask/pull/34) / [#35](https://github.com/cregis-dev/anydocs-ask/pull/35) / [#36](https://github.com/cregis-dev/anydocs-ask/pull/36) / [#37](https://github.com/cregis-dev/anydocs-ask/pull/37) / [#38](https://github.com/cregis-dev/anydocs-ask/pull/38) / [#39](https://github.com/cregis-dev/anydocs-ask/pull/39) / [#41](https://github.com/cregis-dev/anydocs-ask/pull/41)）—— `clarify` 子树阈值从 `0.65/0.15` 调到 `0.55/0.25`；clarify follow-up camelCase BM25 + 单复数 title 匹配；zh lang detection — CJK 阈值下调 + CJK 标点信号 + answer-text sanity 检查；JSON / YAML / config snippet 不再误标 ⚠ hallucination；no_citations 路径增加"加固 prompt 重试 1 次"；citation retry 1 → 2 + trace 记 attempts；multi-entity recall — query 中的 "/" "、" 分隔符 + additive injection + context cap；用户可见 message + `<lang>` 占位符规范化。
+
+- **RunRecord.session_id 真填（dogfood 2026-05-22）**（PR [#64](https://github.com/cregis-dev/anydocs-ask/pull/64)）—— runs.jsonl 每行 `session_id=null` 即使 multi-turn 正常工作；`appendRun` 硬编码 null + gamma 自己解析 id 但不对齐。修法：`finalizeAskCall` 顶部一次性 `sessionTable.getOrCreate`，thread 给 appendRun + observeAsk 复用。
+
+- **β explicit 反馈插入持久化 session_id**（PR [#61](https://github.com/cregis-dev/anydocs-ask/pull/61)）—— γ + curated 路径一直在写 `feedback.session_id` 列；β explicit (`POST /v1/ask/feedback`) 路径不写。修后接受 `session_id` 与 `sessionId` 双别名，空串当 NULL，与 γ 路径列层对齐。
+
+- **Reader 公网 citation 视觉去重（F4-analog）**（PR [#63](https://github.com/cregis-dev/anydocs-ask/pull/63)）—— Console 的 same-page 多 chunk citation 已在 0.1.0 修；Reader 仍是 dogfood 前形态。同步把 `citeSectionLabel()` 移植到 `web-ask.ts`，title 后追加 `· §<sectionLabel>`。
+
+- **Feedback 行的 question 文本回填**（PR [#48](https://github.com/cregis-dev/anydocs-ask/pull/48)）—— 0.1.0–0.2.0-alpha.1 的 feedback 行 question 列总是空字符串；Studio Feedback tab 上线后需要每行可读问句。fix：从 `answers` 表 SELECT question 列；找不到则用请求体 `question` 兜底。
+
 ### 删除
 
-- **`clarify.dominantThreshold` / `clarify.ambiguousGap` 配置字段** —— 这两个字段自 0.1.0-alpha.0（2026-05-07）引入起从未被读取：`src/query/aggregate.ts` 一直使用写死的代码常量，且在 eval round-1（0.1.0-alpha.2，2026-05-16）从 `0.65 / 0.15` 调到 `0.55 / 0.25` 时没有同步配置默认值，造成两套不一致的死字段。clarify 子树聚合阈值现明确固化为 `aggregate.ts` 中的 `SUBTREE_DOMINANCE = 0.55` / `SUBTREE_SPREAD = 0.25`；跨项目标定经验积累充分后再考虑外露。同步删除 `ClarifyConfig` 类型、`anydocs.ask.json` 的 `clarify` 节、Console Config drawer 的 Clarify 字段组，以及 ARCHITECTURE.md §9 example / docs/ask-overview.md §5.1 中对该配置的指引。无运行时行为变化。
+- **`clarify.dominantThreshold` / `clarify.ambiguousGap` 配置字段**（PR [#55](https://github.com/cregis-dev/anydocs-ask/pull/55)）—— 自 0.1.0-alpha.0 引入起从未被读取，且与 `aggregate.ts` 内的硬编码 `SUBTREE_DOMINANCE / SUBTREE_SPREAD` 在 eval round-1 之后值已分歧。同步删除 `ClarifyConfig` 类型 / Console Config drawer Clarify 字段组 / ARCH §9 / ask-overview §5.1 指引。无运行时行为变化。
+
+- **`ask.local.json` 4-th source**（PR [#31](https://github.com/cregis-dev/anydocs-ask/pull/31)）—— Console Config drawer 列了 4 个配置源但运行时只读 3 个；移除 UI 上的 4-th 源，等真正接 backend 时一并恢复。
+
+### 文档
+
+- **roadmap 重写为 Studio + 反馈闭环主线**（PR [#43](https://github.com/cregis-dev/anydocs-ask/pull/43)）—— ask-overview / PRD §10 全面对齐；Console Studio 升级为 Journey 6；reranker 加权改"先量再加"三档前置（≥200 反馈 + ≥30 显式负 + shadow ≥ 2 周）。
+- **Journey 6 storyboard walkthrough**（PR [#53](https://github.com/cregis-dev/anydocs-ask/pull/53)）—— demo 站完整闭环走通；dogfood-caught 一处 regression 顺手修。
+- **dogfood F4/F5 状态同步**（PR [#62](https://github.com/cregis-dev/anydocs-ask/pull/62)）—— `docs/ask-overview.md §5.4` 表格里 F4 / F5 从 🔧 待修 同步为 ✅，跟 dogfood-2026-05-14.md 一致。
+
+### 测试
+
+- 共 ~713 用例（0.1.0 → 0.2.0 累计新增 ~270 个），typecheck + test + build + CI（Node 22 + 24）全过。
+
+### 未变更
+
+- HTTP API 协议向后兼容：`/v1/ask` / `/v1/ask/stream` / `/v1/ask/feedback` 形状不变；新增**可选** `session_id` 字段（不传走单轮）。
+- CLI 子命令签名保持不变；新增 `feedback export / import / status` 三个子命令。
+- runs.jsonl schema 向后兼容（新增 optional 字段 `session_id` + `answer.history_window`，旧行 absent 视作 null / 单轮）。
+- anydocs 主仓 schema 完全不动（PRD §6.5 红线）。
+
+### 已知遗留
+
+- **RFC 0005 alpha.2 未接通**：`citationSemanticCheck.enabled=true` 在本版本无运行时效果（仅 schema + helper 模块）。alpha.2 才挂 pipeline。
+- **A+ 失败查询诊断（PRD §11 F2）**：等反馈量 ≥ 50 条 + ≥ 4 周观察。当前 hermes-docs 9 条 β。
+- **Reranker A 路径加权**：等 ≥ 200 反馈 + ≥ 30 显式负 + shadow ≥ 2 周（PRD §10.5）。
+- **RFC 0004 嵌入式 Widget**：仍 Draft，落地 0.5+。
+- **F6 / O1（alpha.3 遗留）**：召回敏感度 / LLM single-call timeout 继续观察。
+
+---
 
 ## 0.1.0 — 2026-05-16
 

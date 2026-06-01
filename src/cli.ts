@@ -47,6 +47,7 @@ import { runEval } from './commands/eval.ts';
 import { runAnalyzeRuns } from './commands/analyze.ts';
 import { runConsole } from './commands/console.ts';
 import {
+  runFeedbackDiagnose,
   runFeedbackExport,
   runFeedbackImport,
   runFeedbackStatus,
@@ -139,9 +140,10 @@ Usage:
   anydocs-ask golden import    <projectRoot> --file <jsonl> [--replace]
   anydocs-ask eval             <projectRoot> [--baseline <path>]
   anydocs-ask analyze runs     <projectRoot> [--since 7d] [--include-console]
-  anydocs-ask feedback export  <projectRoot>
-  anydocs-ask feedback import  <projectRoot>
-  anydocs-ask feedback status  <projectRoot>
+  anydocs-ask feedback export   <projectRoot>
+  anydocs-ask feedback import   <projectRoot>
+  anydocs-ask feedback status   <projectRoot>
+  anydocs-ask feedback diagnose <projectRoot> [--threshold N] [--observation-window 28d] [--shadow] [--dry-run]
   anydocs-ask workspace init
   anydocs-ask workspace ls
   anydocs-ask workspace add    <path> [--name <name>]
@@ -256,7 +258,7 @@ async function main(): Promise<number> {
   let runsAction: 'tail' | 'export' | null = null;
   let goldenAction: 'generate' | 'review' | 'import' | null = null;
   let analyzeAction: 'runs' | null = null;
-  let feedbackAction: 'export' | 'import' | 'status' | null = null;
+  let feedbackAction: 'export' | 'import' | 'status' | 'diagnose' | null = null;
   let projectArg: string | undefined;
   if (command === 'runs') {
     const action = positional[0];
@@ -287,8 +289,15 @@ async function main(): Promise<number> {
     projectArg = positional[1];
   } else if (command === 'feedback') {
     const action = positional[0];
-    if (action !== 'export' && action !== 'import' && action !== 'status') {
-      process.stderr.write(`error: 'feedback' requires an action (export | import | status)\n\n`);
+    if (
+      action !== 'export' &&
+      action !== 'import' &&
+      action !== 'status' &&
+      action !== 'diagnose'
+    ) {
+      process.stderr.write(
+        `error: 'feedback' requires an action (export | import | status | diagnose)\n\n`,
+      );
       printHelp();
       return 2;
     }
@@ -477,6 +486,29 @@ async function main(): Promise<number> {
           return await runFeedbackImport({ projectRoot, stateRoot });
         case 'status':
           return await runFeedbackStatus({ projectRoot, stateRoot });
+        case 'diagnose': {
+          // RFC 0006 alpha.0 stub — accepts --threshold / --observation-window
+          // / --shadow / --dry-run flags but does not yet write suggestions/.
+          const thresholdRaw = flags.threshold;
+          const threshold =
+            typeof thresholdRaw === 'string' ? Number(thresholdRaw) : undefined;
+          if (threshold !== undefined && !Number.isFinite(threshold)) {
+            process.stderr.write(`error: --threshold must be a number\n`);
+            return 2;
+          }
+          const observationWindow =
+            typeof flags['observation-window'] === 'string'
+              ? (flags['observation-window'] as string)
+              : undefined;
+          return await runFeedbackDiagnose({
+            projectRoot,
+            stateRoot,
+            ...(threshold !== undefined ? { threshold } : {}),
+            ...(observationWindow !== undefined ? { observationWindow } : {}),
+            shadow: flags.shadow === true,
+            dryRun: flags['dry-run'] === true,
+          });
+        }
         default:
           // Unreachable — dispatch above guarantees feedbackAction is non-null.
           process.stderr.write(`error: missing feedback action\n`);

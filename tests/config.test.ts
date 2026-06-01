@@ -2,13 +2,27 @@
  * Config loader tests — defaults, file overrides, lenient validation.
  */
 
-import { test } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { loadConfig, resolveTransformersCacheDir } from '../src/config.ts';
+
+// loadConfig applies ANTHROPIC_MODEL as an env override (src/config.ts:325).
+// Some dev shells inject it (e.g. Claude Code sets it to its gateway model),
+// which would shadow file-side llm.model values these tests assert against.
+// Pin a clean baseline for the whole file; the two tests that exercise the
+// override path (L186, L200) still save/restore their own values.
+const ORIG_ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL;
+before(() => {
+  delete process.env.ANTHROPIC_MODEL;
+});
+after(() => {
+  if (ORIG_ANTHROPIC_MODEL === undefined) delete process.env.ANTHROPIC_MODEL;
+  else process.env.ANTHROPIC_MODEL = ORIG_ANTHROPIC_MODEL;
+});
 
 async function withTmpProject(setup: (root: string) => Promise<void>): Promise<{
   root: string;
@@ -358,6 +372,451 @@ test('loadConfig: feedback rejects out-of-range rerankerWeight with a warning', 
     assert.ok(
       r.warnings.some((w) => /rerankerWeight/.test(w)),
       `expected a rerankerWeight warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// multiTurn section (RFC 0003 — alpha.1 flip, default-on with 3-turn window)
+// ---------------------------------------------------------------------------
+
+test('loadConfig: multiTurn defaults — enabled, 3-turn history window (alpha.1 flip)', async () => {
+  // RFC 0003 alpha.1 (2026-05-22) flipped the default from false → true once
+  // M1+M2+M3+M4 were end-to-end wired. Design partners get pronoun resolution
+  // on second turns without flipping a knob; operators who want the old
+  // alpha.0 (M1-only, embedding-splice-only) behaviour pin enabled=false.
+  const { root, cleanup } = await withTmpProject(async () => {});
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.multiTurn.enabled, true);
+    assert.equal(r.config.multiTurn.historyTurns, 3);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: multiTurn.enabled=false explicit override pins single-turn', async () => {
+  // Escape hatch — operators wanting alpha.0 byte-equivalent single-turn
+  // behaviour (no prompt history block, no embedding splice, no
+  // history_window field on responses) must be able to disable cleanly.
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ multiTurn: { enabled: false } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.multiTurn.enabled, false);
+    assert.equal(r.config.multiTurn.historyTurns, 3, 'historyTurns default preserved');
+    assert.deepEqual(r.warnings, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: multiTurn fields merge over defaults', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        multiTurn: { enabled: true, historyTurns: 5 },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.multiTurn.enabled, true);
+    assert.equal(r.config.multiTurn.historyTurns, 5);
+    assert.deepEqual(r.warnings, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: multiTurn rejects out-of-range historyTurns with a warning', async () => {
+  // Hard cap at 20 — beyond that the primary LLM's input grows fast enough
+  // to dilute current_q signal and inflate token cost without recall gain
+  // (RFC §4.3).
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ multiTurn: { historyTurns: 0 } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.multiTurn.historyTurns, 3, 'falls back to default');
+    assert.ok(
+      r.warnings.some((w) => /historyTurns/.test(w)),
+      `expected a historyTurns warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: multiTurn rejects non-object value with a warning, leaves siblings intact', async () => {
+  // Defensive: a malformed multiTurn section must not bleed into other
+  // sections (feedback / prompt etc.). Same posture as feedback / runs.
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        multiTurn: 'enabled',
+        feedback: { enabled: true },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.multiTurn.enabled, true, 'multiTurn defaults preserved');
+    assert.equal(r.config.feedback.enabled, true, 'sibling section still merges');
+    assert.ok(
+      r.warnings.some((w) => /'multiTurn' must be an object/.test(w)),
+      `expected a multiTurn shape warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// citationSemanticCheck section (RFC 0005 alpha.0 — schema 留位, default off)
+// ---------------------------------------------------------------------------
+
+test('loadConfig: citationSemanticCheck defaults — off, shadow mode', async () => {
+  // RFC 0005 alpha.0 (2026-05-23) lands the schema slot for the B.2 reused-
+  // main-LLM citation validator. 0.3 alpha.1 wires the actual validation;
+  // for now flipping enabled has no runtime effect (the field is read by
+  // future code), and `mode` is reserved for the 0.4 H4 enforce upgrade.
+  const { root, cleanup } = await withTmpProject(async () => {});
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.citationSemanticCheck.enabled, false);
+    assert.equal(r.config.citationSemanticCheck.mode, 'shadow');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: citationSemanticCheck.enabled=true is accepted without warning', async () => {
+  // Operators opting in early should not see noise — alpha.0 silently
+  // accepts the flip even though the pipeline does not yet consume it.
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ citationSemanticCheck: { enabled: true } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.citationSemanticCheck.enabled, true);
+    assert.equal(r.config.citationSemanticCheck.mode, 'shadow', 'mode default preserved');
+    assert.deepEqual(r.warnings, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: citationSemanticCheck.mode=enforce schema-accepted but warned (0.4 H4 reserved)', async () => {
+  // `enforce` is reserved for the 0.4 H4 hard-gate upgrade. The schema accepts
+  // it so the file validates cleanly, but until 0.4 H4 lands operators should
+  // be told flipping it does not yet change behaviour.
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ citationSemanticCheck: { enabled: true, mode: 'enforce' } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.citationSemanticCheck.mode, 'enforce');
+    assert.deepEqual(r.warnings, [], 'enforce is a valid schema value, no warning');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: citationSemanticCheck.mode rejects garbage with a warning', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ citationSemanticCheck: { mode: 'paranoid' } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.citationSemanticCheck.mode, 'shadow', 'falls back to default');
+    assert.ok(
+      r.warnings.some((w) => /citationSemanticCheck\.mode/.test(w)),
+      `expected a mode warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: citationSemanticCheck rejects non-object value with a warning, leaves siblings intact', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        citationSemanticCheck: 42,
+        feedback: { enabled: true },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(
+      r.config.citationSemanticCheck.enabled,
+      false,
+      'citationSemanticCheck defaults preserved',
+    );
+    assert.equal(r.config.feedback.enabled, true, 'sibling section still merges');
+    assert.ok(
+      r.warnings.some((w) => /'citationSemanticCheck' must be an object/.test(w)),
+      `expected a citationSemanticCheck shape warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// widget section (RFC 0004 alignment PR — schema 留位, zero behavior change)
+// ---------------------------------------------------------------------------
+
+test('loadConfig: widget defaults — disabled, rate=60, no origins', async () => {
+  // RFC 0004 alignment (2026-05-24) lands the schema slot for the embedded
+  // Ask Widget. 0.4 alpha.0 wires the actual endpoint + TS types; for now
+  // flipping enabled has no runtime effect (no code path reads the section).
+  const { root, cleanup } = await withTmpProject(async () => {});
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.widget.enabled, false);
+    assert.equal(r.config.widget.rateLimitPerMinute, 60);
+    assert.deepEqual(r.config.widget.allowedOrigins, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: widget.enabled=true accepted without warning (alpha.x no-op flip)', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        widget: { enabled: true, allowedOrigins: ['https://app.example.com'] },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.widget.enabled, true);
+    assert.deepEqual(r.config.widget.allowedOrigins, ['https://app.example.com']);
+    assert.deepEqual(r.warnings, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: widget.rateLimitPerMinute rejects non-integer / out-of-range with a warning', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ widget: { rateLimitPerMinute: 0 } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.widget.rateLimitPerMinute, 60, 'falls back to default');
+    assert.ok(
+      r.warnings.some((w) => /widget\.rateLimitPerMinute/.test(w)),
+      `expected a rateLimitPerMinute warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: widget.allowedOrigins drops non-origin strings + counts rejections', async () => {
+  // Origin = scheme://host[:port], no path/query/fragment. Operators who
+  // paste a full URL by mistake get the bad ones dropped with a one-line
+  // warning summary.
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        widget: {
+          allowedOrigins: [
+            'https://app.example.com',                  // ✓
+            'http://localhost:3000',                     // ✓
+            'https://app.example.com/some/path',        // ✗ has path
+            'app.example.com',                          // ✗ no scheme
+            'ftp://files.example.com',                  // ✗ wrong scheme
+            42,                                          // ✗ non-string
+          ],
+        },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.deepEqual(r.config.widget.allowedOrigins, [
+      'https://app.example.com',
+      'http://localhost:3000',
+    ]);
+    assert.ok(
+      r.warnings.some((w) => /widget\.allowedOrigins/.test(w) && /4 non-string \/ non-origin/.test(w)),
+      `expected an allowedOrigins rejection summary; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// aplus section (RFC 0006 alignment — schema 留位, zero behavior change)
+// ---------------------------------------------------------------------------
+
+test('loadConfig: aplus defaults — disabled, threshold=50, window=28d, embedSim=0.65', async () => {
+  // RFC 0006 alignment (2026-05-24) — PRD §10.3 双门槛 + §4.2 聚类阈值 0.65。
+  // 默认全 off；CLI stub 读 threshold/observationWindow 做门槛检查输出。
+  // alpha.1+ 才接通真正聚类。
+  const { root, cleanup } = await withTmpProject(async () => {});
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.aplus.enabled, false);
+    assert.equal(r.config.aplus.threshold, 50);
+    assert.equal(r.config.aplus.observationWindow, '28d');
+    assert.equal(r.config.aplus.embedSimilarityThreshold, 0.65);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: aplus.enabled=true accepted without warning (alpha.x no-op flip)', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ aplus: { enabled: true, threshold: 100 } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.aplus.enabled, true);
+    assert.equal(r.config.aplus.threshold, 100);
+    assert.deepEqual(r.warnings, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: aplus.threshold rejects non-positive-int with a warning', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ aplus: { threshold: -3 } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.aplus.threshold, 50, 'falls back to default');
+    assert.ok(
+      r.warnings.some((w) => /aplus\.threshold/.test(w)),
+      `expected a threshold warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: aplus.observationWindow accepts duration strings, rejects free-form', async () => {
+  // Valid: '28d' / '48h' / '120m'. Invalid: '4 weeks' / 'P28D' / numeric.
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ aplus: { observationWindow: '4 weeks' } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.aplus.observationWindow, '28d', 'falls back to default');
+    assert.ok(
+      r.warnings.some((w) => /aplus\.observationWindow/.test(w)),
+      `expected a window warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: aplus.embedSimilarityThreshold must be in (0, 1)', async () => {
+  for (const bad of [0, 1, 1.5, -0.1]) {
+    const { root, cleanup } = await withTmpProject(async (r) => {
+      await fs.writeFile(
+        join(r, 'anydocs.ask.json'),
+        JSON.stringify({ aplus: { embedSimilarityThreshold: bad } }),
+      );
+    });
+    try {
+      const r = await loadConfig(root);
+      assert.equal(
+        r.config.aplus.embedSimilarityThreshold,
+        0.65,
+        `embedSimilarityThreshold ${bad} should fall back to default`,
+      );
+      assert.ok(
+        r.warnings.some((w) => /aplus\.embedSimilarityThreshold/.test(w)),
+        `expected a warning for ${bad}; got ${JSON.stringify(r.warnings)}`,
+      );
+    } finally {
+      await cleanup();
+    }
+  }
+});
+
+test('loadConfig: aplus rejects non-object value with a warning, leaves siblings intact', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ aplus: 42, feedback: { enabled: true } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.aplus.enabled, false, 'aplus defaults preserved');
+    assert.equal(r.config.feedback.enabled, true, 'sibling section still merges');
+    assert.ok(
+      r.warnings.some((w) => /'aplus' must be an object/.test(w)),
+      `expected an aplus shape warning; got ${JSON.stringify(r.warnings)}`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: widget rejects non-object value with a warning, leaves siblings intact', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        widget: 42,
+        feedback: { enabled: true },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.widget.enabled, false, 'widget defaults preserved');
+    assert.equal(r.config.feedback.enabled, true, 'sibling section still merges');
+    assert.ok(
+      r.warnings.some((w) => /'widget' must be an object/.test(w)),
+      `expected a widget shape warning; got ${JSON.stringify(r.warnings)}`,
     );
   } finally {
     await cleanup();
