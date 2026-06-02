@@ -54,9 +54,9 @@ export type RetrieveOptions = {
    * even if the combined OR query demoted those chunks below perPathK.
    */
   entityTerms?: string[];
-  /** Current page id from the client context. Used to keep page-local context in the candidate pool. */
+  /** Current page id from the client context. Accepted for API compatibility, but ignored by retrieval. */
   currentPageId?: string | null;
-  /** Language to use when resolving currentPageId, usually the resolved query language. */
+  /** Language used for language-scoped supplemental/API reference injection. */
   currentPageLang?: DocsLang | null;
   /** API-intent questions get an extra API reference candidate pass. */
   apiIntent?: boolean;
@@ -87,14 +87,6 @@ const ENTITY_K = 5;
  * coverage gaps without displacing strong hits.
  */
 const ENTITY_INJECT_RANK = DEFAULT_PER_PATH_K;
-/** Max chunks to inject from the exact current page. */
-const CURRENT_PAGE_K = 3;
-/**
- * Current-page context is a UI signal, not a retrieval path, so give it a
- * modest synthetic rank: strong enough to survive finalK trimming, weaker
- * than top vector/BM25 matches.
- */
-const CURRENT_PAGE_INJECT_RANK = 8;
 /** Max API reference chunks to inject for endpoint/field/status questions. */
 const API_REFERENCE_K = 6;
 /** API reference injection should survive trimming but not dominate top dual-path hits. */
@@ -114,7 +106,7 @@ export type RetrievalTrace = {
   bm25Ranks: Map<number, number>;
   /** chunk_ids that entered the pool via the per-entity injection pass. */
   entityInjected: Set<number>;
-  /** chunk_ids that entered the pool because they belong to context.current_page_id. */
+  /** Retained for trace schema compatibility. Current page chunks are no longer injected. */
   currentPageInjected: Set<number>;
   /** chunk_ids that entered the pool via the API-reference-only retrieval pass. */
   apiReferenceInjected: Set<number>;
@@ -226,30 +218,6 @@ export function retrieveWithTrace(
   }
 
   const currentPageInjected = new Set<number>();
-  if (opts.currentPageId && opts.currentPageLang) {
-    const currentPageInjectScore = 1 / (RRF_K + CURRENT_PAGE_INJECT_RANK);
-    const currentPageQueries = [
-      ...(opts.apiReferenceFtsQueries ?? []),
-      ...(opts.ftsQuery ? [opts.ftsQuery] : []),
-    ];
-    const currentPageIds = currentPagePath(
-      db,
-      opts.currentPageId,
-      opts.currentPageLang,
-      CURRENT_PAGE_K,
-      opts.scopeId,
-      currentPageQueries,
-    );
-    for (const id of currentPageIds) {
-      currentPageInjected.add(id);
-      const cur = rrfScores.get(id);
-      if (cur === undefined) {
-        rrfScores.set(id, currentPageInjectScore);
-      } else {
-        rrfScores.set(id, cur + currentPageInjectScore);
-      }
-    }
-  }
 
   const apiReferenceInjected = new Set<number>();
   if (opts.apiIntent && opts.ftsQuery) {
@@ -278,7 +246,7 @@ export function retrieveWithTrace(
     }
   }
 
-  const protectedIds = new Set([...currentPageInjected, ...supplementalInjected]);
+  const protectedIds = new Set([...supplementalInjected]);
   const ranked = keepProtectedIds(
     [...rrfScores.entries()].sort((a, b) => b[1] - a[1]),
     finalK,

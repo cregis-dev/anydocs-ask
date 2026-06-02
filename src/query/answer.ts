@@ -5,7 +5,7 @@
  *
  * Pipeline:
  *   1. Validate inputs (question length, scope_id existence in pages table)
- *   1.5 Detect query lang (scope_id > current_page_id > text)
+ *   1.5 Detect query lang (scope_id > text)
  *   2. Boundary filter is applied inside retrieval SQL (status='published',
  *      optional subtree_root match)
  *   3. Hybrid retrieve (vector + BM25 + RRF)
@@ -31,10 +31,9 @@ import { detectLangFromText, langFromScopeId } from './lang.ts';
 import { sanitizeFtsQuery } from './sanitize.ts';
 import { retrieveWithTrace, type RetrievalTrace, type RetrievedChunk } from './retrieval.ts';
 import { computeTitleMatches } from './rerank.ts';
-import { rerank, lookupSubtreeRoot, type RerankedChunk } from './rerank.ts';
+import { rerank, type RerankedChunk } from './rerank.ts';
 import {
   apiReferenceChunkMatchesVersion,
-  apiReferencePagePrefixFor,
   apiReferenceSearchHints,
   apiReferenceVersionPreferences,
   detectProjectSetupIntent,
@@ -227,9 +226,7 @@ async function askWithTraceInternal(
   await hooks.onStatus?.('retrieving');
   const apiIntent = detectApiIntent(question);
   const signatureAuthIntent = detectSignatureAuthIntent(question);
-  const currentSubtreeRoot = req.context?.current_page_id
-    ? lookupSubtreeRoot(deps.db, req.context.current_page_id, queryLang)
-    : null;
+  const currentSubtreeRoot = null;
   // RFC 0003 §4.2 — multi-turn history-aware retrieve query (M1).
   //
   // When `context.history` is supplied (server layer fills this when
@@ -288,19 +285,18 @@ async function askWithTraceInternal(
   const supplementalFtsQueries = supplementalContextHints
     .map((hint) => sanitizeFtsQuery(hint))
     .filter((hint): hint is string => !!hint);
-  const apiReferencePagePrefix = apiReferencePagePrefixFor(currentSubtreeRoot);
   const { chunks: retrieved, trace: retrievalTrace } = retrieveWithTrace(deps.db, {
     queryVector: retrieveVector,
     ftsQuery,
     scopeId,
     entityTerms,
-    currentPageId: req.context?.current_page_id ?? null,
+    currentPageId: null,
     currentPageLang: queryLang,
     apiIntent,
     apiReferenceFtsQueries,
     supplementalFtsQueries,
     supplementalPageIds,
-    apiReferencePagePrefix,
+    apiReferencePagePrefix: null,
   });
 
   // 4. Rerank — rule rerank first (cheap, applies structural biases), then
@@ -311,13 +307,13 @@ async function askWithTraceInternal(
   const ruleReranked = rerank(retrieved, {
     queryLang,
     currentSubtreeRoot,
-    currentPageId: req.context?.current_page_id ?? null,
+    currentPageId: null,
     query: question,
     entityTerms,
     apiIntent,
     apiReferenceHintTerms,
     apiReferenceVersionPrefs,
-    apiReferencePagePrefix,
+    apiReferencePagePrefix: null,
   });
 
   const reranked = deps.reranker
@@ -368,9 +364,8 @@ async function askWithTraceInternal(
     apiIntent,
     apiReferenceCandidates: reranked,
     apiReferenceHintTerms,
-    apiReferencePagePrefix,
+    apiReferencePagePrefix: null,
     apiReferenceVersionPrefs,
-    currentPageId: req.context?.current_page_id ?? null,
     projectSetupIntent,
     supplementalPageIds,
     queryLang,
@@ -688,20 +683,6 @@ function resolveQueryLang(db: DbHandle, question: string, req: AskRequest): Docs
     const fromScope = langFromScopeId(scopeId);
     if (fromScope) return fromScope;
   }
-  const currentPageId = req.context?.current_page_id ?? null;
-  if (currentPageId) {
-    const rows = db
-      .prepare(`SELECT lang FROM pages WHERE page_id = ?`)
-      .all(currentPageId) as Array<{ lang: DocsLang }>;
-    if (rows.length === 1) return rows[0]!.lang;
-    if (rows.length > 1) {
-      // Same page id under multiple langs — disambiguate by text detection
-      // and pick the lang that's actually present.
-      const detected = detectLangFromText(question);
-      if (rows.some((r) => r.lang === detected)) return detected;
-      return rows[0]!.lang;
-    }
-  }
   return detectLangFromText(question);
 }
 
@@ -768,7 +749,18 @@ function extractEndpointForMandatoryCitation(chunk: RerankedChunk): string | nul
 function rawAnswerHasApiAnswerSubstance(rawAnswer: string, terms: string[]): boolean {
   const text = rawAnswer.toLowerCase();
   if (terms.includes('checkout')) {
-    return /\border_currency\b/i.test(rawAnswer) ||
+    return /\/api\/v2\/checkout\b/i.test(rawAnswer) ||
+      /\bcheckout_url\b/i.test(rawAnswer) ||
+      /\bcregis_id\b/i.test(rawAnswer) ||
+      /\bcallback_url\b/i.test(rawAnswer) ||
+      /\border_id\b/i.test(rawAnswer) ||
+      /\bpayer_id\b/i.test(rawAnswer) ||
+      /\bvalid_time\b/i.test(rawAnswer) ||
+      /\b(?:checkout|payment)[ -]?url\b/i.test(rawAnswer) ||
+      /\bpayment link\b/i.test(rawAnswer) ||
+      /\bhosted checkout\b/i.test(rawAnswer) ||
+      /创建订单|支付链接|付款链接|托管收银台|收银台/.test(rawAnswer) ||
+      /\border_currency\b/i.test(rawAnswer) ||
       /\border_amount\b/i.test(rawAnswer) ||
       /\busdt\b/i.test(rawAnswer) ||
       /\bcrypto(?:currency)?\b/i.test(rawAnswer) ||
@@ -812,7 +804,6 @@ function pickContextChunks(
     apiReferenceHintTerms?: string[];
     apiReferencePagePrefix?: string | null;
     apiReferenceVersionPrefs?: string[];
-    currentPageId?: string | null;
     projectSetupIntent?: boolean;
     supplementalPageIds?: string[];
     queryLang?: DocsLang;
@@ -891,15 +882,9 @@ function pickContextChunks(
       )
       .filter((c) => !seen.has(c.chunk_id))
       .slice(0, apiContextLimit);
-    const currentPageContext = opts.currentPageId
-      ? opts.apiReferenceCandidates
-          .filter((c) => c.page_id === opts.currentPageId && !isApiReferenceChunk(c))
-          .filter((c) => !seen.has(c.chunk_id))
-          .slice(0, 2)
-      : [];
     if (apiRefs.length > 0) {
       const ordered = reorderApiReferenceContext(
-        [...apiRefs, ...currentPageContext, ...picked].filter(
+        [...apiRefs, ...picked].filter(
           (c, idx, arr) => arr.findIndex((x) => x.chunk_id === c.chunk_id) === idx,
         ),
         opts,
@@ -1138,7 +1123,6 @@ function pruneCheckoutContextNoise(
   chunks: RerankedChunk[],
   opts: {
     apiReferenceHintTerms?: string[];
-    currentPageId?: string | null;
   },
 ): RerankedChunk[] {
   if (!opts.apiReferenceHintTerms?.includes('checkout')) return chunks;
@@ -1146,7 +1130,6 @@ function pruneCheckoutContextNoise(
     'supported-currencies',
     'payment-engine-quickstart-30min',
     'pe-business-flow',
-    opts.currentPageId ?? '',
   ]);
   const pruned = chunks.filter(
     (chunk) => isApiReferenceChunk(chunk) || allowedPages.has(chunk.page_id),
