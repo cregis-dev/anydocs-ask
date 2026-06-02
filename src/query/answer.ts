@@ -40,6 +40,8 @@ import {
   detectProjectSetupIntent,
   detectApiIntent,
   detectSignatureAuthIntent,
+  supplementalContextPageIds,
+  supplementalContextSearchHints,
   isApiReferenceChunk,
 } from './api-intent.ts';
 import { aggregate, TOP_K_FOR_AGGREGATION, type AggregateOutcome, type SubtreeShare } from './aggregate.ts';
@@ -274,11 +276,16 @@ async function askWithTraceInternal(
   const entityTerms = extractEntityTerms(question);
   const projectSetupIntent = detectProjectSetupIntent(question);
   const apiReferenceHints = apiReferenceSearchHints(question);
+  const supplementalContextHints = supplementalContextSearchHints(question);
+  const supplementalPageIds = supplementalContextPageIds(question);
   const apiReferenceVersionPrefs = apiReferenceVersionPreferences(question);
   const apiReferenceHintTerms = apiReferenceHints
     .flatMap((hint) => hint.toLowerCase().split(/\s+/))
     .filter(Boolean);
   const apiReferenceFtsQueries = apiReferenceHints
+    .map((hint) => sanitizeFtsQuery(hint))
+    .filter((hint): hint is string => !!hint);
+  const supplementalFtsQueries = supplementalContextHints
     .map((hint) => sanitizeFtsQuery(hint))
     .filter((hint): hint is string => !!hint);
   const apiReferencePagePrefix = apiReferencePagePrefixFor(currentSubtreeRoot);
@@ -291,6 +298,8 @@ async function askWithTraceInternal(
     currentPageLang: queryLang,
     apiIntent,
     apiReferenceFtsQueries,
+    supplementalFtsQueries,
+    supplementalPageIds,
     apiReferencePagePrefix,
   });
 
@@ -363,6 +372,7 @@ async function askWithTraceInternal(
     apiReferenceVersionPrefs,
     currentPageId: req.context?.current_page_id ?? null,
     projectSetupIntent,
+    supplementalPageIds,
     queryLang,
   });
   const formatHint = detectFormatHint(question);
@@ -712,14 +722,39 @@ function withMandatoryApiReferenceCitation(
     .filter(([, chunk]) => isApiReferenceChunk(chunk))
     .filter(([, chunk]) => apiReferenceMatchesHints(chunk, opts.apiReferenceHintTerms));
   if (matchingApiRefs.length === 0) return rawAnswer;
-  if (matchingApiRefs.some(([id]) => citedIds.has(id))) return rawAnswer;
-  if (!rawAnswerHasApiAnswerSubstance(rawAnswer, opts.apiReferenceHintTerms)) return rawAnswer;
+  let answer = rawAnswer;
+  if (
+    !matchingApiRefs.some(([id]) => citedIds.has(id)) &&
+    rawAnswerHasApiAnswerSubstance(answer, opts.apiReferenceHintTerms)
+  ) {
+    const [id, chunk] = matchingApiRefs[0]!;
+    const endpoint = extractEndpointForMandatoryCitation(chunk);
+    const suffix = opts.answerLang === 'zh'
+      ? `\n\nAPI reference：${endpoint ? `\`${endpoint}\` ` : ''}[${id}]。`
+      : `\n\nAPI reference: ${endpoint ? `\`${endpoint}\` ` : ''}[${id}].`;
+    answer = answer.trimEnd() + suffix;
+  }
+  return withMandatoryApiParameterExamples(answer, matchingApiRefs, opts);
+}
 
-  const [id, chunk] = matchingApiRefs[0]!;
-  const endpoint = extractEndpointForMandatoryCitation(chunk);
+function withMandatoryApiParameterExamples(
+  rawAnswer: string,
+  apiRefs: Array<[string, RerankedChunk]>,
+  opts: { apiReferenceHintTerms: string[]; answerLang: DocsLang },
+): string {
+  if (
+    !opts.apiReferenceHintTerms.includes('payout') ||
+    !opts.apiReferenceHintTerms.includes('coins') ||
+    /\b195@195\b/.test(rawAnswer)
+  ) {
+    return rawAnswer;
+  }
+  const exampleRef = apiRefs.find(([, chunk]) => /\b195@195\b/.test(chunk.text));
+  if (!exampleRef) return rawAnswer;
+  const [id] = exampleRef;
   const suffix = opts.answerLang === 'zh'
-    ? `\n\nAPI reference：${endpoint ? `\`${endpoint}\` ` : ''}[${id}]。`
-    : `\n\nAPI reference: ${endpoint ? `\`${endpoint}\` ` : ''}[${id}].`;
+    ? `\n\n参数示例：\`currency\` 使用 \`chain_id@token_id\` 格式，例如 \`195@195\` [${id}]。`
+    : `\n\nParameter example: \`currency\` uses the \`chain_id@token_id\` format, for example \`195@195\` [${id}].`;
   return rawAnswer.trimEnd() + suffix;
 }
 
@@ -748,6 +783,15 @@ function rawAnswerHasApiAnswerSubstance(rawAnswer: string, terms: string[]): boo
   if (terms.includes('payout')) {
     return /\bpayout\b|\bwithdrawal\b|\bcid\b|提币|出款|提现/i.test(rawAnswer);
   }
+  if (terms.includes('sub_address_balance')) {
+    return /\bsub_address_balance\b|\bsub[- ]address\b|\bbalance\b|\baddress\b|子地址|余额/i.test(rawAnswer);
+  }
+  if (terms.includes('sub_address_withdrawal')) {
+    return /\bsub_address_withdrawal\b|\bsub[- ]address\b|\bfrom_address\b/i.test(rawAnswer);
+  }
+  if (terms.includes('coins')) {
+    return /\bcoins\b|\bchain_id\b|\btoken_id\b|\bcurrency\b|币种|代币/i.test(rawAnswer);
+  }
   return text.trim().length >= 80;
 }
 
@@ -770,6 +814,7 @@ function pickContextChunks(
     apiReferenceVersionPrefs?: string[];
     currentPageId?: string | null;
     projectSetupIntent?: boolean;
+    supplementalPageIds?: string[];
     queryLang?: DocsLang;
   } = {},
 ): RerankedChunk[] {
@@ -800,6 +845,16 @@ function pickContextChunks(
 
   if (opts.projectSetupIntent) {
     picked = preferProjectSetupContext(picked, opts.apiReferenceCandidates, opts.queryLang, cap);
+  }
+
+  if (opts.supplementalPageIds?.length && opts.apiReferenceCandidates?.length) {
+    picked = mergeSupplementalContextPages(
+      picked,
+      opts.apiReferenceCandidates,
+      opts.supplementalPageIds,
+      opts.queryLang,
+      cap,
+    );
   }
 
   if (opts.apiIntent && opts.apiReferenceCandidates?.length) {
@@ -849,11 +904,17 @@ function pickContextChunks(
         ),
         opts,
       );
-      picked = limitApiReferenceContext(ordered, apiContextLimit).slice(0, cap);
+      picked = pruneCheckoutContextNoise(
+        limitApiReferenceContext(ordered, apiContextLimit),
+        opts,
+      ).slice(0, cap);
     } else {
-      picked = limitApiReferenceContext(
-        reorderApiReferenceContext(picked, opts),
-        apiContextLimit,
+      picked = pruneCheckoutContextNoise(
+        limitApiReferenceContext(
+          reorderApiReferenceContext(picked, opts),
+          apiContextLimit,
+        ),
+        opts,
       ).slice(0, cap);
     }
   }
@@ -885,7 +946,37 @@ function pickContextChunks(
       picked = [...lead, ...remaining];
     }
   }
+  if (opts.queryLang && outcome.kind !== 'translate-fallback') {
+    picked = dropCrossLanguageDuplicatePages(picked, opts.queryLang);
+  }
   return picked;
+}
+
+function mergeSupplementalContextPages(
+  picked: RerankedChunk[],
+  candidates: RerankedChunk[],
+  pageIds: string[],
+  queryLang: DocsLang | undefined,
+  cap: number,
+): RerankedChunk[] {
+  const pageIdSet = new Set(pageIds);
+  const seen = new Set(picked.map((c) => c.chunk_id));
+  const supplemental = candidates
+    .filter((c) => (!queryLang || c.lang === queryLang) && !isApiReferenceChunk(c) && pageIdSet.has(c.page_id))
+    .filter((c) => !seen.has(c.chunk_id))
+    .slice(0, pageIdSet.size * 2);
+  if (supplemental.length === 0) return picked;
+  return [...supplemental, ...picked]
+    .filter((c, idx, arr) => arr.findIndex((x) => x.chunk_id === c.chunk_id) === idx)
+    .slice(0, cap);
+}
+
+function dropCrossLanguageDuplicatePages(chunks: RerankedChunk[], queryLang: DocsLang): RerankedChunk[] {
+  const sameLangPageIds = new Set(
+    chunks.filter((c) => c.lang === queryLang).map((c) => c.page_id),
+  );
+  if (sameLangPageIds.size === 0) return chunks;
+  return chunks.filter((c) => c.lang === queryLang || !sameLangPageIds.has(c.page_id));
 }
 
 function preferProjectSetupContext(
@@ -959,8 +1050,17 @@ function apiReferenceMatchesHints(c: RerankedChunk, terms: string[] | undefined)
   if (terms.includes('checkout')) {
     return haystack.includes('checkout') || haystack.includes('/api/v2/checkout');
   }
-  if (terms.includes('payout')) {
-    return haystack.includes('payout') || haystack.includes('提币') || haystack.includes('出款');
+  const wantsSubAddressWithdrawal = terms.includes('sub_address_withdrawal');
+  const wantsSubAddressBalance = terms.includes('sub_address_balance');
+  const wantsCoins = terms.includes('coins');
+  const wantsPayout = terms.includes('payout');
+  if (wantsSubAddressWithdrawal || wantsSubAddressBalance || wantsCoins || wantsPayout) {
+    return (
+      (wantsSubAddressWithdrawal && matchesSubAddressWithdrawalApi(haystack)) ||
+      (wantsSubAddressBalance && matchesSubAddressBalanceApi(haystack)) ||
+      (wantsCoins && matchesCoinsApi(haystack)) ||
+      (wantsPayout && matchesWalletPayoutApi(haystack))
+    );
   }
   if (terms.includes('order') && terms.includes('info') && terms.includes('status')) {
     return (
@@ -972,8 +1072,52 @@ function apiReferenceMatchesHints(c: RerankedChunk, terms: string[] | undefined)
   return apiReferenceHintScore(c, terms) > 0;
 }
 
+function matchesSubAddressWithdrawalApi(haystack: string): boolean {
+  return (
+    haystack.includes('sub_address_withdrawal') ||
+    haystack.includes('/api/v1/sub_address_withdrawal') ||
+    haystack.includes('sub-address withdrawal') ||
+    haystack.includes('子地址出款') ||
+    haystack.includes('发起子地址提币')
+  );
+}
+
+function matchesSubAddressBalanceApi(haystack: string): boolean {
+  return (
+    haystack.includes('sub_address_balance') ||
+    haystack.includes('/api/v1/sub_address_balance') ||
+    haystack.includes('sub-address balance') ||
+    haystack.includes('子地址余额')
+  );
+}
+
+function matchesCoinsApi(haystack: string): boolean {
+  return (
+    haystack.includes('/api/v1/coins') ||
+    haystack.includes('api-v1-coins') ||
+    haystack.includes('post-api-v1-coins') ||
+    haystack.includes('查询项目支持币种') ||
+    haystack.includes('supported project coins')
+  );
+}
+
+function matchesWalletPayoutApi(haystack: string): boolean {
+  return (
+    /\/api\/v[0-9]+\/payout\b/.test(haystack) ||
+    /api-v[0-9]+-payout\b/.test(haystack) ||
+    haystack.includes('create wallet payout') ||
+    haystack.includes('发起钱包提币')
+  );
+}
+
 function apiReferenceContextLimit(terms: string[] | undefined): number {
   if (terms?.includes('checkout')) return 1;
+  if (terms?.includes('sub_address_withdrawal')) {
+    return 1;
+  }
+  if (terms?.includes('coins') && terms.includes('payout')) return 2;
+  if (terms?.includes('sub_address_balance')) return 1;
+  if (terms?.includes('coins')) return 1;
   return terms?.includes('payout') ? 2 : 3;
 }
 
@@ -988,6 +1132,26 @@ function limitApiReferenceContext(chunks: RerankedChunk[], maxApiRefs: number): 
     out.push(chunk);
   }
   return out;
+}
+
+function pruneCheckoutContextNoise(
+  chunks: RerankedChunk[],
+  opts: {
+    apiReferenceHintTerms?: string[];
+    currentPageId?: string | null;
+  },
+): RerankedChunk[] {
+  if (!opts.apiReferenceHintTerms?.includes('checkout')) return chunks;
+  const allowedPages = new Set([
+    'supported-currencies',
+    'payment-engine-quickstart-30min',
+    'pe-business-flow',
+    opts.currentPageId ?? '',
+  ]);
+  const pruned = chunks.filter(
+    (chunk) => isApiReferenceChunk(chunk) || allowedPages.has(chunk.page_id),
+  );
+  return pruned.length > 0 ? pruned : chunks;
 }
 
 function translationNoticeFor(lang: DocsLang): string {

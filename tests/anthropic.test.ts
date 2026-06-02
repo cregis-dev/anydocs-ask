@@ -163,3 +163,62 @@ test('AnthropicLLM: plain Error (no status/type) → original message preserved'
     },
   );
 });
+
+test('AnthropicLLM: disables provider thinking on message requests', async () => {
+  const llm = new AnthropicLLM({ model: 'm', apiKey: 'k' });
+  let seenReq: Record<string, unknown> | null = null;
+  withFakeClient(llm, (req) => {
+    seenReq = req as Record<string, unknown>;
+    return { model: 'm', content: [{ type: 'text', text: 'ok' }] };
+  });
+
+  await llm.generate(PROMPT);
+
+  assert.deepEqual(seenReq?.thinking, { type: 'disabled' });
+});
+
+test('AnthropicLLM: retries thinking-only max_tokens response with larger token cap', async () => {
+  const llm = new AnthropicLLM({ model: 'm', apiKey: 'k' });
+  const maxTokens: number[] = [];
+  withFakeClient(llm, (req) => {
+    maxTokens.push((req as { max_tokens: number }).max_tokens);
+    if (maxTokens.length === 1) {
+      return {
+        model: 'm',
+        stop_reason: 'max_tokens',
+        content: [{ type: 'thinking', thinking: 'reasoning consumed the first budget' }],
+      };
+    }
+    return { model: 'm', content: [{ type: 'text', text: 'final answer' }] };
+  });
+
+  const result = await llm.generate(PROMPT);
+
+  assert.equal(result.text, 'final answer');
+  assert.deepEqual(maxTokens, [2048, 4096]);
+});
+
+test('AnthropicLLM: thinking-only response exhausts retries as llm failure, not empty answer', async () => {
+  const llm = new AnthropicLLM({ model: 'm', apiKey: 'k' });
+  let calls = 0;
+  withFakeClient(llm, () => {
+    calls += 1;
+    return {
+      model: 'm',
+      stop_reason: 'max_tokens',
+      content: [{ type: 'thinking', thinking: 'never reaches final text' }],
+    };
+  });
+
+  await assert.rejects(
+    llm.generate(PROMPT),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /response contained no text blocks/);
+      assert.match(err.message, /stop_reason=max_tokens/);
+      assert.match(err.message, /content_types=thinking/);
+      return true;
+    },
+  );
+  assert.equal(calls, 2);
+});

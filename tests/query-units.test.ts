@@ -18,6 +18,8 @@ import {
   apiReferenceSearchHints,
   apiReferenceVersionPreferences,
   detectApiIntent,
+  supplementalContextPageIds,
+  supplementalContextSearchHints,
 } from '../src/query/api-intent.ts';
 import type { RerankedChunk } from '../src/query/rerank.ts';
 import type { RetrievedChunk } from '../src/query/retrieval.ts';
@@ -286,11 +288,41 @@ test('apiReferenceSearchHints: adds endpoint-oriented terms for common order and
     ['checkout order_currency order_amount'],
   );
   assert.deepEqual(
+    apiReferenceSearchHints(
+      'If my order is priced in USD but the customer may pay BTC, which Payment Engine fields control the order currency and accepted payment tokens?',
+    ),
+    ['checkout order_currency order_amount'],
+  );
+  assert.deepEqual(
     apiReferenceSearchHints('WaaS API 出款最小流程是什么？发起后用哪个接口查询最终状态？'),
     ['api v1 payout cid callback', 'api v1 payout query'],
   );
   assert.deepEqual(
+    apiReferenceSearchHints(
+      'If I need to withdraw from a specific user deposit address instead of the default payout wallet, which endpoint and fields should I use?',
+    ),
+    ['api v1 sub_address_withdrawal from_address to_address third_party_id'],
+  );
+  assert.deepEqual(
+    apiReferenceSearchHints('我要在出款前查某个子地址的可用余额，应该用哪个 WaaS 接口？currency 参数怎么填？'),
+    ['api v1 sub_address_balance address currency chain_id token_id'],
+  );
+  assert.deepEqual(
+    apiReferenceSearchHints(
+      'For USDT payouts on Ethereum versus Polygon, what changes in the WaaS payout request and how do I find the right token identifier?',
+    ),
+    ['api v1 coins chain_id token_id currency', 'api v1 payout cid callback'],
+  );
+  assert.deepEqual(
+    apiReferenceSearchHints('supported-tokens 里的 chain_id 和 token_id 要怎么映射到请求参数？测试网代币能直接用于生产吗？'),
+    ['api v1 coins chain_id token_id currency'],
+  );
+  assert.deepEqual(
     apiReferenceSearchHints('event_type 和查询订单返回的 data.status 为什么名字不一样？'),
+    ['order info data status'],
+  );
+  assert.deepEqual(
+    apiReferenceSearchHints('同一笔支付引擎订单可能先部分支付再补款吗？回调里我应该怎么做幂等和状态映射？'),
     ['order info data status'],
   );
 });
@@ -301,6 +333,25 @@ test('apiReferenceVersionPreferences: defaults WaaS payout flow to v1 unless use
     ['v1'],
   );
   assert.deepEqual(apiReferenceVersionPreferences('v2 payout 接口怎么用？'), ['v2']);
+});
+
+test('supplementalContextSearchHints: adds non-API support pages for environment and callback-status questions', () => {
+  assert.deepEqual(
+    supplementalContextSearchHints('supported-tokens 里的 chain_id 和 token_id 要怎么映射到请求参数？测试网代币能直接用于生产吗？'),
+    ['测试代币 开发环境 testnet tokens development environments'],
+  );
+  assert.deepEqual(
+    supplementalContextPageIds('supported-tokens 里的 chain_id 和 token_id 要怎么映射到请求参数？测试网代币能直接用于生产吗？'),
+    ['sdk-overview'],
+  );
+  assert.deepEqual(
+    supplementalContextSearchHints('同一笔支付引擎订单可能先部分支付再补款吗？回调里我应该怎么做幂等和状态映射？'),
+    ['支付引擎 业务流程 回调机制 event_type 状态映射 幂等 partial_paid paid_remain'],
+  );
+  assert.deepEqual(
+    supplementalContextPageIds('同一笔支付引擎订单可能先部分支付再补款吗？回调里我应该怎么做幂等和状态映射？'),
+    ['webhook-mechanism', 'pe-business-flow'],
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -513,6 +564,58 @@ test('buildPrompt: adds grounded answer checklist for direct crypto order amount
   assert.match(prompt.user, /Answer checklist/);
   assert.match(prompt.user, /crypto order currency and amount directly/);
   assert.doesNotMatch(prompt.user, /Mention the CoinMarketCap \/ CMC exchange-rate behavior/);
+});
+
+test('buildPrompt: adds grounded answer checklist for token identifier examples', () => {
+  const prompt = buildPrompt({
+    question: 'For USDT payouts on Ethereum versus Polygon, what changes in the WaaS payout request?',
+    chunks: [
+      {
+        ...fakeRetrieved({
+          chunk_id: 1,
+          lang: 'en',
+          page_id: 'api-waas-api-post-api-v1-payout',
+          page_title: 'POST /api/v1/payout — Create Wallet Payout',
+          page_url: '/en/reference/waas-api/post-api-v1-payout',
+          text: 'API reference: WaaS API\nHTTP Request POST /api/v1/payout\nRequest Body Fields: currency is formatted as chain_id@token_id (for example, 195@195).',
+          breadcrumb: [{ id: 'api', title: 'API Reference', type: 'section' }],
+        }),
+        final_score: 0.2,
+      },
+    ],
+    answerLang: 'en',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+  });
+
+  assert.match(prompt.user, /Answer checklist/);
+  assert.match(prompt.user, /chain_id@token_id/);
+  assert.match(prompt.user, /195@195/);
+});
+
+test('buildPrompt: adds grounded answer checklist for test-token environment limits', () => {
+  const prompt = buildPrompt({
+    question: '测试网代币能直接用于生产吗？',
+    chunks: [
+      {
+        ...fakeRetrieved({
+          chunk_id: 1,
+          page_id: 'sdk-overview',
+          page_title: 'SDK 与开发者工具',
+          text: '获取测试网代币：测试代币只能在开发环境使用。',
+          breadcrumb: [{ id: 'sdk', title: 'SDK & 工具', type: 'section' }],
+        }),
+        final_score: 0.2,
+      },
+    ],
+    answerLang: 'zh',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+  });
+
+  assert.match(prompt.user, /回答检查清单/);
+  assert.match(prompt.user, /测试代币只能用于开发环境/);
+  assert.match(prompt.user, /不能直接用于生产环境/);
 });
 
 test('rerank: lang_boost +0.30 applied when chunk.lang == query_lang', () => {

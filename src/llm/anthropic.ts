@@ -32,8 +32,9 @@ export type AnthropicLLMOptions = {
   defaultMaxTokens?: number;
 };
 
-const DEFAULT_MAX_TOKENS = 1024;
+const DEFAULT_MAX_TOKENS = 2048;
 const GENERATE_ATTEMPTS = 3;
+const MAX_EMPTY_TEXT_RETRY_TOKENS = 4096;
 
 export class AnthropicLLM implements LLM {
   readonly model: string;
@@ -65,14 +66,16 @@ export class AnthropicLLM implements LLM {
       };
     };
     let lastError: Error | null = null;
+    let maxTokens = input.maxTokens ?? this.defaultMaxTokens;
     for (let attempt = 1; attempt <= GENERATE_ATTEMPTS; attempt++) {
       let response: AnthropicMessageResponse;
       try {
         response = await client.messages.create({
           model: this.model,
-          max_tokens: input.maxTokens ?? this.defaultMaxTokens,
+          max_tokens: maxTokens,
           system: input.systemPrompt,
           messages: [{ role: 'user', content: input.userPrompt }],
+          thinking: { type: 'disabled' },
           ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
         });
       } catch (err) {
@@ -88,6 +91,18 @@ export class AnthropicLLM implements LLM {
         throw lastError;
       }
       const text = extractText(response);
+      if (text.trim().length === 0) {
+        lastError = new Error(
+          `AnthropicLLM: response contained no text blocks (model=${response.model ?? this.model} ` +
+            `${describeEmptyTextResponse(response, maxTokens)})`,
+        );
+        const nextMaxTokens = Math.min(Math.max(maxTokens * 2, maxTokens + 1024), MAX_EMPTY_TEXT_RETRY_TOKENS);
+        if (attempt < GENERATE_ATTEMPTS && shouldRetryEmptyTextResponse(response, maxTokens, nextMaxTokens)) {
+          maxTokens = nextMaxTokens;
+          continue;
+        }
+        throw lastError;
+      }
       return { text, modelUsed: response.model ?? this.model };
     }
     throw lastError ?? new Error(`AnthropicLLM request failed (model=${this.model})`);
@@ -114,6 +129,7 @@ export class AnthropicLLM implements LLM {
           max_tokens: input.maxTokens ?? this.defaultMaxTokens,
           system: input.systemPrompt,
           messages: [{ role: 'user', content: input.userPrompt }],
+          thinking: { type: 'disabled' },
           ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
         },
         { signal: options.signal },
@@ -131,6 +147,9 @@ export class AnthropicLLM implements LLM {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`AnthropicLLM stream request failed (model=${this.model}): ${msg}`);
+    }
+    if (!options.signal?.aborted && text.trim().length === 0) {
+      throw new Error(`AnthropicLLM stream returned no text deltas (model=${modelUsed})`);
     }
     return { text, modelUsed };
   }
@@ -169,11 +188,13 @@ type AnthropicMessageRequest = {
   max_tokens: number;
   system?: string;
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+  thinking?: { type: 'disabled' };
   temperature?: number;
 };
 
 type AnthropicMessageResponse = {
   model?: string;
+  stop_reason?: string | null;
   content?: Array<{ type: string; text?: string }>;
 };
 
@@ -199,6 +220,34 @@ function extractText(resp: AnthropicMessageResponse): string {
     }
   }
   return parts.join('');
+}
+
+function shouldRetryEmptyTextResponse(
+  resp: AnthropicMessageResponse,
+  maxTokens: number,
+  nextMaxTokens: number,
+): boolean {
+  if (nextMaxTokens <= maxTokens) return false;
+  const types = contentTypes(resp);
+  if (resp.stop_reason === 'max_tokens') return true;
+  if (types.includes('thinking') || types.includes('redacted_thinking')) return true;
+  return false;
+}
+
+function describeEmptyTextResponse(resp: AnthropicMessageResponse, maxTokens: number): string {
+  const parts: string[] = [];
+  if (resp.stop_reason) parts.push(`stop_reason=${resp.stop_reason}`);
+  const types = contentTypes(resp);
+  parts.push(`content_types=${types.length > 0 ? types.join(',') : 'none'}`);
+  parts.push(`max_tokens=${maxTokens}`);
+  return parts.join(' ');
+}
+
+function contentTypes(resp: AnthropicMessageResponse): string[] {
+  const blocks = resp.content ?? [];
+  return blocks
+    .map((b) => b.type)
+    .filter((type, index, all) => type && all.indexOf(type) === index);
 }
 
 // ---------------------------------------------------------------------------
