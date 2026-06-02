@@ -23,7 +23,8 @@ import { randomBytes } from 'node:crypto';
 import type { DbHandle } from '../db/index.ts';
 import type { Embedder } from '../embedding/types.ts';
 import type { LLM } from '../llm/types.ts';
-import type { PromptConfig } from '../config.ts';
+import type { Reranker } from '../reranker/types.ts';
+import type { PromptConfig, RerankerConfig } from '../config.ts';
 import type { DocsLang } from '../anydocs/types.ts';
 import type { BreadcrumbNode } from '../db/schema.ts';
 import { detectLangFromText, langFromScopeId } from './lang.ts';
@@ -39,6 +40,8 @@ import {
   detectProjectSetupIntent,
   detectApiIntent,
   detectSignatureAuthIntent,
+  supplementalContextPageIds,
+  supplementalContextSearchHints,
   isApiReferenceChunk,
 } from './api-intent.ts';
 import { aggregate, TOP_K_FOR_AGGREGATION, type AggregateOutcome, type SubtreeShare } from './aggregate.ts';
@@ -62,6 +65,16 @@ export type AskDeps = {
   db: DbHandle;
   embedder: Embedder;
   llm: LLM;
+  /**
+   * Cross-encoder reranker. Optional — when null/omitted the cross-encoder
+   * rerank stage is skipped and the rule rerank is the only ranking
+   * authority. answer.ts gates the entire stage on this being non-null so
+   * v1 callers stay byte-equivalent.
+   */
+  reranker?: Reranker | null;
+  /** Cross-encoder rerank config (window size etc). Optional; defaults
+   *  applied inline so test deps don't need to construct one. */
+  rerankerConfig?: RerankerConfig;
   promptConfig?: PromptConfig;
 };
 
@@ -263,11 +276,16 @@ async function askWithTraceInternal(
   const entityTerms = extractEntityTerms(question);
   const projectSetupIntent = detectProjectSetupIntent(question);
   const apiReferenceHints = apiReferenceSearchHints(question);
+  const supplementalContextHints = supplementalContextSearchHints(question);
+  const supplementalPageIds = supplementalContextPageIds(question);
   const apiReferenceVersionPrefs = apiReferenceVersionPreferences(question);
   const apiReferenceHintTerms = apiReferenceHints
     .flatMap((hint) => hint.toLowerCase().split(/\s+/))
     .filter(Boolean);
   const apiReferenceFtsQueries = apiReferenceHints
+    .map((hint) => sanitizeFtsQuery(hint))
+    .filter((hint): hint is string => !!hint);
+  const supplementalFtsQueries = supplementalContextHints
     .map((hint) => sanitizeFtsQuery(hint))
     .filter((hint): hint is string => !!hint);
   const apiReferencePagePrefix = apiReferencePagePrefixFor(currentSubtreeRoot);
@@ -280,11 +298,17 @@ async function askWithTraceInternal(
     currentPageLang: queryLang,
     apiIntent,
     apiReferenceFtsQueries,
+    supplementalFtsQueries,
+    supplementalPageIds,
     apiReferencePagePrefix,
   });
 
-  // 4. Rerank.
-  const reranked = rerank(retrieved, {
+  // 4. Rerank — rule rerank first (cheap, applies structural biases), then
+  // optionally a cross-encoder pass on the top window. The cross-encoder
+  // recovers semantic relevance signals the rules can't express (e.g. that a
+  // chunk literally contains the field definition the user asked about); the
+  // rules still do the cheap structural work (same-subtree, nav order).
+  const ruleReranked = rerank(retrieved, {
     queryLang,
     currentSubtreeRoot,
     currentPageId: req.context?.current_page_id ?? null,
@@ -295,6 +319,10 @@ async function askWithTraceInternal(
     apiReferenceVersionPrefs,
     apiReferencePagePrefix,
   });
+
+  const reranked = deps.reranker
+    ? await applyCrossEncoderRerank(deps.reranker, question, ruleReranked, deps.rerankerConfig)
+    : ruleReranked;
 
   const fusedTrace = buildFusedTrace(reranked, retrievalTrace);
   const top_final_score = reranked[0]?.final_score ?? 0;
@@ -344,6 +372,7 @@ async function askWithTraceInternal(
     apiReferenceVersionPrefs,
     currentPageId: req.context?.current_page_id ?? null,
     projectSetupIntent,
+    supplementalPageIds,
     queryLang,
   });
   const formatHint = detectFormatHint(question);
@@ -579,6 +608,50 @@ function navIndexBoostForTrace(navIndex: number | null): number {
   return 0.1 * (1 / Math.log(navIndex + 2));
 }
 
+const DEFAULT_RERANK_TOP_K = 20;
+
+/**
+ * Cross-encoder rerank — feeds the top-N rule-reranked candidates to a
+ * Reranker as (query, chunk_text) pairs and reorders by relevance score.
+ *
+ * The chunk text already carries its heading_path prefix (set in
+ * extractMarkdownSections) so the reranker sees enough context to score
+ * field-table chunks against natural-language questions without us having
+ * to re-stitch the breadcrumb here.
+ *
+ * Score normalization: bge-reranker-v2-m3 emits raw logits in roughly
+ * [-10, +10]. We sigmoid them into (0, 1) and overwrite `final_score` for
+ * the reranked window so downstream code (computeConfidence, aggregate) sees
+ * a coherent scale within the top-N. Chunks beyond rerankTopK keep their
+ * rule-rerank final_score; this is rare in practice because the retrieval
+ * top-K and rerankTopK both default to 20.
+ *
+ * Returns a NEW array — input is not mutated.
+ */
+async function applyCrossEncoderRerank(
+  reranker: Reranker,
+  query: string,
+  ruleReranked: RerankedChunk[],
+  config: RerankerConfig | undefined,
+): Promise<RerankedChunk[]> {
+  const topK = config?.rerankTopK ?? DEFAULT_RERANK_TOP_K;
+  if (ruleReranked.length === 0) return ruleReranked;
+  const window = ruleReranked.slice(0, topK);
+  const tail = ruleReranked.slice(topK);
+  const docs = window.map((c) => ({ chunk_id: c.chunk_id, text: c.text }));
+  const scores = await reranker.rerank(query, docs);
+  const scoreByChunk = new Map<number | bigint, number>();
+  for (const s of scores) scoreByChunk.set(s.chunk_id, sigmoid(s.score));
+  const rescored = window
+    .map((c) => ({ ...c, final_score: scoreByChunk.get(c.chunk_id) ?? 0 }))
+    .sort((a, b) => b.final_score - a.final_score);
+  return [...rescored, ...tail];
+}
+
+function sigmoid(x: number): number {
+  return 1 / (1 + Math.exp(-x));
+}
+
 function preferNonApiContext(chunks: RerankedChunk[]): RerankedChunk[] {
   const nonApi = chunks.filter((c) => !isApiReferenceChunk(c));
   return nonApi.length > 0 ? nonApi : chunks;
@@ -649,14 +722,39 @@ function withMandatoryApiReferenceCitation(
     .filter(([, chunk]) => isApiReferenceChunk(chunk))
     .filter(([, chunk]) => apiReferenceMatchesHints(chunk, opts.apiReferenceHintTerms));
   if (matchingApiRefs.length === 0) return rawAnswer;
-  if (matchingApiRefs.some(([id]) => citedIds.has(id))) return rawAnswer;
-  if (!rawAnswerHasApiAnswerSubstance(rawAnswer, opts.apiReferenceHintTerms)) return rawAnswer;
+  let answer = rawAnswer;
+  if (
+    !matchingApiRefs.some(([id]) => citedIds.has(id)) &&
+    rawAnswerHasApiAnswerSubstance(answer, opts.apiReferenceHintTerms)
+  ) {
+    const [id, chunk] = matchingApiRefs[0]!;
+    const endpoint = extractEndpointForMandatoryCitation(chunk);
+    const suffix = opts.answerLang === 'zh'
+      ? `\n\nAPI reference：${endpoint ? `\`${endpoint}\` ` : ''}[${id}]。`
+      : `\n\nAPI reference: ${endpoint ? `\`${endpoint}\` ` : ''}[${id}].`;
+    answer = answer.trimEnd() + suffix;
+  }
+  return withMandatoryApiParameterExamples(answer, matchingApiRefs, opts);
+}
 
-  const [id, chunk] = matchingApiRefs[0]!;
-  const endpoint = extractEndpointForMandatoryCitation(chunk);
+function withMandatoryApiParameterExamples(
+  rawAnswer: string,
+  apiRefs: Array<[string, RerankedChunk]>,
+  opts: { apiReferenceHintTerms: string[]; answerLang: DocsLang },
+): string {
+  if (
+    !opts.apiReferenceHintTerms.includes('payout') ||
+    !opts.apiReferenceHintTerms.includes('coins') ||
+    /\b195@195\b/.test(rawAnswer)
+  ) {
+    return rawAnswer;
+  }
+  const exampleRef = apiRefs.find(([, chunk]) => /\b195@195\b/.test(chunk.text));
+  if (!exampleRef) return rawAnswer;
+  const [id] = exampleRef;
   const suffix = opts.answerLang === 'zh'
-    ? `\n\nAPI reference：${endpoint ? `\`${endpoint}\` ` : ''}[${id}]。`
-    : `\n\nAPI reference: ${endpoint ? `\`${endpoint}\` ` : ''}[${id}].`;
+    ? `\n\n参数示例：\`currency\` 使用 \`chain_id@token_id\` 格式，例如 \`195@195\` [${id}]。`
+    : `\n\nParameter example: \`currency\` uses the \`chain_id@token_id\` format, for example \`195@195\` [${id}].`;
   return rawAnswer.trimEnd() + suffix;
 }
 
@@ -685,6 +783,15 @@ function rawAnswerHasApiAnswerSubstance(rawAnswer: string, terms: string[]): boo
   if (terms.includes('payout')) {
     return /\bpayout\b|\bwithdrawal\b|\bcid\b|提币|出款|提现/i.test(rawAnswer);
   }
+  if (terms.includes('sub_address_balance')) {
+    return /\bsub_address_balance\b|\bsub[- ]address\b|\bbalance\b|\baddress\b|子地址|余额/i.test(rawAnswer);
+  }
+  if (terms.includes('sub_address_withdrawal')) {
+    return /\bsub_address_withdrawal\b|\bsub[- ]address\b|\bfrom_address\b/i.test(rawAnswer);
+  }
+  if (terms.includes('coins')) {
+    return /\bcoins\b|\bchain_id\b|\btoken_id\b|\bcurrency\b|币种|代币/i.test(rawAnswer);
+  }
   return text.trim().length >= 80;
 }
 
@@ -707,6 +814,7 @@ function pickContextChunks(
     apiReferenceVersionPrefs?: string[];
     currentPageId?: string | null;
     projectSetupIntent?: boolean;
+    supplementalPageIds?: string[];
     queryLang?: DocsLang;
   } = {},
 ): RerankedChunk[] {
@@ -737,6 +845,16 @@ function pickContextChunks(
 
   if (opts.projectSetupIntent) {
     picked = preferProjectSetupContext(picked, opts.apiReferenceCandidates, opts.queryLang, cap);
+  }
+
+  if (opts.supplementalPageIds?.length && opts.apiReferenceCandidates?.length) {
+    picked = mergeSupplementalContextPages(
+      picked,
+      opts.apiReferenceCandidates,
+      opts.supplementalPageIds,
+      opts.queryLang,
+      cap,
+    );
   }
 
   if (opts.apiIntent && opts.apiReferenceCandidates?.length) {
@@ -786,11 +904,17 @@ function pickContextChunks(
         ),
         opts,
       );
-      picked = limitApiReferenceContext(ordered, apiContextLimit).slice(0, cap);
+      picked = pruneCheckoutContextNoise(
+        limitApiReferenceContext(ordered, apiContextLimit),
+        opts,
+      ).slice(0, cap);
     } else {
-      picked = limitApiReferenceContext(
-        reorderApiReferenceContext(picked, opts),
-        apiContextLimit,
+      picked = pruneCheckoutContextNoise(
+        limitApiReferenceContext(
+          reorderApiReferenceContext(picked, opts),
+          apiContextLimit,
+        ),
+        opts,
       ).slice(0, cap);
     }
   }
@@ -822,7 +946,37 @@ function pickContextChunks(
       picked = [...lead, ...remaining];
     }
   }
+  if (opts.queryLang && outcome.kind !== 'translate-fallback') {
+    picked = dropCrossLanguageDuplicatePages(picked, opts.queryLang);
+  }
   return picked;
+}
+
+function mergeSupplementalContextPages(
+  picked: RerankedChunk[],
+  candidates: RerankedChunk[],
+  pageIds: string[],
+  queryLang: DocsLang | undefined,
+  cap: number,
+): RerankedChunk[] {
+  const pageIdSet = new Set(pageIds);
+  const seen = new Set(picked.map((c) => c.chunk_id));
+  const supplemental = candidates
+    .filter((c) => (!queryLang || c.lang === queryLang) && !isApiReferenceChunk(c) && pageIdSet.has(c.page_id))
+    .filter((c) => !seen.has(c.chunk_id))
+    .slice(0, pageIdSet.size * 2);
+  if (supplemental.length === 0) return picked;
+  return [...supplemental, ...picked]
+    .filter((c, idx, arr) => arr.findIndex((x) => x.chunk_id === c.chunk_id) === idx)
+    .slice(0, cap);
+}
+
+function dropCrossLanguageDuplicatePages(chunks: RerankedChunk[], queryLang: DocsLang): RerankedChunk[] {
+  const sameLangPageIds = new Set(
+    chunks.filter((c) => c.lang === queryLang).map((c) => c.page_id),
+  );
+  if (sameLangPageIds.size === 0) return chunks;
+  return chunks.filter((c) => c.lang === queryLang || !sameLangPageIds.has(c.page_id));
 }
 
 function preferProjectSetupContext(
@@ -896,8 +1050,17 @@ function apiReferenceMatchesHints(c: RerankedChunk, terms: string[] | undefined)
   if (terms.includes('checkout')) {
     return haystack.includes('checkout') || haystack.includes('/api/v2/checkout');
   }
-  if (terms.includes('payout')) {
-    return haystack.includes('payout') || haystack.includes('提币') || haystack.includes('出款');
+  const wantsSubAddressWithdrawal = terms.includes('sub_address_withdrawal');
+  const wantsSubAddressBalance = terms.includes('sub_address_balance');
+  const wantsCoins = terms.includes('coins');
+  const wantsPayout = terms.includes('payout');
+  if (wantsSubAddressWithdrawal || wantsSubAddressBalance || wantsCoins || wantsPayout) {
+    return (
+      (wantsSubAddressWithdrawal && matchesSubAddressWithdrawalApi(haystack)) ||
+      (wantsSubAddressBalance && matchesSubAddressBalanceApi(haystack)) ||
+      (wantsCoins && matchesCoinsApi(haystack)) ||
+      (wantsPayout && matchesWalletPayoutApi(haystack))
+    );
   }
   if (terms.includes('order') && terms.includes('info') && terms.includes('status')) {
     return (
@@ -909,8 +1072,52 @@ function apiReferenceMatchesHints(c: RerankedChunk, terms: string[] | undefined)
   return apiReferenceHintScore(c, terms) > 0;
 }
 
+function matchesSubAddressWithdrawalApi(haystack: string): boolean {
+  return (
+    haystack.includes('sub_address_withdrawal') ||
+    haystack.includes('/api/v1/sub_address_withdrawal') ||
+    haystack.includes('sub-address withdrawal') ||
+    haystack.includes('子地址出款') ||
+    haystack.includes('发起子地址提币')
+  );
+}
+
+function matchesSubAddressBalanceApi(haystack: string): boolean {
+  return (
+    haystack.includes('sub_address_balance') ||
+    haystack.includes('/api/v1/sub_address_balance') ||
+    haystack.includes('sub-address balance') ||
+    haystack.includes('子地址余额')
+  );
+}
+
+function matchesCoinsApi(haystack: string): boolean {
+  return (
+    haystack.includes('/api/v1/coins') ||
+    haystack.includes('api-v1-coins') ||
+    haystack.includes('post-api-v1-coins') ||
+    haystack.includes('查询项目支持币种') ||
+    haystack.includes('supported project coins')
+  );
+}
+
+function matchesWalletPayoutApi(haystack: string): boolean {
+  return (
+    /\/api\/v[0-9]+\/payout\b/.test(haystack) ||
+    /api-v[0-9]+-payout\b/.test(haystack) ||
+    haystack.includes('create wallet payout') ||
+    haystack.includes('发起钱包提币')
+  );
+}
+
 function apiReferenceContextLimit(terms: string[] | undefined): number {
   if (terms?.includes('checkout')) return 1;
+  if (terms?.includes('sub_address_withdrawal')) {
+    return 1;
+  }
+  if (terms?.includes('coins') && terms.includes('payout')) return 2;
+  if (terms?.includes('sub_address_balance')) return 1;
+  if (terms?.includes('coins')) return 1;
   return terms?.includes('payout') ? 2 : 3;
 }
 
@@ -925,6 +1132,26 @@ function limitApiReferenceContext(chunks: RerankedChunk[], maxApiRefs: number): 
     out.push(chunk);
   }
   return out;
+}
+
+function pruneCheckoutContextNoise(
+  chunks: RerankedChunk[],
+  opts: {
+    apiReferenceHintTerms?: string[];
+    currentPageId?: string | null;
+  },
+): RerankedChunk[] {
+  if (!opts.apiReferenceHintTerms?.includes('checkout')) return chunks;
+  const allowedPages = new Set([
+    'supported-currencies',
+    'payment-engine-quickstart-30min',
+    'pe-business-flow',
+    opts.currentPageId ?? '',
+  ]);
+  const pruned = chunks.filter(
+    (chunk) => isApiReferenceChunk(chunk) || allowedPages.has(chunk.page_id),
+  );
+  return pruned.length > 0 ? pruned : chunks;
 }
 
 function translationNoticeFor(lang: DocsLang): string {

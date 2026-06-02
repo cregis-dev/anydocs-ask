@@ -342,6 +342,20 @@ function answerChecklistItemsForChunk(lang: DocsLang, c: RerankedChunk, citation
         : `Persist and use \`cid\` for follow-up query or callback handling ${marker}`,
     );
   }
+  if (/\bchain_id@token_id\b/i.test(text) || /\b195@195\b/.test(text)) {
+    items.push(
+      lang === 'zh'
+        ? `说明 \`currency\` 使用 \`chain_id@token_id\` 格式，并保留示例 \`195@195\`（如上下文提供） ${marker}`
+        : `State that \`currency\` uses the \`chain_id@token_id\` format and keep the example \`195@195\` when provided ${marker}`,
+    );
+  }
+  if (/测试代币|开发环境|\btest tokens?\b|\bdevelopment environments?\b/i.test(text)) {
+    items.push(
+      lang === 'zh'
+        ? `必须明确写出测试代币只能用于开发环境，不能直接用于生产环境 ${marker}`
+        : `State that test tokens are for development environments only and should not be used directly in production ${marker}`,
+    );
+  }
   if (/\bcallback\b/i.test(text) || /回调/.test(text)) {
     items.push(
       lang === 'zh'

@@ -575,6 +575,239 @@ test('ask: WaaS payout flow defaults API reference context to v1 when no v2 is r
   }
 });
 
+test('ask: sub-address withdrawal questions promote the specific endpoint without generic payout API noise', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'en', {
+      id: 'waas-quickstart-30min',
+      title: 'WaaS 30-Minute Quickstart',
+      body: 'WaaS payout flow stores third_party_id and callback_url for reconciliation.',
+    });
+    await writePage(root, 'en', {
+      id: 'api-waas-api-post-api-v1-sub-address-withdrawal',
+      title: 'POST /api/v1/sub_address_withdrawal — Create Sub-address Withdrawal',
+      body: 'API reference: WaaS API. HTTP Request POST /api/v1/sub_address_withdrawal. Request fields: from_address, to_address, amount, currency, third_party_id.',
+    });
+    await writePage(root, 'en', {
+      id: 'api-waas-api-post-api-v1-payout',
+      title: 'POST /api/v1/payout — Create Wallet Payout',
+      body: "API reference: WaaS API. HTTP Request POST /api/v1/payout. Initiate payout from the project's default payout wallet. Request fields: address, amount, currency, third_party_id.",
+    });
+    await writeNav(root, 'en', {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'waas',
+          title: 'WaaS',
+          children: [{ type: 'page', pageId: 'waas-quickstart-30min' }],
+        },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API Reference',
+          children: [
+            { type: 'page', pageId: 'api-waas-api-post-api-v1-sub-address-withdrawal' },
+            { type: 'page', pageId: 'api-waas-api-post-api-v1-payout' },
+          ],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.userPrompt, /POST \/api\/v1\/sub_address_withdrawal/);
+      assert.match(input.userPrompt, /from_address/);
+      assert.match(input.userPrompt, /third_party_id/);
+      assert.doesNotMatch(input.userPrompt, /POST \/api\/v1\/payout/);
+      const markers = input.userPrompt.match(/\[cit_\d+\]/g) ?? [];
+      return `Use /api/v1/sub_address_withdrawal with from_address, to_address, and third_party_id ${markers[0] ?? ''}.`;
+    });
+    const r = await ask(ctx, {
+      question:
+        'If I need to withdraw from a specific user deposit address instead of the default payout wallet, which endpoint and fields should I use?',
+      context: { current_page_id: 'waas-quickstart-30min' },
+    });
+    assert.equal(r.type, 'answer', JSON.stringify(r));
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: token-network payout questions keep both coins and payout API references in prompt', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'en', {
+      id: 'supported-tokens',
+      title: 'Supported Networks & Tokens',
+      body: 'Use chain_id and token_id to build the currency identifier for network-specific token requests.',
+    });
+    await writePage(root, 'en', {
+      id: 'api-waas-api-post-api-v1-coins',
+      title: 'POST /api/v1/coins — Query Supported Project Coins',
+      body: 'API reference: WaaS API. HTTP Request POST /api/v1/coins. Returns chain_id and token_id values for supported project coins.',
+    });
+    await writePage(root, 'en', {
+      id: 'api-waas-api-post-api-v1-payout',
+      title: 'POST /api/v1/payout — Create Wallet Payout',
+      body: 'API reference: WaaS API. HTTP Request POST /api/v1/payout. Request field currency is formatted as chain_id@token_id, for example 195@195.',
+    });
+    await writePage(root, 'en', {
+      id: 'api-waas-api-post-api-v1-sub-address-withdrawal',
+      title: 'POST /api/v1/sub_address_withdrawal — Create Sub-address Withdrawal',
+      body: 'API reference: WaaS API. HTTP Request POST /api/v1/sub_address_withdrawal. Request field currency identifies the token.',
+    });
+    await writeNav(root, 'en', {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'waas',
+          title: 'WaaS',
+          children: [{ type: 'page', pageId: 'supported-tokens' }],
+        },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API Reference',
+          children: [
+            { type: 'page', pageId: 'api-waas-api-post-api-v1-payout' },
+            { type: 'page', pageId: 'api-waas-api-post-api-v1-sub-address-withdrawal' },
+            { type: 'page', pageId: 'api-waas-api-post-api-v1-coins' },
+          ],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.userPrompt, /POST \/api\/v1\/coins/);
+      assert.match(input.userPrompt, /POST \/api\/v1\/payout/);
+      assert.doesNotMatch(input.userPrompt, /POST \/api\/v1\/sub_address_withdrawal/);
+      const markers = input.userPrompt.match(/\[cit_\d+\]/g) ?? [];
+      return `Use /api/v1/coins for chain_id/token_id and pass currency to /api/v1/payout as 195@195 ${markers[0] ?? ''}.`;
+    });
+    const r = await ask(ctx, {
+      question:
+        'For USDT payouts on Ethereum versus Polygon, what changes in the WaaS payout request and how do I find the right token identifier?',
+      context: { current_page_id: 'supported-tokens' },
+    });
+    assert.equal(r.type, 'answer', JSON.stringify(r));
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: token-network payout answers keep required currency format example', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'en', {
+      id: 'supported-tokens',
+      title: 'Supported Networks & Tokens',
+      body: 'The table below lists supported networks, tokens, chain_id, and token_id values for request parameter mapping.',
+    });
+    await writePage(root, 'en', {
+      id: 'api-waas-api-post-api-v1-coins',
+      title: 'POST /api/v1/coins — Query Supported Project Coins',
+      body: 'API reference: WaaS API. HTTP Request POST /api/v1/coins. Returns chain_id and token_id values for supported project coins.',
+    });
+    await writePage(root, 'en', {
+      id: 'api-waas-api-post-api-v1-payout',
+      title: 'POST /api/v1/payout — Create Wallet Payout',
+      body: 'API reference: WaaS API. HTTP Request POST /api/v1/payout. Request field currency is formatted as chain_id@token_id, for example 195@195.',
+    });
+    await writeNav(root, 'en', {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'waas',
+          title: 'WaaS',
+          children: [{ type: 'page', pageId: 'supported-tokens' }],
+        },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API Reference',
+          children: [
+            { type: 'page', pageId: 'api-waas-api-post-api-v1-payout' },
+            { type: 'page', pageId: 'api-waas-api-post-api-v1-coins' },
+          ],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.userPrompt, /195@195/);
+      const coinsMarker = input.userPrompt.match(/\[(cit_\d+)\][^\n]*Query Supported Project Coins/)?.[1] ?? 'cit_1';
+      return `Use /api/v1/coins to find chain_id/token_id and pass currency to /api/v1/payout as chain_id@token_id [${coinsMarker}].`;
+    });
+    const r = await ask(ctx, {
+      question:
+        'For USDT payouts on Ethereum versus Polygon, what changes in the WaaS payout request and how do I find the right token identifier?',
+      context: { current_page_id: 'supported-tokens' },
+    });
+    assert.equal(r.type, 'answer', JSON.stringify(r));
+    if (r.type === 'answer') {
+      assert.match(r.answer_md, /195@195/);
+    }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: same-page ids across languages prefer same-language prompt context', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'en', {
+      id: 'waas-quickstart-30min',
+      title: 'WaaS 30-Minute Quickstart',
+      body: 'Call /api/v1/payout to submit payout and use third_party_id for idempotency.',
+    });
+    await writePage(root, 'zh', {
+      id: 'waas-quickstart-30min',
+      title: 'WaaS 30 分钟接入实战',
+      body: '调用 /api/v1/payout 发起出款，third_party_id 用于幂等。',
+    });
+    await writePage(root, 'en', {
+      id: 'api-waas-api-post-api-v1-payout',
+      title: 'POST /api/v1/payout — Create Wallet Payout',
+      body: 'API reference: WaaS API. HTTP Request POST /api/v1/payout. Request field third_party_id.',
+    });
+    const nav = {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'waas',
+          title: 'WaaS',
+          children: [{ type: 'page', pageId: 'waas-quickstart-30min' }],
+        },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API Reference',
+          children: [{ type: 'page', pageId: 'api-waas-api-post-api-v1-payout' }],
+        },
+      ],
+    };
+    await writeNav(root, 'en', nav);
+    await writeNav(root, 'zh', nav);
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.userPrompt, /Call \/api\/v1\/payout to submit payout/);
+      assert.doesNotMatch(input.userPrompt, /调用 \/api\/v1\/payout 发起出款/);
+      const markers = input.userPrompt.match(/\[cit_\d+\]/g) ?? [];
+      return `Use /api/v1/payout and third_party_id ${markers[0] ?? ''}.`;
+    });
+    const r = await ask(ctx, {
+      question: 'How do I submit a WaaS payout and keep it idempotent?',
+      context: { current_page_id: 'waas-quickstart-30min' },
+    });
+    assert.equal(r.type, 'answer', JSON.stringify(r));
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test('ask: non-API signature questions keep unrelated API reference chunks out of prompt', async () => {
   const ctx = await bootstrap(async (root) => {
     await writePage(root, 'zh', {
@@ -724,6 +957,16 @@ test('ask: English crypto order questions promote checkout API reference snippet
       title: 'Supported Currencies',
       body: 'Order currencies: crypto can be used directly as the order currency. Set order_currency to USDT and order_amount to the crypto amount. CoinMarketCap conversion is not needed when the amount is already denominated in crypto.',
     });
+    await writePage(root, 'en', {
+      id: 'introduction',
+      title: 'Platform Overview',
+      body: 'Platform overview content says Payment Engine is for checkout, and WaaS projects are for payout and withdrawal operations.',
+    });
+    await writePage(root, 'en', {
+      id: 'payment-engine-setup',
+      title: 'Payment Engine Integration Setup',
+      body: 'Setup content says if your integration includes API payouts or withdrawals, also create a WaaS API project.',
+    });
     for (let i = 0; i < 10; i++) {
       await writePage(root, 'en', {
         id: `payment-engine-guide-${i}`,
@@ -745,6 +988,8 @@ test('ask: English crypto order questions promote checkout API reference snippet
           title: 'Payment Engine',
           children: [
             { type: 'page', pageId: 'supported-currencies' },
+            { type: 'page', pageId: 'introduction' },
+            { type: 'page', pageId: 'payment-engine-setup' },
             ...Array.from({ length: 10 }, (_, i) => ({ type: 'page' as const, pageId: `payment-engine-guide-${i}` })),
           ],
         },
@@ -763,6 +1008,8 @@ test('ask: English crypto order questions promote checkout API reference snippet
       assert.match(input.userPrompt, /POST \/api\/v2\/checkout/);
       assert.match(input.userPrompt, /order_currency/);
       assert.match(input.userPrompt, /order_amount/);
+      assert.doesNotMatch(input.userPrompt, /also create a WaaS API project/);
+      assert.doesNotMatch(input.userPrompt, /WaaS projects are for payout/);
       const apiMarker = input.userPrompt.match(/\[(cit_\d+)\][^\n]*Create Order/)?.[1] ?? 'cit_1';
       return `Yes. Set order_currency to USDT and order_amount to the crypto amount when calling /api/v2/checkout [${apiMarker}].`;
     });

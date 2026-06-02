@@ -52,7 +52,23 @@ export type EvalProgressEvent =
   | { type: 'boot'; totalCases: number }
   | { type: 'warm'; bootMs: number; chunks: number }
   | { type: 'case-start'; i: number; total: number; caseId: string; query: string; lang: string }
-  | { type: 'case-done'; i: number; total: number; caseId: string; latencyMs: number; kind: CaseResult['kind']; r_at_5: boolean; citation_pass: boolean; answer_rule_pass: boolean }
+  | {
+      type: 'case-done';
+      i: number;
+      total: number;
+      caseId: string;
+      latencyMs: number;
+      kind: CaseResult['kind'];
+      /** @deprecated kept for old console clients; prefer hit_at_1 / mrr. */
+      r_at_5: boolean;
+      hit_at_1: boolean;
+      hit_at_3: boolean;
+      mrr: number;
+      context_precision_at_5: number;
+      citation_pass: boolean;
+      /** Diagnostic only — see scoring.ts for the deprecation note. */
+      answer_rule_pass: boolean;
+    }
   | { type: 'done'; reportPath: string; totalMs: number; summary: EvalSummary };
 
 const EVAL_CASE_ATTEMPTS = 2;
@@ -119,6 +135,10 @@ export async function runEval(opts: EvalOptions): Promise<number> {
       latencyMs: caseResult.latency_ms,
       kind: caseResult.kind,
       r_at_5: caseResult.r_at_5,
+      hit_at_1: caseResult.hit_at_1,
+      hit_at_3: caseResult.hit_at_3,
+      mrr: caseResult.mrr,
+      context_precision_at_5: caseResult.context_precision_at_5,
       citation_pass: caseResult.citation_pass,
       answer_rule_pass: caseResult.answer_rule_pass,
     });
@@ -139,7 +159,7 @@ export async function runEval(opts: EvalOptions): Promise<number> {
   const reportPath = writeReport(stateRoot, { summary, results, totalMs, baseline });
   process.stdout.write(
     `anydocs-ask eval: wrote ${reportPath}\n` +
-      `  R@5=${summary.r_at_5.toFixed(2)}  Cit=${summary.citation_pass.toFixed(2)}  Ans=${summary.answer_rule_pass.toFixed(2)}  Kind=${summary.kind_pass.toFixed(2)}  Api=${summary.api_rule_pass === null ? '—' : summary.api_rule_pass.toFixed(2)}  (${results.length} cases, ${totalMs}ms)\n`,
+      `  MRR=${summary.mrr.toFixed(2)}  H@1=${summary.hit_at_1.toFixed(2)}  H@3=${summary.hit_at_3.toFixed(2)}  H@5=${summary.r_at_5.toFixed(2)}  CP@5=${summary.context_precision_at_5.toFixed(2)}  CR@5=${summary.context_recall_at_5 === null ? '—' : summary.context_recall_at_5.toFixed(2)}  Cit=${summary.citation_pass.toFixed(2)}  Kind=${summary.kind_pass.toFixed(2)}  Api=${summary.api_rule_pass === null ? '—' : summary.api_rule_pass.toFixed(2)}  (${results.length} cases, ${totalMs}ms)\n`,
   );
   opts.onProgress?.({ type: 'done', reportPath, totalMs, summary });
   return 0;
@@ -190,12 +210,14 @@ function delay(ms: number): Promise<void> {
 }
 
 export function askDepsForEval(
-  runtime: Pick<Runtime, 'db' | 'embedder' | 'llm' | 'config'>,
+  runtime: Pick<Runtime, 'db' | 'embedder' | 'llm' | 'config'> & { reranker?: Runtime['reranker'] },
 ): AskDeps {
   return {
     db: runtime.db,
     embedder: runtime.embedder,
     llm: runtime.llm,
+    reranker: runtime.reranker ?? null,
+    rerankerConfig: runtime.config.reranker,
     promptConfig: runtime.config.prompt,
   };
 }
@@ -274,22 +296,39 @@ function renderReport(
   lines.push(`Cases: ${summary.n}  Wall time: ${totalMs}ms`);
   if (baseline) {
     lines.push(
-      `Baseline: ${baseline.date} (R@5=${fmt(baseRow!.r_at_5)}, Cit=${fmt(baseRow!.citation_pass)}, Ans=${fmt(baseRow!.answer_rule_pass)}, Kind=${fmtOpt(baseRow!.kind_pass)}, Api=${fmtOpt(baseRow!.api_rule_pass)})`,
+      `Baseline: ${baseline.date} (MRR=${fmtOpt(baseRow!.mrr)}, H@1=${fmtOpt(baseRow!.hit_at_1)}, CP@5=${fmtOpt(baseRow!.context_precision_at_5)}, CR@5=${fmtOpt(baseRow!.context_recall_at_5)}, Cit=${fmt(baseRow!.citation_pass)}, Kind=${fmtOpt(baseRow!.kind_pass)}, Api=${fmtOpt(baseRow!.api_rule_pass)})`,
     );
   } else {
     lines.push(`Baseline: (none — first run)`);
   }
   lines.push('');
+  lines.push('## Headline metrics');
+  lines.push('');
   lines.push('| metric           | value | baseline | Δ     |');
   lines.push('|------------------|-------|----------|-------|');
   lines.push(
-    `| R@5              | ${fmt(summary.r_at_5)}  | ${baseRow ? fmt(baseRow.r_at_5) : '—   '}    | ${delta(summary.r_at_5, baseRow?.r_at_5)} |`,
+    `| MRR              | ${fmt(summary.mrr)}  | ${baseRow ? fmtOpt(baseRow.mrr) : '—   '}    | ${deltaOpt(summary.mrr, baseRow?.mrr)} |`,
+  );
+  lines.push(
+    `| Hit@1            | ${fmt(summary.hit_at_1)}  | ${baseRow ? fmtOpt(baseRow.hit_at_1) : '—   '}    | ${deltaOpt(summary.hit_at_1, baseRow?.hit_at_1)} |`,
+  );
+  lines.push(
+    `| Hit@3            | ${fmt(summary.hit_at_3)}  | ${baseRow ? fmtOpt(baseRow.hit_at_3) : '—   '}    | ${deltaOpt(summary.hit_at_3, baseRow?.hit_at_3)} |`,
+  );
+  // Hit@5 is the same metric as R@5 — we surface it under the Hit@K name in
+  // the headline so the 1/3/5 progression reads as one ladder, and drop R@5
+  // from the diagnostic section to avoid double-reporting the same number.
+  lines.push(
+    `| Hit@5            | ${fmt(summary.r_at_5)}  | ${baseRow ? fmt(baseRow.r_at_5) : '—   '}    | ${delta(summary.r_at_5, baseRow?.r_at_5)} |`,
+  );
+  lines.push(
+    `| Context-P@5      | ${fmt(summary.context_precision_at_5)}  | ${baseRow ? fmtOpt(baseRow.context_precision_at_5) : '—   '}    | ${deltaOpt(summary.context_precision_at_5, baseRow?.context_precision_at_5)} |`,
+  );
+  lines.push(
+    `| Context-R@5      | ${fmtOpt(summary.context_recall_at_5)}  | ${baseRow ? fmtOpt(baseRow.context_recall_at_5) : '—   '}    | ${deltaOpt(summary.context_recall_at_5, baseRow?.context_recall_at_5)} |`,
   );
   lines.push(
     `| Citation-pass    | ${fmt(summary.citation_pass)}  | ${baseRow ? fmt(baseRow.citation_pass) : '—   '}    | ${delta(summary.citation_pass, baseRow?.citation_pass)} |`,
-  );
-  lines.push(
-    `| Answer-rule-pass | ${fmt(summary.answer_rule_pass)}  | ${baseRow ? fmt(baseRow.answer_rule_pass) : '—   '}    | ${delta(summary.answer_rule_pass, baseRow?.answer_rule_pass)} |`,
   );
   lines.push(
     `| Kind-pass        | ${fmt(summary.kind_pass)}  | ${baseRow ? fmtOpt(baseRow.kind_pass) : '—   '}    | ${delta(summary.kind_pass, baseRow?.kind_pass)} |`,
@@ -297,10 +336,23 @@ function renderReport(
   lines.push(
     `| API-rule-pass    | ${fmtOpt(summary.api_rule_pass)}  | ${baseRow ? fmtOpt(baseRow.api_rule_pass) : '—   '}    | ${deltaOpt(summary.api_rule_pass, baseRow?.api_rule_pass)} |`,
   );
-  if (summary.api_rule_n > 0) {
+  if (summary.api_rule_n > 0 || summary.context_recall_n > 0) {
     lines.push('');
-    lines.push(`API-rule cases: ${summary.api_rule_n}`);
+    if (summary.api_rule_n > 0) lines.push(`API-rule cases: ${summary.api_rule_n}`);
+    if (summary.context_recall_n > 0) lines.push(`Context-R@5 cases: ${summary.context_recall_n}`);
   }
+  lines.push('');
+  lines.push('## Diagnostics (not pass/fail signals)');
+  lines.push('');
+  lines.push('`answer_keyword_overlap` is substring/regex matching against the answer:');
+  lines.push('brittle to synonyms (false fails) and easily keyword-stuffed (false passes).');
+  lines.push('Slated for replacement by an LLM-judge `semantic_pass` in eval Phase 5.');
+  lines.push('');
+  lines.push('| metric                          | value | baseline | Δ     |');
+  lines.push('|---------------------------------|-------|----------|-------|');
+  lines.push(
+    `| answer_keyword_overlap (brittle)| ${fmt(summary.answer_rule_pass)}  | ${baseRow ? fmt(baseRow.answer_rule_pass) : '—   '}    | ${delta(summary.answer_rule_pass, baseRow?.answer_rule_pass)} |`,
+  );
   lines.push('');
 
   const recallFails = results.filter((r) => !r.r_at_5);
@@ -324,7 +376,7 @@ function renderReport(
 
   const ruleFails = results.filter((r) => r.kind === 'answer' && !r.answer_rule_pass);
   if (ruleFails.length > 0) {
-    lines.push(`## Answer-rule-pass failures (${ruleFails.length})`);
+    lines.push(`## Keyword-overlap misses (${ruleFails.length}) — diagnostic, not failures`);
     for (const r of ruleFails) {
       const bits: string[] = [];
       if (r.missing_must_contain.length > 0) bits.push(`missing: ${r.missing_must_contain.join(', ')}`);

@@ -62,6 +62,10 @@ export type RetrieveOptions = {
   apiIntent?: boolean;
   /** Additional sanitized FTS queries used only for API reference candidate injection. */
   apiReferenceFtsQueries?: string[];
+  /** Additional sanitized FTS queries used to inject non-API supporting context. */
+  supplementalFtsQueries?: string[];
+  /** Page ids that should contribute supporting context for known domain tasks. */
+  supplementalPageIds?: string[];
   /** Optional page_id prefix for API reference pages that belong to the active product area. */
   apiReferencePagePrefix?: string | null;
 };
@@ -95,6 +99,10 @@ const CURRENT_PAGE_INJECT_RANK = 8;
 const API_REFERENCE_K = 6;
 /** API reference injection should survive trimming but not dominate top dual-path hits. */
 const API_REFERENCE_INJECT_RANK = 6;
+/** Max chunks to inject for domain-specific supporting context. */
+const SUPPLEMENTAL_CONTEXT_K = 4;
+/** Supporting context should survive finalK trimming but remain below exact API refs. */
+const SUPPLEMENTAL_CONTEXT_INJECT_RANK = 10;
 
 /**
  * Trace metadata from the retrieve step — exposed by retrieveWithTrace() for
@@ -110,6 +118,8 @@ export type RetrievalTrace = {
   currentPageInjected: Set<number>;
   /** chunk_ids that entered the pool via the API-reference-only retrieval pass. */
   apiReferenceInjected: Set<number>;
+  /** chunk_ids that entered the pool via supplemental supporting-context queries. */
+  supplementalInjected: Set<number>;
 };
 
 export function retrieve(db: DbHandle, opts: RetrieveOptions): RetrievedChunk[] {
@@ -171,6 +181,50 @@ export function retrieveWithTrace(
     }
   }
 
+  const supplementalInjected = new Set<number>();
+  if (opts.supplementalFtsQueries?.length) {
+    const supplementalScore = 1 / (RRF_K + SUPPLEMENTAL_CONTEXT_INJECT_RANK);
+    for (const query of [...new Set(opts.supplementalFtsQueries)]) {
+      const ids = bm25Path(db, query, SUPPLEMENTAL_CONTEXT_K, opts.scopeId);
+      for (const id of ids) {
+        supplementalInjected.add(id);
+        const cur = rrfScores.get(id);
+        if (cur === undefined) {
+          rrfScores.set(id, supplementalScore);
+        } else {
+          rrfScores.set(id, cur + supplementalScore);
+        }
+      }
+    }
+  }
+  if (opts.supplementalPageIds?.length && opts.currentPageLang) {
+    const supplementalScore = 1 / (RRF_K + SUPPLEMENTAL_CONTEXT_INJECT_RANK);
+    const pageQueries = [
+      ...(opts.supplementalFtsQueries ?? []),
+      ...(opts.apiReferenceFtsQueries ?? []),
+      ...(opts.ftsQuery ? [opts.ftsQuery] : []),
+    ];
+    for (const pageId of [...new Set(opts.supplementalPageIds)]) {
+      const ids = currentPagePath(
+        db,
+        pageId,
+        opts.currentPageLang,
+        2,
+        opts.scopeId,
+        pageQueries,
+      );
+      for (const id of ids) {
+        supplementalInjected.add(id);
+        const cur = rrfScores.get(id);
+        if (cur === undefined) {
+          rrfScores.set(id, supplementalScore);
+        } else {
+          rrfScores.set(id, cur + supplementalScore);
+        }
+      }
+    }
+  }
+
   const currentPageInjected = new Set<number>();
   if (opts.currentPageId && opts.currentPageLang) {
     const currentPageInjectScore = 1 / (RRF_K + CURRENT_PAGE_INJECT_RANK);
@@ -224,16 +278,17 @@ export function retrieveWithTrace(
     }
   }
 
+  const protectedIds = new Set([...currentPageInjected, ...supplementalInjected]);
   const ranked = keepProtectedIds(
     [...rrfScores.entries()].sort((a, b) => b[1] - a[1]),
     finalK,
-    currentPageInjected,
+    protectedIds,
   );
 
   if (ranked.length === 0) {
     return {
       chunks: [],
-      trace: { vecRanks, bm25Ranks, entityInjected, currentPageInjected, apiReferenceInjected },
+      trace: { vecRanks, bm25Ranks, entityInjected, currentPageInjected, apiReferenceInjected, supplementalInjected },
     };
   }
 
@@ -249,7 +304,7 @@ export function retrieveWithTrace(
   }
   return {
     chunks: out,
-    trace: { vecRanks, bm25Ranks, entityInjected, currentPageInjected, apiReferenceInjected },
+    trace: { vecRanks, bm25Ranks, entityInjected, currentPageInjected, apiReferenceInjected, supplementalInjected },
   };
 }
 

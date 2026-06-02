@@ -21,9 +21,11 @@ import { ProjectWatcher } from '../index/watcher.ts';
 import { Bgem3Embedder } from '../embedding/bge-m3.ts';
 import { MockEmbedder } from '../embedding/mock.ts';
 import { buildDefaultLLM } from '../llm/factory.ts';
+import { buildDefaultReranker } from '../reranker/factory.ts';
 import { RunsWriter } from '../runs/writer.ts';
 import type { Embedder } from '../embedding/types.ts';
 import type { LLM } from '../llm/types.ts';
+import type { Reranker } from '../reranker/types.ts';
 import { resolveTransformersCacheDir, type ResolvedConfig } from '../config.ts';
 import { ensureFeedbackDirs } from '../workspace.ts';
 import { SessionTable } from '../feedback/session-table.ts';
@@ -37,6 +39,11 @@ export type RuntimeOptions = {
   config: ResolvedConfig;
   /** Override embedder (tests inject MockEmbedder). */
   embedder?: Embedder;
+  /**
+   * Override reranker. Pass `null` to explicitly disable even when config says
+   * enabled (useful in tests). Omit to follow config.reranker.enabled.
+   */
+  reranker?: Reranker | null;
   /** Override LLM (tests inject MockLLM). */
   llm?: LLM;
   /**
@@ -61,6 +68,13 @@ export class Runtime {
   readonly config: ResolvedConfig;
   readonly db: DbHandle;
   readonly embedder: Embedder;
+  /**
+   * Cross-encoder reranker. `null` when config.reranker.enabled = false or
+   * tests passed `reranker: null`. answer.ts treats null as "skip the
+   * cross-encoder rerank stage" and the rule rerank remains the only ranking
+   * authority — keeps v1 pipeline byte-equivalent unless explicitly enabled.
+   */
+  readonly reranker: Reranker | null;
   readonly indexer: Indexer;
   readonly runs: RunsWriter;
   /**
@@ -99,6 +113,7 @@ export class Runtime {
     this.config = opts.config;
     this.db = opts.db ?? openDatabase({ stateRoot: this.stateRoot });
     this.embedder = opts.embedder ?? buildDefaultEmbedder(opts.config);
+    this.reranker = opts.reranker === undefined ? buildDefaultReranker(opts.config) : opts.reranker;
     if (opts.llm) {
       this.llmInstance = opts.llm;
       this.llmFactory = () => opts.llm!;
@@ -165,7 +180,13 @@ export class Runtime {
     if (this.config.feedback.enabled) {
       ensureFeedbackDirs(this.stateRoot);
     }
-    if (this.embedder.warmUp) await this.embedder.warmUp();
+    // Warm embedder + reranker in parallel — they're independent and both
+    // pay the ONNX session startup cost on first call. ~1-2s saved at boot
+    // when reranker is enabled.
+    await Promise.all([
+      this.embedder.warmUp ? this.embedder.warmUp() : Promise.resolve(),
+      this.reranker?.warmUp ? this.reranker.warmUp() : Promise.resolve(),
+    ]);
     const initialIndex = await this.indexer.fullReindex();
     this.lastIndexedAt = Date.now();
     if (this.watcher) {

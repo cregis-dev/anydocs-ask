@@ -43,6 +43,10 @@ export type GoldenGenerateOptions = {
    *  Default 14d (PRD §12.4). */
   since?: string;
   llmRewrite: boolean;
+  /** Override rewrite batch size — useful for strict gateways. See
+   *  RewriteOptions.batchSize. Default behavior is the rewrite module's own
+   *  default (50). */
+  rewriteBatchSize?: number;
   force: boolean;
   /**
    * Include source=console runs as golden candidates. Defaults to false:
@@ -168,7 +172,11 @@ export async function runGoldenGenerate(opts: GoldenGenerateOptions): Promise<nu
         `${cliPrefix}rewriting ${candidates.length} candidates via ${config.llm.provider}/${config.llm.model}...\n`,
       );
       try {
-        candidates = await rewriteCandidatesWithLLM(candidates, { llm, reporter: report });
+        candidates = await rewriteCandidatesWithLLM(candidates, {
+          llm,
+          reporter: report,
+          ...(opts.rewriteBatchSize !== undefined ? { batchSize: opts.rewriteBatchSize } : {}),
+        });
       } catch (err) {
         if (opts.fallbackOnLlmError) {
           report(

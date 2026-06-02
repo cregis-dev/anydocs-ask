@@ -8,8 +8,46 @@ export type CaseResult = {
   kind: 'answer' | 'clarify' | 'error';
   expected_kind: 'answer' | 'clarify' | 'error';
   kind_pass: boolean;
+  /**
+   * @deprecated Saturates at 1.00 across the current cregis set; kept for
+   * regression detection only. Headline-pass signal lives in {@link hit_at_1}
+   * / {@link mrr} now. Will be removed once Hit@K is consumed by the console UI.
+   */
   r_at_5: boolean;
+  /** Top-ranked unique page is in must_cite_pages. */
+  hit_at_1: boolean;
+  /** Any of the top-3 unique pages is in must_cite_pages. */
+  hit_at_3: boolean;
+  /**
+   * Mean Reciprocal Rank of the first must-cite page over unique pages in the
+   * fused trace (1 / position; 0 when no must-cite page appears anywhere in
+   * the trace). Position is 1-indexed.
+   */
+  mrr: number;
+  /**
+   * (# of top-5 retrieved chunks whose page is in must_cite ∪ allow_cite) / 5.
+   * Continuous signal that R@5 / Hit@K can't give — exposes top-K noise
+   * even when at least one correct page is present.
+   */
+  context_precision_at_5: number;
+  /**
+   * Page-level context recall: |top-5 unique pages ∩ must_cite_pages| /
+   * |must_cite_pages|. null when must_cite_pages is empty (averaged like
+   * {@link api_rule_pass}).
+   *
+   * This is the deterministic, page-level version of Ragas
+   * `context_recall`. The claim-level LLM-judge variant lands in eval
+   * Phase 6 alongside Faithfulness.
+   */
+  context_recall_at_5: number | null;
   citation_pass: boolean;
+  /**
+   * Brittle: substring + regex matching against the LLM answer. Misses
+   * synonyms and accepts keyword-stuffed wrong answers. Reported as
+   * `answer_keyword_overlap` in the markdown report's diagnostic section,
+   * not as a pass criterion. Slated for replacement by `semantic_pass`
+   * (LLM-judge) in eval Phase 5.
+   */
   answer_rule_pass: boolean;
   api_rule_pass: boolean | null;
   retrieved_pages_top5: string[];
@@ -28,8 +66,16 @@ export type CaseResult = {
 
 export type EvalSummary = {
   n: number;
+  /** @deprecated See {@link CaseResult.r_at_5}. */
   r_at_5: number;
+  hit_at_1: number;
+  hit_at_3: number;
+  mrr: number;
+  context_precision_at_5: number;
+  context_recall_n: number;
+  context_recall_at_5: number | null;
   citation_pass: number;
+  /** Diagnostic only; see {@link CaseResult.answer_rule_pass}. */
   answer_rule_pass: number;
   kind_pass: number;
   api_rule_n: number;
@@ -44,8 +90,23 @@ export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): Ca
     ...(c.expected.allow_cite_pages ?? []),
   ]);
 
+  // Page-level metrics work over the unique-page sequence — top-5 chunks may
+  // resolve to fewer than 5 unique pages. Chunk-level metrics (context-P@5)
+  // work over the raw chunk sequence so they see top-K noise even when all
+  // chunks happen to come from the same page.
+  const uniquePagesInOrder = uniqueOrdered(trace.fused.map((f) => f.page_id));
   const top5Pages = uniqueOrdered(trace.fused.slice(0, 5).map((f) => f.page_id));
   const r_at_5 = top5Pages.some((p) => mustPages.has(p));
+  const hit_at_1 = uniquePagesInOrder.length > 0 && mustPages.has(uniquePagesInOrder[0]!);
+  const hit_at_3 = uniquePagesInOrder.slice(0, 3).some((p) => mustPages.has(p));
+  const mrr = computeMrr(uniquePagesInOrder, mustPages);
+  const context_precision_at_5 = computeContextPrecision(
+    trace.fused.slice(0, 5),
+    allowedCitationPages,
+  );
+  const context_recall_at_5 = mustPages.size === 0
+    ? null
+    : [...mustPages].filter((p) => top5Pages.includes(p)).length / mustPages.size;
 
   const kind = result.type;
   let citedPages: string[] = [];
@@ -99,6 +160,11 @@ export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): Ca
     expected_kind: expectedKind,
     kind_pass: kind === expectedKind,
     r_at_5,
+    hit_at_1,
+    hit_at_3,
+    mrr,
+    context_precision_at_5,
+    context_recall_at_5,
     citation_pass: citationPass,
     answer_rule_pass: answerRulePass,
     api_rule_pass: apiRulePass,
@@ -129,6 +195,11 @@ export function failedCase(c: GoldenCase, latencyMs: number): CaseResult {
     expected_kind: expectedKind,
     kind_pass: expectedKind === 'error',
     r_at_5: false,
+    hit_at_1: false,
+    hit_at_3: false,
+    mrr: 0,
+    context_precision_at_5: 0,
+    context_recall_at_5: c.expected.must_cite_pages.length === 0 ? null : 0,
     citation_pass: false,
     answer_rule_pass: false,
     api_rule_pass: hasApiRules ? false : null,
@@ -149,9 +220,20 @@ export function failedCase(c: GoldenCase, latencyMs: number): CaseResult {
 
 export function summarizeResults(results: CaseResult[]): EvalSummary {
   const apiResults = results.filter((r) => r.api_rule_pass !== null);
+  const recallResults = results.filter(
+    (r): r is CaseResult & { context_recall_at_5: number } => r.context_recall_at_5 !== null,
+  );
   return {
     n: results.length,
     r_at_5: mean(results.map((r) => (r.r_at_5 ? 1 : 0))),
+    hit_at_1: mean(results.map((r) => (r.hit_at_1 ? 1 : 0))),
+    hit_at_3: mean(results.map((r) => (r.hit_at_3 ? 1 : 0))),
+    mrr: mean(results.map((r) => r.mrr)),
+    context_precision_at_5: mean(results.map((r) => r.context_precision_at_5)),
+    context_recall_n: recallResults.length,
+    context_recall_at_5: recallResults.length === 0
+      ? null
+      : mean(recallResults.map((r) => r.context_recall_at_5)),
     citation_pass: mean(results.map((r) => (r.citation_pass ? 1 : 0))),
     answer_rule_pass: mean(results.map((r) => (r.answer_rule_pass ? 1 : 0))),
     kind_pass: mean(results.map((r) => (r.kind_pass ? 1 : 0))),
@@ -160,6 +242,22 @@ export function summarizeResults(results: CaseResult[]): EvalSummary {
       ? null
       : mean(apiResults.map((r) => (r.api_rule_pass ? 1 : 0))),
   };
+}
+
+function computeMrr(uniquePagesInOrder: string[], mustPages: Set<string>): number {
+  for (let i = 0; i < uniquePagesInOrder.length; i++) {
+    if (mustPages.has(uniquePagesInOrder[i]!)) return 1 / (i + 1);
+  }
+  return 0;
+}
+
+function computeContextPrecision(
+  topKChunks: { page_id: string }[],
+  relevantPages: Set<string>,
+): number {
+  if (topKChunks.length === 0) return 0;
+  const hits = topKChunks.filter((c) => relevantPages.has(c.page_id)).length;
+  return hits / topKChunks.length;
 }
 
 function apiRuleHaystack(answerMd: string, citations: Citation[]): string {

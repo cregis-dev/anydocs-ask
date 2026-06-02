@@ -164,7 +164,7 @@ export function createApp(deps: AppDeps): Hono {
     let ask: Awaited<ReturnType<typeof askWithTrace>>;
     try {
       ask = await askWithTrace(
-        { db: runtime.db, embedder: runtime.embedder, llm: prepared.llm, promptConfig: runtime.config.prompt },
+        { db: runtime.db, embedder: runtime.embedder, llm: prepared.llm, reranker: runtime.reranker, rerankerConfig: runtime.config.reranker, promptConfig: runtime.config.prompt },
         prepared.req,
       );
     } catch (err) {
@@ -257,7 +257,7 @@ export function createApp(deps: AppDeps): Hono {
       let ask: Awaited<ReturnType<typeof askWithTraceStream>>;
       try {
         ask = await askWithTraceStream(
-          { db: runtime.db, embedder: runtime.embedder, llm: prepared.llm, promptConfig: runtime.config.prompt },
+          { db: runtime.db, embedder: runtime.embedder, llm: prepared.llm, reranker: runtime.reranker, rerankerConfig: runtime.config.reranker, promptConfig: runtime.config.prompt },
           prepared.req,
           {
             signal: abortController.signal,

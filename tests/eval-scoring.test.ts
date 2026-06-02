@@ -94,6 +94,88 @@ test('scoreCase supports regex answer rules and expected outcome kind', () => {
   assert.deepEqual(scored.hit_forbid_contain_regex, []);
 });
 
+test('scoreCase computes MRR / Hit@K / context_precision over the fused trace', () => {
+  const c = golden({
+    expected: {
+      must_cite_pages: ['payment-engine-api'],
+      allow_cite_pages: ['webhook-mechanism'],
+      must_contain: [],
+      forbid_contain: [],
+    },
+  });
+
+  // Trace: noise, noise, target, allowed-extra, noise → target at rank 3
+  const fused = trace(['noise-1', 'noise-2', 'payment-engine-api', 'webhook-mechanism', 'noise-3']);
+  const scored = scoreCase(c, answer(), fused);
+
+  assert.equal(scored.hit_at_1, false, 'top-1 was noise');
+  assert.equal(scored.hit_at_3, true, 'target reached top-3');
+  assert.equal(scored.r_at_5, true);
+  assert.ok(Math.abs(scored.mrr - 1 / 3) < 1e-9, `MRR should be 1/3, got ${scored.mrr}`);
+  // top-5 chunks: 2 are in must_cite ∪ allow_cite (target + allowed-extra)
+  assert.ok(
+    Math.abs(scored.context_precision_at_5 - 2 / 5) < 1e-9,
+    `CP@5 should be 0.4, got ${scored.context_precision_at_5}`,
+  );
+});
+
+test('scoreCase MRR / Hit@K are 0/false when no must-cite page appears in the trace', () => {
+  const c = golden();
+  const scored = scoreCase(c, answer(), trace(['noise-a', 'noise-b', 'noise-c']));
+
+  assert.equal(scored.hit_at_1, false);
+  assert.equal(scored.hit_at_3, false);
+  assert.equal(scored.r_at_5, false);
+  assert.equal(scored.mrr, 0);
+  assert.equal(scored.context_precision_at_5, 0);
+});
+
+test('scoreCase MRR ignores chunk-level duplication of the same page', () => {
+  const c = golden();
+  // Same page appears as chunks #1 and #2 — should count as the first unique page.
+  const scored = scoreCase(
+    c,
+    answer(),
+    trace(['payment-engine-api', 'payment-engine-api', 'noise']),
+  );
+
+  assert.equal(scored.hit_at_1, true);
+  assert.equal(scored.mrr, 1);
+});
+
+test('scoreCase context_recall_at_5 reports fraction of must_cite_pages in top-5', () => {
+  // 4 required pages, only 2 surface in top-5 → recall = 0.5
+  const c = golden({
+    expected: {
+      must_cite_pages: ['page-A', 'page-B', 'page-C', 'page-D'],
+      must_contain: [],
+      forbid_contain: [],
+    },
+  });
+
+  const scored = scoreCase(
+    c,
+    answer(),
+    trace(['page-A', 'noise-1', 'page-B', 'noise-2', 'noise-3']),
+  );
+
+  assert.equal(scored.r_at_5, true, 'Hit@5 satisfied by any one of the 4');
+  assert.equal(scored.context_recall_at_5, 0.5, '2/4 required pages in top-5');
+});
+
+test('scoreCase context_recall_at_5 is null when must_cite_pages is empty', () => {
+  const c = golden({
+    expected: {
+      must_cite_pages: [],
+      must_contain: [],
+      forbid_contain: [],
+    },
+  });
+
+  const scored = scoreCase(c, answer(), trace(['anything']));
+  assert.equal(scored.context_recall_at_5, null);
+});
+
 test('scoreCase scores API operation and citation URL rules only when configured', () => {
   const c = golden({
     expected: {
@@ -211,4 +293,7 @@ test('summarizeResults averages API rules over API cases only', () => {
   assert.equal(summary.n, 2);
   assert.equal(summary.api_rule_n, 1);
   assert.equal(summary.api_rule_pass, 1);
+  assert.equal(summary.mrr, 1, 'both cases hit at rank 1');
+  assert.equal(summary.hit_at_1, 1);
+  assert.equal(summary.hit_at_3, 1);
 });
