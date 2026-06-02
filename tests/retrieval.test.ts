@@ -14,7 +14,7 @@ function vector(dim: number, idx: number): number[] {
   return out;
 }
 
-test('retrieveWithTrace: injects current page chunks even when vector/BM25 miss them', () => {
+test('retrieveWithTrace: ignores current page chunks when vector/BM25 miss them', () => {
   const db = openDatabase({ dbPath: ':memory:' });
   try {
     const insertPage = db.prepare(
@@ -50,16 +50,14 @@ test('retrieveWithTrace: injects current page chunks even when vector/BM25 miss 
       currentPageLang: 'zh',
     });
 
-    assert.ok(
-      result.chunks.some((c) => c.chunk_id === authChunk),
-      'current page chunk should be injected into the candidate pool',
-    );
+    assert.ok(!result.chunks.some((c) => c.chunk_id === authChunk));
+    assert.equal(result.trace.currentPageInjected.size, 0);
   } finally {
     db.close();
   }
 });
 
-test('retrieveWithTrace: current page injection prefers matching chunks beyond the page intro', () => {
+test('retrieveWithTrace: current page context does not inject matching later chunks', () => {
   const db = openDatabase({ dbPath: ':memory:' });
   try {
     db.prepare(
@@ -89,17 +87,14 @@ test('retrieveWithTrace: current page injection prefers matching chunks beyond t
       currentPageLang: 'zh',
     });
 
-    assert.ok(
-      result.chunks.some((c) => c.chunk_id === payoutChunk),
-      'matching current-page chunk should be injected even when it is not in the first page chunks',
-    );
-    assert.ok(result.trace.currentPageInjected.has(payoutChunk));
+    assert.ok(!result.chunks.some((c) => c.chunk_id === payoutChunk));
+    assert.equal(result.trace.currentPageInjected.size, 0);
   } finally {
     db.close();
   }
 });
 
-test('retrieveWithTrace: current page injection can use API hint queries for mixed zh/API questions', () => {
+test('retrieveWithTrace: API hint queries do not inject current page chunks', () => {
   const db = openDatabase({ dbPath: ':memory:' });
   try {
     db.prepare(
@@ -128,10 +123,8 @@ test('retrieveWithTrace: current page injection can use API hint queries for mix
       apiReferenceFtsQueries: ['"api" OR "v1" OR "payout" OR "cid" OR "callback"'],
     });
 
-    assert.ok(
-      result.chunks.some((c) => c.chunk_id === payoutChunk),
-      'API hint query should help current-page injection find cid/callback chunks',
-    );
+    assert.ok(!result.chunks.some((c) => c.chunk_id === payoutChunk));
+    assert.equal(result.trace.currentPageInjected.size, 0);
   } finally {
     db.close();
   }

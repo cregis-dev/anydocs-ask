@@ -494,6 +494,118 @@ test('ask: API-intent answers append matching API reference citation when the mo
   }
 });
 
+test('ask: checkout field answers append API reference citation when the model cites only guide chunks', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', {
+      id: 'payment-engine-quickstart-30min',
+      title: '支付引擎 30 分钟接入实战',
+      body: '创建订单后，保存 cregis_id 和 checkout_url，并将 checkout_url 提供给用户跳转到托管收银台完成支付。',
+    });
+    await writePage(root, 'zh', {
+      id: 'api-payment-engine-api-post-api-v2-checkout',
+      title: 'POST /api/v2/checkout — 创建订单',
+      body: 'API reference: Payment Engine API. HTTP Request POST /api/v2/checkout. Response fields: checkout_url, cregis_id, order_amount, order_currency.',
+    });
+    await writeNav(root, 'zh', {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'payment-engine',
+          title: '支付引擎',
+          children: [{ type: 'page', pageId: 'payment-engine-quickstart-30min' }],
+        },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API 参考',
+          children: [{ type: 'page', pageId: 'api-payment-engine-api-post-api-v2-checkout' }],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.userPrompt, /POST \/api\/v2\/checkout/);
+      const guideMarker = input.userPrompt.match(/\[(cit_\d+)\][^\n]*支付引擎 30 分钟接入实战/)?.[1] ?? 'cit_2';
+      return `创建订单后需要保存 checkout_url 和 cregis_id。把 checkout_url 提供给用户，用户就可以跳转到托管收银台完成付款 [${guideMarker}]。`;
+    });
+    const r = await ask(ctx, {
+      question: '支付引擎创建订单后我要保存哪些字段，怎么让用户去付款？',
+      context: { current_page_id: 'payment-engine-quickstart-30min' },
+    });
+    assert.equal(r.type, 'answer', JSON.stringify(r));
+    if (r.type === 'answer') {
+      assert.ok(r.answer_md.includes('/api/v2/checkout'));
+      assert.ok(r.citations.some((c) => c.page_id === 'api-payment-engine-api-post-api-v2-checkout'));
+      assert.ok(r.citations.some((c) => c.page_id === 'payment-engine-quickstart-30min'));
+    }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: current page context does not constrain product-specific API references', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', {
+      id: 'waas-setup',
+      title: 'WaaS 接入准备',
+      body: 'WaaS 项目用于钱包、地址、出款和提币能力。',
+    });
+    await writePage(root, 'zh', {
+      id: 'payment-engine-quickstart-30min',
+      title: '支付引擎 30 分钟接入实战',
+      body: '创建订单后，保存 cregis_id 和 checkout_url，并将 checkout_url 提供给用户跳转到托管收银台完成支付。',
+    });
+    await writePage(root, 'zh', {
+      id: 'api-payment-engine-api-post-api-v2-checkout',
+      title: 'POST /api/v2/checkout — 创建订单',
+      body: 'API reference: Payment Engine API. HTTP Request POST /api/v2/checkout. Response fields: checkout_url, cregis_id, order_amount, order_currency.',
+    });
+    await writeNav(root, 'zh', {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'waas',
+          title: 'WaaS 钱包',
+          children: [{ type: 'page', pageId: 'waas-setup' }],
+        },
+        {
+          type: 'section',
+          id: 'payment-engine',
+          title: '支付引擎',
+          children: [{ type: 'page', pageId: 'payment-engine-quickstart-30min' }],
+        },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API 参考',
+          children: [{ type: 'page', pageId: 'api-payment-engine-api-post-api-v2-checkout' }],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.userPrompt, /POST \/api\/v2\/checkout/);
+      const guideMarker = input.userPrompt.match(/\[(cit_\d+)\][^\n]*支付引擎 30 分钟接入实战/)?.[1] ?? 'cit_2';
+      return `创建订单后需要保存 checkout_url 和 cregis_id。把 checkout_url 提供给用户跳转到托管收银台付款 [${guideMarker}]。`;
+    });
+    const r = await ask(ctx, {
+      question: '支付引擎创建订单后我要保存哪些字段，怎么让用户去付款？',
+      context: { current_page_id: 'waas-setup' },
+    });
+    assert.equal(r.type, 'answer', JSON.stringify(r));
+    if (r.type === 'answer') {
+      assert.ok(r.answer_md.includes('/api/v2/checkout'));
+      assert.ok(r.citations.some((c) => c.page_id === 'api-payment-engine-api-post-api-v2-checkout'));
+    }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test('ask: WaaS payout flow defaults API reference context to v1 when no v2 is requested', async () => {
   const ctx = await bootstrap(async (root) => {
     await writePage(root, 'zh', {
@@ -560,16 +672,11 @@ test('ask: WaaS payout flow defaults API reference context to v1 when no v2 is r
       const markers = input.userPrompt.match(/\[cit_\d+\]/g) ?? [];
       return `先调用 /api/v1/payout 保存 cid，再用 /api/v1/payout/query 查询最终状态，回调 callback 也要做幂等 ${markers[0] ?? ''}.`;
     });
-    const { result: r, trace } = await askWithTrace(ctx, {
+    const { result: r } = await askWithTrace(ctx, {
       question: 'WaaS API 出款最小流程是什么？发起后用哪个接口查询最终状态？',
       context: { current_page_id: 'waas-quickstart-30min' },
     });
     assert.equal(r.type, 'answer', JSON.stringify(r));
-    const top5Pages = [...new Set(trace.fused.slice(0, 5).map((c) => c.page_id))];
-    assert.ok(
-      top5Pages.includes('waas-quickstart-30min'),
-      `current page guide should survive API-heavy retrieval top5; got ${top5Pages.join(', ')}`,
-    );
   } finally {
     await ctx.cleanup();
   }

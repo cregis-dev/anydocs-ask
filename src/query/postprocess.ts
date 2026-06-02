@@ -124,13 +124,26 @@ function citationFromChunk(
 
 function buildCitationUrl(chunk: RerankedChunk): string | null {
   if (!chunk.page_url) return null;
+  const pageUrl = publicCitationPageUrl(chunk);
+  if (pageUrl !== chunk.page_url) return pageUrl;
   // Suffix the heading anchor when in_page_path encodes one. Format from
   // the chunker: `<headingId>/p[<n>]` — strip the `/p[..]` suffix to get
   // the heading id, which is also the URL fragment.
   const slashIdx = chunk.in_page_path.indexOf('/');
-  if (slashIdx <= 0) return chunk.page_url;
+  if (slashIdx <= 0) return pageUrl;
   const headingId = chunk.in_page_path.slice(0, slashIdx);
-  return `${chunk.page_url}#${headingId}`;
+  return `${pageUrl}#${headingId}`;
+}
+
+function publicCitationPageUrl(chunk: RerankedChunk): string {
+  const pageUrl = chunk.page_url!;
+  if (!chunk.page_id.startsWith('api-') || !pageUrl.includes('/reference/')) {
+    return pageUrl;
+  }
+  const normalized = pageUrl.replace(/\/+$/, '');
+  const operationSlugMatch = normalized.match(/\/(?:get|post|put|patch|delete|options|head)-[^/]+$/i);
+  if (!operationSlugMatch) return pageUrl;
+  return normalized.slice(0, operationSlugMatch.index);
 }
 
 function snippetFromChunk(text: string): string {
