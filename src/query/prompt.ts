@@ -21,6 +21,12 @@ export type FormatHint = 'paragraph' | 'list' | 'table' | 'concept';
 
 export type BuildPromptOptions = {
   question: string;
+  /**
+   * Optional retrieval-time rewrite for short follow-up questions. The
+   * original `question` remains authoritative; this hint only tells the LLM
+   * how the backend resolved pronouns/entities before retrieval.
+   */
+  resolvedQuestion?: string;
   chunks: RerankedChunk[];
   answerLang: DocsLang;
   /** True when the chunks include a different lang from answerLang. */
@@ -53,7 +59,17 @@ export type BuiltPrompt = {
 };
 
 export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
-  const { question, chunks, answerLang, isCrossLang, formatHint, promptConfig, entityTerms, history } = opts;
+  const {
+    question,
+    resolvedQuestion,
+    chunks,
+    answerLang,
+    isCrossLang,
+    formatHint,
+    promptConfig,
+    entityTerms,
+    history,
+  } = opts;
   const hasHistory = !!history && history.length > 0;
 
   const chunkById = new Map<string, RerankedChunk>();
@@ -81,7 +97,8 @@ export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
   );
   const checklist = answerChecklistFor(answerLang, answerChecklistItems);
   const historyBlock = hasHistory ? `${historyBlockFor(answerLang, history!)}\n\n` : '';
-  const user = `${historyBlock}${userIntro(answerLang)}\n\n${question}${checklist}\n\n${chunkLabel(answerLang)}\n\n${chunkBlocks.join('\n\n---\n\n')}`;
+  const resolvedBlock = resolvedQuestion ? `${resolvedQuestionBlockFor(answerLang, resolvedQuestion)}\n\n` : '';
+  const user = `${historyBlock}${resolvedBlock}${userIntro(answerLang)}\n\n${question}${checklist}\n\n${chunkLabel(answerLang)}\n\n${chunkBlocks.join('\n\n---\n\n')}`;
 
   return { system, user, chunkById };
 }
@@ -265,6 +282,13 @@ function userIntro(lang: DocsLang): string {
 
 function chunkLabel(lang: DocsLang): string {
   return lang === 'zh' ? '参考片段：' : 'Context snippets:';
+}
+
+function resolvedQuestionBlockFor(lang: DocsLang, resolvedQuestion: string): string {
+  if (lang === 'zh') {
+    return `解析后的检索问题（仅用于消解当前问题里的指代；回答仍以用户原问题为准）：\n${resolvedQuestion}`;
+  }
+  return `Resolved retrieval query (only for pronoun/entity resolution; answer the original user question):\n${resolvedQuestion}`;
 }
 
 /**

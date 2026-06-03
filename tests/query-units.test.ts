@@ -14,13 +14,8 @@ import { rerank, computeTitleMatches } from '../src/query/rerank.ts';
 import { aggregate } from '../src/query/aggregate.ts';
 import { postprocess } from '../src/query/postprocess.ts';
 import { buildPrompt, detectFormatHint } from '../src/query/prompt.ts';
-import {
-  apiReferenceSearchHints,
-  apiReferenceVersionPreferences,
-  detectApiIntent,
-  supplementalContextPageIds,
-  supplementalContextSearchHints,
-} from '../src/query/api-intent.ts';
+import { LLMIntentRouter } from '../src/query/intent-router.ts';
+import type { LLM, LLMGenerateInput, LLMGenerateOutput } from '../src/llm/types.ts';
 import type { RerankedChunk } from '../src/query/rerank.ts';
 import type { RetrievedChunk } from '../src/query/retrieval.ts';
 
@@ -251,107 +246,107 @@ test('detectFormatHint: default paragraph', () => {
 });
 
 // ---------------------------------------------------------------------------
-// api-intent.ts
+// intent-router.ts
 // ---------------------------------------------------------------------------
 
-test('detectApiIntent: endpoint, parameter, response, and status questions are API-intent', () => {
-  assert.equal(detectApiIntent('POST /api/v2/checkout 返回哪些字段？'), true);
-  assert.equal(detectApiIntent('创建订单接口需要传哪些参数？'), true);
-  assert.equal(detectApiIntent('event_type 和 data.status 怎么映射？'), true);
-  assert.equal(detectApiIntent('Webhook 回调里的 data.status 是什么？'), true);
-  assert.equal(detectApiIntent('What response fields does /api/v1/payout/query return?'), true);
-  assert.equal(detectApiIntent('可以直接用 USDT 金额创建支付引擎订单吗？'), true);
-  assert.equal(
-    detectApiIntent('Can I create a Payment Engine order directly in USDT if my system already calculated the FX price?'),
-    true,
-  );
+class RouterTestLLM implements LLM {
+  readonly model = 'router-test';
+  readonly calls: LLMGenerateInput[] = [];
+  private readonly text: string;
+  constructor(text: string) {
+    this.text = text;
+  }
+  async generate(input: LLMGenerateInput): Promise<LLMGenerateOutput> {
+    this.calls.push(input);
+    return { text: this.text, modelUsed: this.model };
+  }
+}
+
+test('LLMIntentRouter: follows the LLM route for checkout follow-up rewrites', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'follow_up',
+    effective_question: '/api/v2/checkout checkout_url valid_time 那它过期时间怎么设置？',
+    intent: 'api_reference',
+    product: 'payment_engine',
+    retrieval: {
+      prefer_api_reference: true,
+      api_reference_hints: ['checkout checkout_url valid_time', 'POST /api/v2/checkout'],
+      supplemental_context_hints: [],
+      supplemental_page_ids: [],
+      api_versions: ['v2'],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: '那它过期时间怎么设置？',
+    lang: 'zh',
+    history: [
+      {
+        question: '支付引擎创建订单接口返回的 checkout_url 是做什么用的？',
+        answer_summary: '`POST /api/v2/checkout` 返回的 checkout_url 用于跳转支付页。',
+      },
+    ],
+  });
+
+  assert.equal(route.usesHistory, true);
+  assert.equal(route.rewritten, true);
+  assert.equal(route.effectiveQuestion, '/api/v2/checkout checkout_url valid_time 那它过期时间怎么设置？');
+  assert.equal(route.apiIntent, true);
+  assert.equal(route.signatureAuthIntent, false);
+  assert.deepEqual(route.apiReferenceHints, ['checkout checkout_url valid_time', 'POST /api/v2/checkout']);
+  assert.deepEqual(route.apiReferenceVersionPrefs, ['v2']);
+  assert.match(llm.calls[0]!.systemPrompt, /ANYDOCS_INTENT_ROUTER_V1/);
+  assert.match(llm.calls[0]!.userPrompt, /checkout_url/);
 });
 
-test('detectApiIntent: broad concept questions are not API-intent', () => {
-  assert.equal(detectApiIntent('支付引擎是什么？'), false);
-  assert.equal(detectApiIntent('What is WaaS?'), false);
-  assert.equal(detectApiIntent('Cregis API 签名应该怎么拼接参数？'), false);
-  assert.equal(detectApiIntent('Cregis API 签名应该怎么拼接参数？sign 字段本身要不要参与签名？'), false);
-  assert.equal(
-    detectApiIntent('What should my WaaS webhook return after processing successfully, and how should I handle duplicate callbacks?'),
-    false,
-  );
-  assert.equal(
-    detectApiIntent('For API payout or withdrawals, do I only need a Payment Engine project, or should I also create a WaaS API project?'),
-    false,
-  );
+test('LLMIntentRouter: standalone signature route can ignore unrelated history', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: 'Cregis API 签名参数怎么拼接？',
+    intent: 'signature_auth',
+    product: 'general',
+    retrieval: {
+      prefer_api_reference: false,
+      api_reference_hints: [],
+      supplemental_context_hints: ['authentication signature API_KEY MD5 sign empty values lexicographical order'],
+      supplemental_page_ids: ['authentication', 'webhook-mechanism'],
+      api_versions: [],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: 'Cregis API 签名参数怎么拼接？',
+    lang: 'zh',
+    history: [
+      {
+        question: '那它过期时间怎么设置？',
+        answer_summary: '`POST /api/v2/checkout` 的 valid_time 控制支付页有效期。',
+      },
+    ],
+  });
+
+  assert.equal(route.usesHistory, false);
+  assert.equal(route.rewritten, false);
+  assert.equal(route.effectiveQuestion, 'Cregis API 签名参数怎么拼接？');
+  assert.equal(route.apiIntent, false);
+  assert.equal(route.signatureAuthIntent, true);
+  assert.deepEqual(route.supplementalContextHints, ['authentication signature API_KEY MD5 sign empty values lexicographical order']);
+  assert.deepEqual(route.supplementalPageIds, ['authentication', 'webhook-mechanism']);
 });
 
-test('apiReferenceSearchHints: adds endpoint-oriented terms for common order and payout tasks', () => {
-  assert.deepEqual(
-    apiReferenceSearchHints('可以直接用 USDT 金额创建支付引擎订单吗？'),
-    ['checkout order_currency order_amount'],
-  );
-  assert.deepEqual(
-    apiReferenceSearchHints(
-      'If my order is priced in USD but the customer may pay BTC, which Payment Engine fields control the order currency and accepted payment tokens?',
-    ),
-    ['checkout order_currency order_amount'],
-  );
-  assert.deepEqual(
-    apiReferenceSearchHints('WaaS API 出款最小流程是什么？发起后用哪个接口查询最终状态？'),
-    ['api v1 payout cid callback', 'api v1 payout query'],
-  );
-  assert.deepEqual(
-    apiReferenceSearchHints(
-      'If I need to withdraw from a specific user deposit address instead of the default payout wallet, which endpoint and fields should I use?',
-    ),
-    ['api v1 sub_address_withdrawal from_address to_address third_party_id'],
-  );
-  assert.deepEqual(
-    apiReferenceSearchHints('我要在出款前查某个子地址的可用余额，应该用哪个 WaaS 接口？currency 参数怎么填？'),
-    ['api v1 sub_address_balance address currency chain_id token_id'],
-  );
-  assert.deepEqual(
-    apiReferenceSearchHints(
-      'For USDT payouts on Ethereum versus Polygon, what changes in the WaaS payout request and how do I find the right token identifier?',
-    ),
-    ['api v1 coins chain_id token_id currency', 'api v1 payout cid callback'],
-  );
-  assert.deepEqual(
-    apiReferenceSearchHints('supported-tokens 里的 chain_id 和 token_id 要怎么映射到请求参数？测试网代币能直接用于生产吗？'),
-    ['api v1 coins chain_id token_id currency'],
-  );
-  assert.deepEqual(
-    apiReferenceSearchHints('event_type 和查询订单返回的 data.status 为什么名字不一样？'),
-    ['order info data status'],
-  );
-  assert.deepEqual(
-    apiReferenceSearchHints('同一笔支付引擎订单可能先部分支付再补款吗？回调里我应该怎么做幂等和状态映射？'),
-    ['order info data status'],
-  );
-});
+test('LLMIntentRouter: malformed route falls back to standalone general docs', async () => {
+  const router = new LLMIntentRouter(new RouterTestLLM('not json'));
+  const route = await router.route({
+    question: '怎么配置？',
+    lang: 'zh',
+    history: [{ question: '之前的问题', answer_summary: '之前的回答' }],
+  });
 
-test('apiReferenceVersionPreferences: defaults WaaS payout flow to v1 unless user asks for v2', () => {
-  assert.deepEqual(
-    apiReferenceVersionPreferences('WaaS API 出款最小流程是什么？发起后用哪个接口查询最终状态？'),
-    ['v1'],
-  );
-  assert.deepEqual(apiReferenceVersionPreferences('v2 payout 接口怎么用？'), ['v2']);
-});
-
-test('supplementalContextSearchHints: adds non-API support pages for environment and callback-status questions', () => {
-  assert.deepEqual(
-    supplementalContextSearchHints('supported-tokens 里的 chain_id 和 token_id 要怎么映射到请求参数？测试网代币能直接用于生产吗？'),
-    ['测试代币 开发环境 testnet tokens development environments'],
-  );
-  assert.deepEqual(
-    supplementalContextPageIds('supported-tokens 里的 chain_id 和 token_id 要怎么映射到请求参数？测试网代币能直接用于生产吗？'),
-    ['sdk-overview'],
-  );
-  assert.deepEqual(
-    supplementalContextSearchHints('同一笔支付引擎订单可能先部分支付再补款吗？回调里我应该怎么做幂等和状态映射？'),
-    ['支付引擎 业务流程 回调机制 event_type 状态映射 幂等 partial_paid paid_remain'],
-  );
-  assert.deepEqual(
-    supplementalContextPageIds('同一笔支付引擎订单可能先部分支付再补款吗？回调里我应该怎么做幂等和状态映射？'),
-    ['webhook-mechanism', 'pe-business-flow'],
-  );
+  assert.equal(route.usesHistory, false);
+  assert.equal(route.rewritten, false);
+  assert.equal(route.effectiveQuestion, '怎么配置？');
+  assert.equal(route.intent, 'general_docs');
+  assert.equal(route.apiIntent, false);
 });
 
 // ---------------------------------------------------------------------------

@@ -72,6 +72,11 @@ test('observeAsk: enabled=false → no rows, session_id minted anyway', () => {
     assert.equal(out.implicit_rows_inserted, 0);
     const rows = db.prepare(`SELECT COUNT(*) AS n FROM feedback`).get() as { n: number };
     assert.equal(rows.n, 0);
+    assert.equal(
+      sessions.getRecentEntries(out.session_id, 1).length,
+      1,
+      'multi-turn history should still record even when feedback rows are disabled',
+    );
   } finally {
     db.close();
   }
@@ -93,6 +98,11 @@ test("observeAsk: implicitSignals='off' → no rows, session_id minted", () => {
     });
     assert.match(out.session_id, /^s_/);
     assert.equal(out.implicit_rows_inserted, 0);
+    assert.equal(
+      sessions.getRecentEntries(out.session_id, 1).length,
+      1,
+      'multi-turn history should still record even when implicit feedback is disabled',
+    );
   } finally {
     db.close();
   }
