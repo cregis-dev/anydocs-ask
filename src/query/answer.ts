@@ -33,17 +33,11 @@ import { computeTitleMatches } from './rerank.ts';
 import { rerank, type RerankedChunk } from './rerank.ts';
 import {
   apiReferenceChunkMatchesVersion,
-  apiReferenceSearchHints,
-  apiReferenceVersionPreferences,
-  detectProjectSetupIntent,
-  detectApiIntent,
-  detectSignatureAuthIntent,
-  supplementalContextPageIds,
-  supplementalContextSearchHints,
   isApiReferenceChunk,
 } from './api-intent.ts';
 import { aggregate, TOP_K_FOR_AGGREGATION, type AggregateOutcome } from './aggregate.ts';
 import { buildPrompt, detectFormatHint } from './prompt.ts';
+import { LLMIntentRouter, type IntentRouter } from './intent-router.ts';
 import { postprocess } from './postprocess.ts';
 import type { AskRequest, AskResult } from './types.ts';
 
@@ -74,6 +68,7 @@ export type AskDeps = {
    *  applied inline so test deps don't need to construct one. */
   rerankerConfig?: RerankerConfig;
   promptConfig?: PromptConfig;
+  intentRouter?: IntentRouter | null;
 };
 
 export type AskStatusStage = 'retrieving' | 'generating';
@@ -241,30 +236,28 @@ async function askWithTraceInternal(
   // 3. Hybrid retrieve.
   throwIfAborted(hooks.signal);
   await hooks.onStatus?.('retrieving');
-  const apiIntent = detectApiIntent(question);
-  const signatureAuthIntent = detectSignatureAuthIntent(question);
   const currentSubtreeRoot = null;
   // RFC 0003 §4.2 — multi-turn history-aware retrieve query (M1).
-  //
-  // When `context.history` is supplied (server layer fills this when
-  // multiTurn.enabled and a valid session has prior turns; see
-  // [src/server/app.ts](../server/app.ts)), splice prior question text into
-  // the embedding input so vector retrieval inherits dialogue context —
-  // pronoun-only follow-ups ("它怎么改？") get pulled toward the right
-  // subtree because the vector lands closer to the prior turn's region.
-  //
-  // BM25 (`ftsQuery`) and entity injection (`entityTerms` / api hints)
-  // deliberately stay on the current question only — splicing old keywords
-  // would dilute the present query's term focus (RFC §4.2 rationale).
-  //
-  // `undefined` / `[]` history is the single-turn path; embedder receives
-  // the raw question verbatim, byte-equivalent to 0.1.x.
-  //
-  // M2 (RFC §4.1) consumes the same `history` array in buildPrompt below.
-  // Both paths must see the same turns or the embedding region and the
-  // prompt's pronoun-resolution scope would drift.
+  // A single LLM intent router now owns the semantic decisions that used to
+  // be spread across deterministic query rewrite + API-intent rules:
+  //   - whether this turn is standalone or a follow-up
+  //   - whether session history should enter retrieval / prompt context
+  //   - which retrieval hints should bias API reference/supporting context
+  // The raw current question is still embedded separately for γ feedback
+  // similarity; only the retrieve vector sees the router's effective query.
   const history = req.context?.history ?? [];
-  const historyWindow = history.length;
+  const intentRouter = deps.intentRouter ?? new LLMIntentRouter(deps.llm);
+  const intentRoute = await intentRouter.route({ question, history, lang: queryLang });
+  const activeHistory = intentRoute.usesHistory ? history : [];
+  const historyWindow = activeHistory.length;
+  const searchQuestion = intentRoute.effectiveQuestion || question;
+  const apiIntent = intentRoute.apiIntent;
+  const signatureAuthIntent = intentRoute.signatureAuthIntent;
+  const retrieveQuestion = intentRoute.usesHistory
+    ? intentRoute.rewritten
+      ? intentRoute.effectiveQuestion
+      : `${activeHistory.map((h) => h.question).join('\n')}\n${question}`
+    : searchQuestion;
   // Two distinct vectors when multi-turn is active:
   //   - `queryVector` (raw current question) is what we return and what γ
   //     uses for cross-turn similarity comparison. γ asks "did the user
@@ -278,21 +271,18 @@ async function askWithTraceInternal(
   // Batched into one embed() call so multi-turn asks pay one round-trip
   // instead of two (Embedder contract takes a `string[]` for exactly this
   // reason). Single-turn calls submit one input and keep the alpha.0 cost.
-  const embedInputs =
-    historyWindow > 0
-      ? [question, `${history.map((h) => h.question).join('\n')}\n${question}`]
-      : [question];
+  const embedInputs = retrieveQuestion === question ? [question] : [question, retrieveQuestion];
   const embedded = await deps.embedder.embed(embedInputs);
   const queryVector = embedded[0]!.vector;
   const retrieveVector = embedded[1]?.vector ?? queryVector;
   throwIfAborted(hooks.signal);
-  const ftsQuery = sanitizeFtsQuery(question);
-  const entityTerms = extractEntityTerms(question);
-  const projectSetupIntent = detectProjectSetupIntent(question);
-  const apiReferenceHints = apiReferenceSearchHints(question);
-  const supplementalContextHints = supplementalContextSearchHints(question);
-  const supplementalPageIds = supplementalContextPageIds(question);
-  const apiReferenceVersionPrefs = apiReferenceVersionPreferences(question);
+  const ftsQuery = sanitizeFtsQuery(searchQuestion);
+  const entityTerms = extractEntityTerms(searchQuestion);
+  const projectSetupIntent = intentRoute.projectSetupIntent;
+  const apiReferenceHints = intentRoute.apiReferenceHints;
+  const supplementalContextHints = intentRoute.supplementalContextHints;
+  const supplementalPageIds = intentRoute.supplementalPageIds;
+  const apiReferenceVersionPrefs = intentRoute.apiReferenceVersionPrefs;
   const apiReferenceHintTerms = apiReferenceHints
     .flatMap((hint) => hint.toLowerCase().split(/\s+/))
     .filter(Boolean);
@@ -325,7 +315,7 @@ async function askWithTraceInternal(
     queryLang,
     currentSubtreeRoot,
     currentPageId: null,
-    query: question,
+    query: searchQuestion,
     entityTerms,
     apiIntent,
     apiReferenceHintTerms,
@@ -334,7 +324,7 @@ async function askWithTraceInternal(
   });
 
   const reranked = deps.reranker
-    ? await applyCrossEncoderRerank(deps.reranker, question, ruleReranked, deps.rerankerConfig)
+    ? await applyCrossEncoderRerank(deps.reranker, searchQuestion, ruleReranked, deps.rerankerConfig)
     : ruleReranked;
 
   const fusedTrace = buildFusedTrace(reranked, retrievalTrace);
@@ -348,7 +338,7 @@ async function askWithTraceInternal(
     apiIntent,
     signatureAuthIntent,
   });
-  const titleMatchedPageIds = computeTitleMatches(retrieved, question);
+  const titleMatchedPageIds = computeTitleMatches(retrieved, searchQuestion);
   const titleMatchedSubtrees = new Set<string>();
   for (const c of aggregationCandidates) {
     if (titleMatchedPageIds.has(c.page_id) && c.subtree_root) {
@@ -372,13 +362,14 @@ async function askWithTraceInternal(
   const formatHint = detectFormatHint(question);
   const prompt = buildPrompt({
     question,
+    ...(intentRoute.rewritten ? { resolvedQuestion: intentRoute.effectiveQuestion } : {}),
     chunks: pickedChunks,
     answerLang: queryLang,
     isCrossLang,
     formatHint,
     ...(deps.promptConfig ? { promptConfig: deps.promptConfig } : {}),
     ...(entityTerms ? { entityTerms } : {}),
-    ...(historyWindow > 0 ? { history } : {}),
+    ...(historyWindow > 0 ? { history: activeHistory } : {}),
   });
 
   let llmOutput;

@@ -1461,6 +1461,186 @@ test('ask: context.history splices prior questions into the retrieve-time embedd
   }
 });
 
+test('ask: short follow-up rewrites retrieval around prior API anchors', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', {
+      id: 'payment-engine-quickstart-30min',
+      title: '支付引擎 30 分钟接入实战',
+      body: '第 3 步：拉起支付页。前端拿到 checkout_url 后直接跳转即可。创建订单时 valid_time 表示支付页有效期，超过后订单过期。',
+    });
+    await writePage(root, 'zh', {
+      id: 'api-payment-engine-api-post-api-v2-checkout',
+      title: 'POST /api/v2/checkout — 创建订单',
+      body: 'API reference: Payment Engine API. HTTP Request POST /api/v2/checkout. Request fields: checkout_url, cregis_id, valid_time. valid_time controls the checkout_url payment window.',
+    });
+    await writePage(root, 'zh', {
+      id: 'waas-quickstart-30min',
+      title: 'WaaS 30 分钟接入实战',
+      body: '调用 /api/v1/payout 发起出款。third_party_id 建议用你系统的唯一业务单号，作为幂等键和对账键。',
+    });
+    await writeNav(root, 'zh', {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'payment-engine',
+          title: '支付引擎',
+          children: [
+            { type: 'page', pageId: 'payment-engine-quickstart-30min' },
+          ],
+        },
+        {
+          type: 'section',
+          id: 'waas',
+          title: 'WaaS 钱包',
+          children: [{ type: 'page', pageId: 'waas-quickstart-30min' }],
+        },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API 参考',
+          children: [
+            { type: 'page', pageId: 'api-payment-engine-api-post-api-v2-checkout' },
+          ],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.userPrompt, /\/api\/v2\/checkout/);
+      assert.match(input.userPrompt, /checkout_url/);
+      assert.match(input.userPrompt, /valid_time/);
+      assert.doesNotMatch(input.userPrompt, /\/api\/v1\/payout/);
+      const apiMarker =
+        input.userPrompt.match(/\[(cit_\d+)\][^\n]*POST \/api\/v2\/checkout/)?.[1] ??
+        'cit_1';
+      return `checkout_url 的支付页有效期通过 /api/v2/checkout 的 valid_time 设置 [${apiMarker}]。`;
+    });
+    const { result, trace } = await askWithTrace(ctx, {
+      question: '那它过期时间怎么设置？',
+      context: {
+        history: [
+          {
+            question: '支付引擎创建订单接口返回的 checkout_url 是做什么用的？',
+            answer_summary:
+              '`POST /api/v2/checkout` 返回的 `checkout_url` 是 Cregis 托管收银台的支付页面地址，用于引导用户完成付款。',
+          },
+        ],
+      },
+    });
+    assert.equal(result.type, 'answer', JSON.stringify(result));
+    assert.equal(trace.history_window, 1);
+    assert.ok(
+      ctx.embedder.allEmbeddedTexts.includes('那它过期时间怎么设置？'),
+      'raw current_q must still be embedded for γ',
+    );
+    assert.ok(
+      ctx.embedder.allEmbeddedTexts.some(
+        (text) =>
+          text.includes('/api/v2/checkout') &&
+          text.includes('checkout_url') &&
+          text.includes('valid_time') &&
+          text.includes('那它过期时间怎么设置？'),
+      ),
+      'retrieve-time query should include resolved API anchors',
+    );
+    if (result.type === 'answer') {
+      assert.ok(
+        result.citations.some(
+          (citation) => citation.page_id === 'api-payment-engine-api-post-api-v2-checkout',
+        ),
+        'answer should cite the checkout API reference',
+      );
+      assert.ok(!result.citations.some((citation) => citation.page_id === 'waas-quickstart-30min'));
+    }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: standalone signature question ignores unrelated session history', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', {
+      id: 'authentication',
+      title: '认证与签名',
+      body: 'Cregis API 签名规则：排除 sign 和空值，将剩余参数按 key 字典序排序，拼接为 key1value1key2value2，前面追加 API_KEY 后做 MD5 并转小写。',
+    });
+    await writePage(root, 'zh', {
+      id: 'payment-engine-quickstart-30min',
+      title: '支付引擎 30 分钟接入实战',
+      body: '第 3 步：拉起支付页。前端拿到 checkout_url 后直接跳转即可。创建订单时 valid_time 表示支付页有效期。',
+    });
+    await writePage(root, 'zh', {
+      id: 'api-payment-engine-api-post-api-v2-checkout',
+      title: 'POST /api/v2/checkout — 创建订单',
+      body: 'API reference: Payment Engine API. HTTP Request POST /api/v2/checkout. Request fields: nonce, timestamp, sign. sign 是请求的数字签名，签名规则参考鉴权文档。',
+    });
+    await writeNav(root, 'zh', {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'quickstart',
+          title: '快速入门',
+          children: [{ type: 'page', pageId: 'authentication' }],
+        },
+        {
+          type: 'section',
+          id: 'payment-engine',
+          title: '支付引擎',
+          children: [{ type: 'page', pageId: 'payment-engine-quickstart-30min' }],
+        },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API 参考',
+          children: [{ type: 'page', pageId: 'api-payment-engine-api-post-api-v2-checkout' }],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.doesNotMatch(input.systemPrompt, /对话历史/);
+      assert.doesNotMatch(input.userPrompt, /对话历史/);
+      assert.doesNotMatch(input.userPrompt, /checkout_url/);
+      assert.match(input.userPrompt, /认证与签名/);
+      assert.match(input.userPrompt, /API_KEY/);
+      assert.match(input.userPrompt, /MD5/);
+      return '签名参数应排除 sign 和空值，按 key 字典序拼接为 key1value1key2value2，前面追加 API_KEY 后做 MD5 并转小写 [cit_1]。';
+    });
+    const { result, trace } = await askWithTrace(ctx, {
+      question: 'Cregis API 签名参数怎么拼接？',
+      context: {
+        history: [
+          {
+            question: '支付引擎创建订单接口返回的 checkout_url 是做什么用的？',
+            answer_summary:
+              '`POST /api/v2/checkout` 返回的 `checkout_url` 是托管收银台支付页面地址。',
+          },
+          {
+            question: '那它过期时间怎么设置？',
+            answer_summary:
+              '`POST /api/v2/checkout` 的 `valid_time` 字段控制支付页有效期。',
+          },
+        ],
+      },
+    });
+    assert.equal(result.type, 'answer', JSON.stringify(result));
+    assert.equal(trace.history_window, undefined);
+    assert.equal(ctx.embedder.lastEmbeddedTexts.length, 1);
+    assert.equal(ctx.embedder.lastEmbeddedTexts[0], 'Cregis API 签名参数怎么拼接？');
+    if (result.type === 'answer') {
+      assert.equal(result.history_window, undefined);
+      assert.ok(result.citations.some((citation) => citation.page_id === 'authentication'));
+      assert.ok(!result.citations.some((citation) => citation.page_id.startsWith('api-')));
+    }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test('ask: missing / empty history → ONE embed call on the raw question (single-turn byte-equivalent)', async () => {
   // The default single-turn path must be untouched: when callers omit
   // `history` OR pass an empty array, exactly one embed call goes out with

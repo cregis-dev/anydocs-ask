@@ -199,6 +199,31 @@ test("/v1/ask: feedback.enabled=false writes no implicit rows even on identical 
   }
 });
 
+test('/v1/ask: feedback.enabled=false still injects multi-turn history on the second call', async () => {
+  const s = await setup({ feedbackEnabled: false });
+  try {
+    const app = createApp({ runtime: s.runtime });
+    const first = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    const firstBody = (await first.json()) as { session_id: string };
+
+    const second = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '它怎么用？', session_id: firstBody.session_id }),
+    });
+    const secondBody = (await second.json()) as { session_id: string; history_window?: number };
+    assert.equal(second.status, 200);
+    assert.equal(secondBody.session_id, firstBody.session_id);
+    assert.equal(secondBody.history_window, 1);
+  } finally {
+    await s.cleanup();
+  }
+});
+
 test('/v1/ask?dry_run=1 issues a session_id but writes no implicit rows on re-ask', async () => {
   const s = await setup({ feedbackEnabled: true });
   try {

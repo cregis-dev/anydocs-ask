@@ -65,28 +65,25 @@ export function observeAsk(args: ObserveAskArgs): ObserveAskOutcome {
   const session_id =
     args.preResolvedSessionId ?? args.sessionTable.getOrCreate(args.requestedSessionId);
 
-  // Gate everything behind both knobs (PRD §11.4 #6 + ARCH §15.7).
-  // 'off' → just mint/refresh the session_id and bail. We still issue an id
-  // so clients can begin establishing one ahead of the operator flipping
-  // the switch later.
-  if (!args.config.feedback.enabled || args.config.feedback.implicitSignals === 'off') {
-    return { session_id, implicit_rows_inserted: 0 };
-  }
-
   let implicit_rows_inserted = 0;
   if (args.queryVector !== null) {
-    try {
-      implicit_rows_inserted = detectAndRecordReasks({
-        db: args.db,
-        sessionTable: args.sessionTable,
-        session_id,
-        question: args.question,
-        queryVector: args.queryVector,
-        now: args.now,
-      });
-    } catch (err) {
-      // γ is best-effort. Don't poison the response.
-      process.stderr.write(`[ask/gamma] reask detection failed: ${(err as Error).message}\n`);
+    // Feedback-row creation remains gated behind both knobs (PRD §11.4 #6
+    // + ARCH §15.7), but session history is now also used by multi-turn
+    // retrieval. Keep recording below even when feedback is disabled.
+    if (args.config.feedback.enabled && args.config.feedback.implicitSignals !== 'off') {
+      try {
+        implicit_rows_inserted = detectAndRecordReasks({
+          db: args.db,
+          sessionTable: args.sessionTable,
+          session_id,
+          question: args.question,
+          queryVector: args.queryVector,
+          now: args.now,
+        });
+      } catch (err) {
+        // γ is best-effort. Don't poison the response.
+        process.stderr.write(`[ask/gamma] reask detection failed: ${(err as Error).message}\n`);
+      }
     }
 
     try {
