@@ -921,7 +921,7 @@ test('aggregate: same-lang dominant subtree (≥0.55 share) -> answer-same-lang'
   }
 });
 
-test('aggregate: same-lang split with Δ<0.25 -> clarify', () => {
+test('aggregate: same-lang split with Δ<0.25 -> answer from the leading subtree', () => {
   const out = aggregate(
     [
       fakeReranked({ chunk_id: 1, lang: 'zh', subtree_root: 'A', rrf_score: 0.1, final_score: 1.0 }),
@@ -931,9 +931,10 @@ test('aggregate: same-lang split with Δ<0.25 -> clarify', () => {
     ],
     { queryLang: 'zh' },
   );
-  assert.equal(out.kind, 'clarify');
-  if (out.kind === 'clarify') {
-    assert.equal(out.topSubtrees.length, 2);
+  assert.equal(out.kind, 'answer-same-lang');
+  if (out.kind === 'answer-same-lang') {
+    assert.equal(out.dominantSubtree, 'A');
+    assert.equal(out.pick.length, 4);
   }
 });
 

@@ -10,7 +10,7 @@
  *      optional subtree_root match)
  *   3. Hybrid retrieve (vector + BM25 + RRF)
  *   4. Structural rerank (lang_boost / same_subtree_boost / nav_index_boost)
- *   5. Subtree aggregate → answer-same-lang | clarify | translate-fallback
+ *   5. Subtree aggregate → answer-same-lang | translate-fallback
  *   6. Build prompt + generate via LLM
  *   7. Postprocess (citation legality, lang fill, truncation, hallucination)
  *
@@ -26,7 +26,6 @@ import type { LLM } from '../llm/types.ts';
 import type { Reranker } from '../reranker/types.ts';
 import type { PromptConfig, RerankerConfig } from '../config.ts';
 import type { DocsLang } from '../anydocs/types.ts';
-import type { BreadcrumbNode } from '../db/schema.ts';
 import { detectLangFromText, langFromScopeId } from './lang.ts';
 import { sanitizeFtsQuery } from './sanitize.ts';
 import { retrieveWithTrace, type RetrievalTrace, type RetrievedChunk } from './retrieval.ts';
@@ -43,10 +42,10 @@ import {
   supplementalContextSearchHints,
   isApiReferenceChunk,
 } from './api-intent.ts';
-import { aggregate, TOP_K_FOR_AGGREGATION, type AggregateOutcome, type SubtreeShare } from './aggregate.ts';
+import { aggregate, TOP_K_FOR_AGGREGATION, type AggregateOutcome } from './aggregate.ts';
 import { buildPrompt, detectFormatHint } from './prompt.ts';
 import { postprocess } from './postprocess.ts';
-import type { AskRequest, AskResult, AskClarify, ClarifyOption } from './types.ts';
+import type { AskRequest, AskResult } from './types.ts';
 
 const MAX_QUESTION_CHARS = 500;
 const HARD_MAX_CHUNKS = 20;
@@ -220,6 +219,24 @@ async function askWithTraceInternal(
 
   // 1.5 Lang detection.
   const queryLang = resolveQueryLang(deps.db, question, req);
+  const utilityAnswer = utilityAnswerFor(question, queryLang, deps.promptConfig);
+  if (utilityAnswer) {
+    return {
+      result: {
+        type: 'answer',
+        answer_id: makeAnswerId(),
+        answer_lang: queryLang,
+        answer_md: utilityAnswer,
+        translation_notice: null,
+        citations: [],
+        used_chunks: 0,
+        model: 'static',
+        latency_ms: Math.round(performance.now() - t0),
+      },
+      trace: emptyTrace(),
+      queryVector: null,
+    };
+  }
 
   // 3. Hybrid retrieve.
   throwIfAborted(hooks.signal);
@@ -339,24 +356,6 @@ async function askWithTraceInternal(
     }
   }
   const outcome = aggregate(aggregationCandidates, { queryLang, currentSubtreeRoot, titleMatchedSubtrees });
-
-  if (outcome.kind === 'clarify') {
-    const clarify = buildClarifyResult({ answerLang: queryLang, shares: outcome.topSubtrees });
-    if (historyWindow > 0) clarify.history_window = historyWindow;
-    return {
-      result: clarify,
-      trace: {
-        fused: fusedTrace,
-        subtree_ask_triggered: true,
-        top_final_score,
-        confidence,
-        tokens_in: null,
-        tokens_out: null,
-        ...(historyWindow > 0 ? { history_window: historyWindow } : {}),
-      },
-      queryVector,
-    };
-  }
 
   // 6 + 7. Generate + postprocess.
   const isCrossLang = outcome.kind === 'translate-fallback';
@@ -686,6 +685,68 @@ function resolveQueryLang(db: DbHandle, question: string, req: AskRequest): Docs
   return detectLangFromText(question);
 }
 
+const ZH_UTILITY_QUERIES = new Set([
+  '你好',
+  '您好',
+  '嗨',
+  '哈喽',
+  '在吗',
+  '在么',
+  '早',
+  '早上好',
+  '下午好',
+  '晚上好',
+  '你是谁',
+  '你是什么',
+  '你是什么模型',
+  '你能做什么',
+  '你可以做什么',
+  '你会什么',
+  '你能回答什么',
+  '你能帮我什么',
+  '你能帮我做什么',
+  '介绍一下你自己',
+]);
+
+const EN_UTILITY_QUERIES = new Set([
+  'hi',
+  'hello',
+  'hey',
+  'hellothere',
+  'help',
+  'whoareyou',
+  'whatareyou',
+  'whatmodelareyou',
+  'introduceyourself',
+  'whatcanyoudo',
+  'whatdoyoudo',
+  'whatcanyouhelpwith',
+  'whatquestionscanyouanswer',
+]);
+
+function utilityAnswerFor(
+  question: string,
+  lang: DocsLang,
+  promptConfig: PromptConfig | undefined,
+): string | null {
+  const normalized = normalizeUtilityQuestion(question);
+  const isUtility = ZH_UTILITY_QUERIES.has(normalized) || EN_UTILITY_QUERIES.has(normalized);
+  if (!isUtility) return null;
+
+  const assistantName = promptConfig?.assistantName?.trim() || 'Cregis AI Assistant';
+  if (lang === 'zh') {
+    return `你好！我是 ${assistantName}，可以回答 Cregis 文档里的支付引擎、WaaS 钱包和 API 接入问题。你可以直接问具体接口、参数、签名、回调、错误码或接入步骤。`;
+  }
+  return `Hi! I'm ${assistantName}. I can help with Cregis documentation for Payment Engine, WaaS Wallet, and API integration. Ask about endpoints, parameters, signatures, callbacks, error codes, or integration steps.`;
+}
+
+function normalizeUtilityQuestion(question: string): string {
+  return question
+    .trim()
+    .toLowerCase()
+    .replace(/[\s"'`~!@#$%^&*_\-+=|\\/.,;:?[{\]}，。！？、；：“”‘’（）【】《》<>]+/g, '');
+}
+
 const CITATION_MARKER_IN_ANSWER = /\[(cit_\d+)\]/g;
 
 function withMandatoryApiReferenceCitation(
@@ -821,7 +882,6 @@ function pickContextChunks(
       ? Math.min(HARD_MAX_CHUNKS, Math.max(DEFAULT_MAX_CHUNKS, entityTerms.length * 5))
       : DEFAULT_MAX_CHUNKS;
   const cap = Math.min(clientMax ?? defaultCap, HARD_MAX_CHUNKS);
-  if (outcome.kind === 'clarify') return [];
   let picked =
     outcome.kind === 'translate-fallback'
       ? outcome.pick.slice(0, cap)
@@ -1141,60 +1201,6 @@ function translationNoticeFor(lang: DocsLang): string {
   return lang === 'zh'
     ? '原文为其他语言，已为您翻译要点。'
     : 'Source documents are in another language; key points translated below.';
-}
-
-function buildClarifyResult(args: {
-  answerLang: DocsLang;
-  shares: SubtreeShare[];
-}): AskClarify {
-  const options: ClarifyOption[] = args.shares.slice(0, 4).map((share) => {
-    const firstChunk = share.chunks[0]!;
-    const subtreeBreadcrumb = breadcrumbToSubtree(firstChunk.breadcrumb, share.subtree_root);
-    const samplePages = uniqueSamplePages(share.chunks).slice(0, 2);
-    const label =
-      subtreeBreadcrumb[subtreeBreadcrumb.length - 1]?.title ?? share.subtree_root;
-    return {
-      scope_id: share.subtree_root,
-      lang: args.answerLang,
-      label,
-      breadcrumb: subtreeBreadcrumb,
-      sample_pages: samplePages,
-    };
-  });
-
-  return {
-    type: 'clarify',
-    answer_id: makeAnswerId(),
-    answer_lang: args.answerLang,
-    message: clarifyMessageFor(args.answerLang),
-    options,
-  };
-}
-
-function breadcrumbToSubtree(
-  breadcrumb: BreadcrumbNode[],
-  subtreeRoot: string,
-): BreadcrumbNode[] {
-  const idx = breadcrumb.findIndex((b) => b.id === subtreeRoot);
-  if (idx < 0) return breadcrumb.slice(0, 1); // degenerate; fall back to depth-1 prefix
-  return breadcrumb.slice(0, idx + 1);
-}
-
-function uniqueSamplePages(chunks: RerankedChunk[]): Array<{ id: string; title: string }> {
-  const seen = new Set<string>();
-  const out: Array<{ id: string; title: string }> = [];
-  for (const c of chunks) {
-    if (seen.has(c.page_id)) continue;
-    seen.add(c.page_id);
-    out.push({ id: c.page_id, title: c.page_title });
-  }
-  return out;
-}
-
-function clarifyMessageFor(lang: DocsLang): string {
-  return lang === 'zh'
-    ? '您的问题可能涉及以下几个范围，请选择一个：'
-    : 'Your question could refer to several areas; pick one:';
 }
 
 /**

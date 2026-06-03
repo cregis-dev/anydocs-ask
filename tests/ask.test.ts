@@ -162,6 +162,70 @@ test('ask: unknown scope_id returns invalid_scope error (no silent fallback)', a
   }
 });
 
+test('ask: pure greeting returns a static assistant intro without retrieval or LLM', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', {
+      id: 'payment-engine-quickstart-30min',
+      title: '支付引擎 30 分钟接入实战',
+      body: '支付引擎创建订单、回调和查询订单状态说明。',
+    });
+    await writeNav(root, 'zh', {
+      version: 1,
+      items: [{ type: 'page', pageId: 'payment-engine-quickstart-30min' }],
+    });
+  });
+  try {
+    ctx.llm.setResponder(() => {
+      throw new Error('greetings must not call the LLM');
+    });
+    const { result, trace, queryVector } = await askWithTrace(
+      {
+        ...ctx,
+        promptConfig: { assistantName: 'Cregis AI Assistant', systemInstructions: [] },
+      },
+      { question: '你好' },
+    );
+    assert.equal(result.type, 'answer');
+    if (result.type !== 'answer') return;
+    assert.equal(result.answer_lang, 'zh');
+    assert.match(result.answer_md, /Cregis AI Assistant/);
+    assert.match(result.answer_md, /支付引擎|WaaS|API/);
+    assert.equal(result.used_chunks, 0);
+    assert.deepEqual(result.citations, []);
+    assert.equal(result.model, 'static');
+    assert.equal(ctx.llm.calls.length, 0);
+    assert.equal(queryVector, null);
+    assert.deepEqual(trace.fused, []);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: greeting plus a documentation question still uses retrieved citations', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', {
+      id: 'authentication',
+      title: '认证与签名',
+      body: 'Cregis API 签名需要按参数 key 字典序排序，排除 sign 和空值后拼接，并使用 API_KEY 做 MD5。',
+    });
+    await writeNav(root, 'zh', { version: 1, items: [{ type: 'page', pageId: 'authentication' }] });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      const markers = input.userPrompt.match(/\[cit_\d+\]/g) ?? [];
+      return `签名参数按 key 字典序排序，排除 sign 和空值后再做 MD5 ${markers[0] ?? ''}.`;
+    });
+    const r = await ask(ctx, { question: '你好，签名参数怎么拼？' });
+    assert.equal(r.type, 'answer');
+    if (r.type !== 'answer') return;
+    assert.ok(r.used_chunks > 0);
+    assert.ok(r.citations.some((c) => c.page_id === 'authentication'));
+    assert.equal(ctx.llm.calls.length, 1);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 // Regression for codex eval round-2: `no_citations` used to surface the
 // internal phrase "LLM response contained no valid citations" directly to
 // users. The message is now user-friendly and lang-aware; the internal
@@ -1256,10 +1320,10 @@ test('PRD §8 #12 — same-lang context wins over cross-lang via lang_boost', as
 });
 
 // ---------------------------------------------------------------------------
-// PRD §8 #13 — clarify keeps options same-lang
+// Automatic clarify is disabled: split intent still answers.
 // ---------------------------------------------------------------------------
 
-test('PRD §8 #13 — split intent across two zh subtrees yields a same-lang clarify', async () => {
+test('ask: split intent across two zh subtrees answers instead of auto-clarifying', async () => {
   const ctx = await bootstrap(async (root) => {
     await writePage(root, 'zh', {
       id: 'frontend-auth',
@@ -1291,22 +1355,12 @@ test('PRD §8 #13 — split intent across two zh subtrees yields a same-lang cla
   });
   try {
     const r = await ask(ctx, { question: '鉴权' });
-    assert.equal(r.type, 'clarify', `expected clarify, got ${JSON.stringify(r)}`);
-    if (r.type === 'clarify') {
+    assert.equal(r.type, 'answer', `expected answer, got ${JSON.stringify(r)}`);
+    if (r.type === 'answer') {
       assert.equal(r.answer_lang, 'zh');
-      assert.ok(r.options.length >= 2, 'must offer at least two same-lang subtrees');
-      const subtrees = new Set<string>();
-      for (const opt of r.options) {
-        assert.equal(opt.lang, 'zh', 'every clarify option must be same-lang');
-        assert.ok(opt.scope_id);
-        assert.ok(opt.label);
-        assert.ok(opt.breadcrumb.length >= 1);
-        subtrees.add(opt.scope_id);
-      }
-      assert.ok(subtrees.has('frontend'));
-      assert.ok(subtrees.has('backend'));
-      // LLM must not have been called — clarify short-circuits before generation.
-      assert.equal(ctx.llm.calls.length, 0);
+      assert.ok(r.citations.some((citation) => citation.page_id === 'frontend-auth'));
+      assert.ok(r.citations.some((citation) => citation.page_id === 'backend-auth'));
+      assert.equal(ctx.llm.calls.length, 1, 'answer path should call the LLM');
     }
   } finally {
     await ctx.cleanup();
