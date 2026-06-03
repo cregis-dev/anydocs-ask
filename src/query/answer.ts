@@ -219,6 +219,24 @@ async function askWithTraceInternal(
 
   // 1.5 Lang detection.
   const queryLang = resolveQueryLang(deps.db, question, req);
+  const utilityAnswer = utilityAnswerFor(question, queryLang, deps.promptConfig);
+  if (utilityAnswer) {
+    return {
+      result: {
+        type: 'answer',
+        answer_id: makeAnswerId(),
+        answer_lang: queryLang,
+        answer_md: utilityAnswer,
+        translation_notice: null,
+        citations: [],
+        used_chunks: 0,
+        model: 'static',
+        latency_ms: Math.round(performance.now() - t0),
+      },
+      trace: emptyTrace(),
+      queryVector: null,
+    };
+  }
 
   // 3. Hybrid retrieve.
   throwIfAborted(hooks.signal);
@@ -665,6 +683,68 @@ function resolveQueryLang(db: DbHandle, question: string, req: AskRequest): Docs
     if (fromScope) return fromScope;
   }
   return detectLangFromText(question);
+}
+
+const ZH_UTILITY_QUERIES = new Set([
+  '你好',
+  '您好',
+  '嗨',
+  '哈喽',
+  '在吗',
+  '在么',
+  '早',
+  '早上好',
+  '下午好',
+  '晚上好',
+  '你是谁',
+  '你是什么',
+  '你是什么模型',
+  '你能做什么',
+  '你可以做什么',
+  '你会什么',
+  '你能回答什么',
+  '你能帮我什么',
+  '你能帮我做什么',
+  '介绍一下你自己',
+]);
+
+const EN_UTILITY_QUERIES = new Set([
+  'hi',
+  'hello',
+  'hey',
+  'hellothere',
+  'help',
+  'whoareyou',
+  'whatareyou',
+  'whatmodelareyou',
+  'introduceyourself',
+  'whatcanyoudo',
+  'whatdoyoudo',
+  'whatcanyouhelpwith',
+  'whatquestionscanyouanswer',
+]);
+
+function utilityAnswerFor(
+  question: string,
+  lang: DocsLang,
+  promptConfig: PromptConfig | undefined,
+): string | null {
+  const normalized = normalizeUtilityQuestion(question);
+  const isUtility = ZH_UTILITY_QUERIES.has(normalized) || EN_UTILITY_QUERIES.has(normalized);
+  if (!isUtility) return null;
+
+  const assistantName = promptConfig?.assistantName?.trim() || 'Cregis AI Assistant';
+  if (lang === 'zh') {
+    return `你好！我是 ${assistantName}，可以回答 Cregis 文档里的支付引擎、WaaS 钱包和 API 接入问题。你可以直接问具体接口、参数、签名、回调、错误码或接入步骤。`;
+  }
+  return `Hi! I'm ${assistantName}. I can help with Cregis documentation for Payment Engine, WaaS Wallet, and API integration. Ask about endpoints, parameters, signatures, callbacks, error codes, or integration steps.`;
+}
+
+function normalizeUtilityQuestion(question: string): string {
+  return question
+    .trim()
+    .toLowerCase()
+    .replace(/[\s"'`~!@#$%^&*_\-+=|\\/.,;:?[{\]}，。！？、；：“”‘’（）【】《》<>]+/g, '');
 }
 
 const CITATION_MARKER_IN_ANSWER = /\[(cit_\d+)\]/g;
