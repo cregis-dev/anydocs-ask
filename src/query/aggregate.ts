@@ -1,23 +1,21 @@
 /**
  * Subtree aggregation + lang routing — ARCH §6 step 5.
  *
- * Decides one of three outcomes for a top-K reranked list:
+ * Decides one of two outcomes for a top-K reranked list:
  *
- *   A. answer-same-lang   — same-lang slice has signal AND a single subtree
- *                           clearly dominates (max share ≥ SUBTREE_DOMINANCE),
- *                           OR top-2 subtree share difference is large enough
- *                           that we can safely pick the leader.
- *   B. clarify            — same-lang slice has signal AND top-2 subtree
- *                           shares are close (Δ < SUBTREE_SPREAD); we ask
- *                           the user to pick. Options are constrained to
- *                           same-lang subtrees (PRD §8 #13).
- *   C. translate-fallback — same-lang slice is empty, OR even the strongest
+ *   A. answer-same-lang   — same-lang slice has signal. When multiple
+ *                           subtrees are close, we still answer with the
+ *                           same-lang context instead of blocking on an
+ *                           automatic section picker; current-page/title
+ *                           tiebreakers only choose the reported dominant
+ *                           subtree.
+ *   B. translate-fallback — same-lang slice is empty, OR even the strongest
  *                           same-lang hit is too weak (max RRF < 0.05). We
  *                           use the cross-lang top-K and the LLM is told to
  *                           translate (PRD §4.8).
  *
- * The thresholds (0.55 dominance, 0.25 spread tuned via eval round-1, and
- * 0.01 RRF floor recalibrated below) are baked as code constants. We do
+ * The thresholds (0.55 dominance, 0.25 spread retained as a near-tie marker,
+ * and 0.01 RRF floor recalibrated below) are baked as code constants. We do
  * NOT expose them via anydocs.ask.json: tuning needs cross-project signal
  * we don't yet have, and the dogfood-driven adjustments so far have all
  * been in-tree. Revisit when feedback loop data warrants per-project tuning.
@@ -42,7 +40,6 @@ export const TOP_K_FOR_AGGREGATION = 10;
 
 export type AggregateOutcome =
   | { kind: 'answer-same-lang'; pick: RerankedChunk[]; dominantSubtree: string | null }
-  | { kind: 'clarify'; sameLangChunks: RerankedChunk[]; topSubtrees: SubtreeShare[] }
   | { kind: 'translate-fallback'; pick: RerankedChunk[] };
 
 export type SubtreeShare = {
@@ -108,8 +105,11 @@ export function aggregate(
     };
   }
   if (top2 && top1.share - top2.share < SUBTREE_SPREAD) {
-    // Two competing subtrees with similar weight — normally we'd ask the user
-    // to clarify. Two tiebreakers skip the clarify step:
+    // Two competing subtrees with similar weight. Earlier builds returned a
+    // `clarify` result here, but that blocked common task-oriented docs
+    // questions and especially multi-turn follow-ups. We now answer directly
+    // with the same-lang context. Two tiebreakers still choose the reported
+    // dominant subtree when possible:
     //
     //   1. current-page subtree: the user is already in a section; stay there.
     //   2. title-match subtree: the query explicitly names a page title, so the
@@ -136,7 +136,11 @@ export function aggregate(
         };
       }
     }
-    return { kind: 'clarify', sameLangChunks: sameLang, topSubtrees: shares };
+    return {
+      kind: 'answer-same-lang',
+      pick: sameLang,
+      dominantSubtree: top1.subtree_root,
+    };
   }
   // Otherwise: leader by spread is clear enough to answer with.
   return {

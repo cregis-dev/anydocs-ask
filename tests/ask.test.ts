@@ -1256,10 +1256,10 @@ test('PRD §8 #12 — same-lang context wins over cross-lang via lang_boost', as
 });
 
 // ---------------------------------------------------------------------------
-// PRD §8 #13 — clarify keeps options same-lang
+// Automatic clarify is disabled: split intent still answers.
 // ---------------------------------------------------------------------------
 
-test('PRD §8 #13 — split intent across two zh subtrees yields a same-lang clarify', async () => {
+test('ask: split intent across two zh subtrees answers instead of auto-clarifying', async () => {
   const ctx = await bootstrap(async (root) => {
     await writePage(root, 'zh', {
       id: 'frontend-auth',
@@ -1291,22 +1291,12 @@ test('PRD §8 #13 — split intent across two zh subtrees yields a same-lang cla
   });
   try {
     const r = await ask(ctx, { question: '鉴权' });
-    assert.equal(r.type, 'clarify', `expected clarify, got ${JSON.stringify(r)}`);
-    if (r.type === 'clarify') {
+    assert.equal(r.type, 'answer', `expected answer, got ${JSON.stringify(r)}`);
+    if (r.type === 'answer') {
       assert.equal(r.answer_lang, 'zh');
-      assert.ok(r.options.length >= 2, 'must offer at least two same-lang subtrees');
-      const subtrees = new Set<string>();
-      for (const opt of r.options) {
-        assert.equal(opt.lang, 'zh', 'every clarify option must be same-lang');
-        assert.ok(opt.scope_id);
-        assert.ok(opt.label);
-        assert.ok(opt.breadcrumb.length >= 1);
-        subtrees.add(opt.scope_id);
-      }
-      assert.ok(subtrees.has('frontend'));
-      assert.ok(subtrees.has('backend'));
-      // LLM must not have been called — clarify short-circuits before generation.
-      assert.equal(ctx.llm.calls.length, 0);
+      assert.ok(r.citations.some((citation) => citation.page_id === 'frontend-auth'));
+      assert.ok(r.citations.some((citation) => citation.page_id === 'backend-auth'));
+      assert.equal(ctx.llm.calls.length, 1, 'answer path should call the LLM');
     }
   } finally {
     await ctx.cleanup();
