@@ -136,14 +136,7 @@ function buildCitationUrl(chunk: RerankedChunk): string | null {
 }
 
 function publicCitationPageUrl(chunk: RerankedChunk): string {
-  const pageUrl = chunk.page_url!;
-  if (!chunk.page_id.startsWith('api-') || !pageUrl.includes('/reference/')) {
-    return pageUrl;
-  }
-  const normalized = pageUrl.replace(/\/+$/, '');
-  const operationSlugMatch = normalized.match(/\/(?:get|post|put|patch|delete|options|head)-[^/]+$/i);
-  if (!operationSlugMatch) return pageUrl;
-  return normalized.slice(0, operationSlugMatch.index);
+  return chunk.page_url!;
 }
 
 function snippetFromChunk(text: string): string {

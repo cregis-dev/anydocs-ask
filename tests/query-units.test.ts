@@ -293,7 +293,9 @@ test('LLMIntentRouter: follows the LLM route for checkout follow-up rewrites', a
   assert.equal(route.effectiveQuestion, '/api/v2/checkout checkout_url valid_time 那它过期时间怎么设置？');
   assert.equal(route.apiIntent, true);
   assert.equal(route.signatureAuthIntent, false);
-  assert.deepEqual(route.apiReferenceHints, ['checkout checkout_url valid_time', 'POST /api/v2/checkout']);
+  assert.ok(route.apiReferenceHints.includes('checkout checkout_url valid_time'));
+  assert.ok(route.apiReferenceHints.includes('POST /api/v2/checkout'));
+  assert.ok(route.apiReferenceHints.includes('checkout'));
   assert.deepEqual(route.apiReferenceVersionPrefs, ['v2']);
   assert.match(llm.calls[0]!.systemPrompt, /ANYDOCS_INTENT_ROUTER_V1/);
   assert.match(llm.calls[0]!.userPrompt, /checkout_url/);
@@ -332,6 +334,211 @@ test('LLMIntentRouter: standalone signature route can ignore unrelated history',
   assert.equal(route.signatureAuthIntent, true);
   assert.deepEqual(route.supplementalContextHints, ['authentication signature API_KEY MD5 sign empty values lexicographical order']);
   assert.deepEqual(route.supplementalPageIds, ['authentication', 'webhook-mechanism']);
+});
+
+test('LLMIntentRouter: adds intent default pages when the LLM omits them', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: 'Can I use localhost as my callback_url while testing Cregis webhooks?',
+    intent: 'webhook_status',
+    product: 'payment_engine',
+    retrieval: {
+      prefer_api_reference: false,
+      api_reference_hints: [],
+      supplemental_context_hints: ['callback_url localhost success'],
+      supplemental_page_ids: [],
+      api_versions: [],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: 'Can I use localhost as my callback_url while testing Cregis webhooks?',
+    lang: 'en',
+  });
+
+  assert.equal(route.apiIntent, false);
+  assert.deepEqual(route.supplementalPageIds, [
+    'webhook-mechanism',
+    'waas-quickstart-30min',
+    'payment-engine-quickstart-30min',
+  ]);
+});
+
+test('LLMIntentRouter: does not turn generic error troubleshooting into API-reference intent', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: 'Cregis API 返回不是 00000 时应该先看哪些错误码？',
+    intent: 'error_troubleshooting',
+    product: 'general',
+    retrieval: {
+      prefer_api_reference: true,
+      api_reference_hints: ['error codes', '00000', 'signature', 'whitelist'],
+      supplemental_context_hints: [],
+      supplemental_page_ids: [],
+      api_versions: [],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: 'Cregis API 返回不是 00000 时应该先看哪些错误码？',
+    lang: 'zh',
+  });
+
+  assert.equal(route.apiIntent, false);
+  assert.deepEqual(route.supplementalPageIds, [
+    'error-codes',
+    'authentication',
+    'waas-setup',
+    'payment-engine-setup',
+  ]);
+});
+
+test('LLMIntentRouter: keeps endpoint-specific signature questions API-aware', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: 'For a WaaS /api/v1/payout request, show the ordered MD5 string.',
+    intent: 'signature_auth',
+    product: 'waas',
+    retrieval: {
+      prefer_api_reference: false,
+      api_reference_hints: ['/api/v1/payout', 'third_party_id', 'MD5'],
+      supplemental_context_hints: [],
+      supplemental_page_ids: [],
+      api_versions: ['v1'],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: 'For a WaaS /api/v1/payout request, show the ordered MD5 string.',
+    lang: 'en',
+  });
+
+  assert.equal(route.apiIntent, true);
+  assert.deepEqual(route.supplementalPageIds, ['authentication', 'webhook-mechanism']);
+});
+
+test('LLMIntentRouter: keeps endpoint-specific webhook status questions API-aware', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: 'event_type and data.status mapping via POST /api/v2/order/info',
+    intent: 'webhook_status',
+    product: 'payment_engine',
+    retrieval: {
+      prefer_api_reference: false,
+      api_reference_hints: ['order info', 'data.status', 'event_type', 'POST /api/v2/order/info'],
+      supplemental_context_hints: [],
+      supplemental_page_ids: [],
+      api_versions: ['v2'],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: 'event_type 和 data.status 为什么名字不一样？',
+    lang: 'zh',
+  });
+
+  assert.equal(route.apiIntent, true);
+  assert.ok(route.apiReferenceHints.includes('status'));
+});
+
+test('LLMIntentRouter: normalizes token identifier routes to include the coins endpoint', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: 'How do I find token_id and chain_id for USDT payouts?',
+    intent: 'tokens_currencies',
+    product: 'waas',
+    retrieval: {
+      prefer_api_reference: true,
+      api_reference_hints: ['token_id', 'chain_id', 'currency'],
+      supplemental_context_hints: [],
+      supplemental_page_ids: [],
+      api_versions: ['v1'],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: 'How do I find token_id and chain_id for USDT payouts?',
+    lang: 'en',
+  });
+
+  assert.ok(route.apiReferenceHints.includes('coins'));
+  assert.ok(route.apiReferenceHints.includes('POST /api/v1/coins'));
+  assert.equal(route.apiIntent, true);
+});
+
+test('LLMIntentRouter: expands bare API paths into searchable operation hints', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: 'For a WaaS /api/v1/payout request, show the ordered MD5 string.',
+    intent: 'signature_auth',
+    product: 'waas',
+    retrieval: {
+      prefer_api_reference: false,
+      api_reference_hints: ['/api/v1/payout', 'MD5'],
+      supplemental_context_hints: [],
+      supplemental_page_ids: [],
+      api_versions: ['v1'],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: 'For a WaaS /api/v1/payout request, show the ordered MD5 string.',
+    lang: 'en',
+  });
+
+  assert.ok(route.apiReferenceHints.includes('payout'));
+  assert.ok(route.apiReferenceHints.includes('POST /api/v1/payout'));
+});
+
+test('LLMIntentRouter: maps valid_time questions back to the checkout endpoint', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: 'If a Payment Engine user does not pay before valid_time, how should I confirm final status?',
+    intent: 'payment_flow',
+    product: 'payment_engine',
+    retrieval: {
+      prefer_api_reference: true,
+      api_reference_hints: ['order info', 'data.status', 'POST /api/v2/order/info'],
+      supplemental_context_hints: ['valid_time', 'callback', 'order status'],
+      supplemental_page_ids: ['payment-engine-quickstart-30min', 'pe-business-flow'],
+      api_versions: ['v2'],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: 'If a Payment Engine user does not pay before `valid_time`, how should I confirm the final order status by callback or API?',
+    lang: 'en',
+  });
+
+  assert.equal(route.apiIntent, true);
+  assert.ok(route.apiReferenceHints.includes('POST /api/v2/order/info'));
+  assert.ok(route.apiReferenceHints.includes('POST /api/v2/checkout'));
+  assert.ok(route.apiReferenceHints.includes('checkout'));
+});
+
+test('LLMIntentRouter: normalizes user-deposit-address withdrawal routes to sub_address_withdrawal', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: 'Withdraw from a specific user deposit address instead of default payout wallet.',
+    intent: 'api_reference',
+    product: 'waas',
+    retrieval: {
+      prefer_api_reference: true,
+      api_reference_hints: ['payout', 'from_address', 'user deposit address', 'POST /api/v1/payout'],
+      supplemental_context_hints: [],
+      supplemental_page_ids: [],
+      api_versions: ['v1'],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: 'Withdraw from a specific user deposit address instead of default payout wallet.',
+    lang: 'en',
+  });
+
+  assert.ok(route.apiReferenceHints.includes('sub_address_withdrawal'));
+  assert.ok(route.apiReferenceHints.includes('POST /api/v1/sub_address_withdrawal'));
+  assert.equal(route.apiIntent, true);
 });
 
 test('LLMIntentRouter: malformed route falls back to standalone general docs', async () => {
@@ -1364,7 +1571,7 @@ test('postprocess: citation URL appends heading anchor when in_page_path encodes
   assert.equal(out.citations[0]!.url, '/frontend/auth#bearer-token');
 });
 
-test('postprocess: OpenAPI synthetic citations link to public reference page', () => {
+test('postprocess: OpenAPI synthetic citations keep operation-level URL', () => {
   const chunkById = new Map<string, RerankedChunk>([
     [
       'cit_1',
@@ -1376,7 +1583,7 @@ test('postprocess: OpenAPI synthetic citations link to public reference page', (
     ],
   ]);
   const out = postprocess({ answerLang: 'zh', rawAnswer: '... [cit_1]', chunkById });
-  assert.equal(out.citations[0]!.url, '/zh/reference/payment-engine-api');
+  assert.equal(out.citations[0]!.url, '/zh/reference/payment-engine-api/post-api-v2-order-info#response-fields');
 });
 
 test('postprocess: cit_N markers renumbered to 1..K matching citations[] order', () => {

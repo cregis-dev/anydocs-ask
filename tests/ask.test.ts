@@ -226,6 +226,54 @@ test('ask: greeting plus a documentation question still uses retrieved citations
   }
 });
 
+test('askWithTrace: captures the LLM intent route used for retrieval', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', {
+      id: 'authentication',
+      title: '认证与签名',
+      body: 'Cregis API 签名需要按参数 key 字典序排序，排除 sign 和空值后拼接，并使用 API_KEY 做 MD5。',
+    });
+    await writeNav(root, 'zh', { version: 1, items: [{ type: 'page', pageId: 'authentication' }] });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      const markers = input.userPrompt.match(/\[cit_\d+\]/g) ?? [];
+      return `签名参数按 key 字典序排序，排除 sign 和空值后再做 MD5 ${markers[0] ?? ''}.`;
+    });
+    const { trace } = await askWithTrace(
+      {
+        ...ctx,
+        intentRouter: {
+          async route(args) {
+            return {
+              originalQuestion: args.question,
+              effectiveQuestion: args.question,
+              usesHistory: false,
+              rewritten: false,
+              intent: 'signature_auth',
+              product: 'general',
+              apiIntent: false,
+              signatureAuthIntent: true,
+              projectSetupIntent: false,
+              apiReferenceHints: [],
+              supplementalContextHints: ['authentication signature API_KEY MD5'],
+              supplementalPageIds: ['authentication'],
+              apiReferenceVersionPrefs: [],
+              reason: 'test route',
+            };
+          },
+        },
+      },
+      { question: 'Cregis API 签名参数怎么拼接？' },
+    );
+
+    assert.equal(trace.intent_route?.intent, 'signature_auth');
+    assert.deepEqual(trace.intent_route?.supplementalPageIds, ['authentication']);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 // Regression for codex eval round-2: `no_citations` used to surface the
 // internal phrase "LLM response contained no valid citations" directly to
 // users. The message is now user-friendly and lang-aware; the internal
@@ -603,6 +651,105 @@ test('ask: checkout field answers append API reference citation when the model c
       assert.ok(r.answer_md.includes('/api/v2/checkout'));
       assert.ok(r.citations.some((c) => c.page_id === 'api-payment-engine-api-post-api-v2-checkout'));
       assert.ok(r.citations.some((c) => c.page_id === 'payment-engine-quickstart-30min'));
+    }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: multi-operation API answers append each missing endpoint citation', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'en', {
+      id: 'payment-engine-quickstart-30min',
+      title: 'Payment Engine 30-Minute Quickstart',
+      body: 'Use callback-first + query fallback. When no callback arrives, call /api/v2/order/info to confirm data.status. The checkout flow creates an order and returns cregis_id and checkout_url.',
+    });
+    await writePage(root, 'en', {
+      id: 'pe-business-flow',
+      title: 'Payment Engine Business Flow',
+      body: 'Order creation starts a countdown. If the user does not pay before valid_time, the order can expire and callbacks may report event_type expired.',
+    });
+    await writePage(root, 'en', {
+      id: 'api-payment-engine-api-post-api-v2-checkout',
+      title: 'POST /api/v2/checkout — Create Order',
+      body: 'API reference: Payment Engine API. HTTP Request POST /api/v2/checkout. Request fields: valid_time, callback_url. Response fields: cregis_id, checkout_url.',
+    });
+    await writePage(root, 'en', {
+      id: 'api-payment-engine-api-post-api-v2-order-info',
+      title: 'POST /api/v2/order/info — Query Order Information',
+      body: 'API reference: Payment Engine API. HTTP Request POST /api/v2/order/info. Request fields: cregis_id. Response fields: data.status.',
+    });
+    await writeNav(root, 'en', {
+      version: 1,
+      items: [
+        {
+          type: 'section',
+          id: 'payment-engine',
+          title: 'Payment Engine',
+          children: [
+            { type: 'page', pageId: 'payment-engine-quickstart-30min' },
+            { type: 'page', pageId: 'pe-business-flow' },
+          ],
+        },
+        {
+          type: 'section',
+          id: 'api-reference',
+          title: 'API Reference',
+          children: [
+            { type: 'page', pageId: 'api-payment-engine-api-post-api-v2-checkout' },
+            { type: 'page', pageId: 'api-payment-engine-api-post-api-v2-order-info' },
+          ],
+        },
+      ],
+    });
+  });
+  try {
+    ctx.llm.setResponder((input) => {
+      assert.match(input.userPrompt, /POST \/api\/v2\/checkout/);
+      assert.match(input.userPrompt, /POST \/api\/v2\/order\/info/);
+      const orderInfoMarker =
+        input.userPrompt.match(/\[(cit_\d+)\][^\n]*POST \/api\/v2\/order\/info/)?.[1] ?? 'cit_2';
+      return `Set valid_time on POST /api/v2/checkout and store cregis_id. If the order expires and no callback arrives, use callback-first plus query fallback with POST /api/v2/order/info to inspect data.status [${orderInfoMarker}].`;
+    });
+    const { result: r } = await askWithTrace(
+      {
+        ...ctx,
+        intentRouter: {
+          async route(args) {
+            return {
+              originalQuestion: args.question,
+              effectiveQuestion: args.question,
+              usesHistory: false,
+              rewritten: false,
+              intent: 'payment_flow',
+              product: 'payment_engine',
+              apiIntent: true,
+              signatureAuthIntent: false,
+              projectSetupIntent: false,
+              apiReferenceHints: [
+                'valid_time',
+                'checkout',
+                'POST /api/v2/checkout',
+                'order info',
+                'data.status',
+                'POST /api/v2/order/info',
+              ],
+              supplementalContextHints: ['callback-first query fallback'],
+              supplementalPageIds: ['payment-engine-quickstart-30min', 'pe-business-flow'],
+              apiReferenceVersionPrefs: ['v2'],
+              reason: 'test route',
+            };
+          },
+        },
+      },
+      {
+        question: 'If a Payment Engine user does not pay before valid_time, how should I confirm the final order status by callback or API?',
+      },
+    );
+    assert.equal(r.type, 'answer', JSON.stringify(r));
+    if (r.type === 'answer') {
+      assert.ok(r.citations.some((c) => c.page_id === 'api-payment-engine-api-post-api-v2-checkout'));
+      assert.ok(r.citations.some((c) => c.page_id === 'api-payment-engine-api-post-api-v2-order-info'));
     }
   } finally {
     await ctx.cleanup();

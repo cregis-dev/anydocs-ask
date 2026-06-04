@@ -22,7 +22,13 @@ import { join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { Runtime } from '../server/runtime.ts';
 import { loadConfig } from '../config.ts';
-import { askWithTrace, askWithTraceStream, type AskDeps, type AskWithTraceResult } from '../query/answer.ts';
+import {
+  askWithTrace,
+  askWithTraceStream,
+  type AskDeps,
+  type AskTrace,
+  type AskWithTraceResult,
+} from '../query/answer.ts';
 import { readApproved } from '../golden/store.ts';
 import {
   failedCase,
@@ -46,6 +52,20 @@ export type EvalOptions = {
    * NDJSON endpoint so the Eval-tab UI can render a real progress bar.
    */
   onProgress?: (event: EvalProgressEvent) => void;
+};
+
+export type EvalCaseTraceRecord = {
+  schema_version: 1;
+  case_id: string;
+  index: number;
+  total: number;
+  query: string;
+  lang: string;
+  request: AskRequest;
+  expected: GoldenCase['expected'];
+  score: CaseResult;
+  result: AskResult;
+  trace: AskTrace | null;
 };
 
 export type EvalProgressEvent =
@@ -109,6 +129,7 @@ export async function runEval(opts: EvalOptions): Promise<number> {
   // 3. Run cases.
   const deps = askDepsForEval(runtime);
   const results: CaseResult[] = [];
+  const caseTraces: EvalCaseTraceRecord[] = [];
   for (let i = 0; i < cases.length; i++) {
     const c = cases[i]!;
     opts.onProgress?.({
@@ -128,6 +149,13 @@ export async function runEval(opts: EvalOptions): Promise<number> {
       caseResult = failedCase(c, performance.now() - t1);
     }
     results.push(caseResult);
+    caseTraces.push(buildEvalCaseTraceRecord({
+      c,
+      index: i,
+      total: cases.length,
+      caseResult,
+      traced: traced ?? null,
+    }));
     opts.onProgress?.({
       type: 'case-done',
       i, total: cases.length,
@@ -156,9 +184,16 @@ export async function runEval(opts: EvalOptions): Promise<number> {
   const baseline = loadBaseline(stateRoot, opts.baselinePath);
 
   // 6. Write report.
-  const reportPath = writeReport(stateRoot, { summary, results, totalMs, baseline });
+  const { reportPath, caseTracePath } = writeReport(stateRoot, {
+    summary,
+    results,
+    caseTraces,
+    totalMs,
+    baseline,
+  });
   process.stdout.write(
     `anydocs-ask eval: wrote ${reportPath}\n` +
+      `anydocs-ask eval: wrote ${caseTracePath}\n` +
       `  MRR=${summary.mrr.toFixed(2)}  H@1=${summary.hit_at_1.toFixed(2)}  H@3=${summary.hit_at_3.toFixed(2)}  H@5=${summary.r_at_5.toFixed(2)}  CP@5=${summary.context_precision_at_5.toFixed(2)}  CR@5=${summary.context_recall_at_5 === null ? '—' : summary.context_recall_at_5.toFixed(2)}  Cit=${summary.citation_pass.toFixed(2)}  Kind=${summary.kind_pass.toFixed(2)}  Api=${summary.api_rule_pass === null ? '—' : summary.api_rule_pass.toFixed(2)}  (${results.length} cases, ${totalMs}ms)\n`,
   );
   opts.onProgress?.({ type: 'done', reportPath, totalMs, summary });
@@ -230,6 +265,34 @@ function goldenToAskRequest(c: GoldenCase): AskRequest {
   return req;
 }
 
+export function buildEvalCaseTraceRecord(args: {
+  c: GoldenCase;
+  index: number;
+  total: number;
+  caseResult: CaseResult;
+  traced: AskWithTraceResult | null;
+}): EvalCaseTraceRecord {
+  const result = args.traced?.result ?? {
+    type: 'error',
+    code: args.caseResult.error_code ?? 'exception',
+    message: args.caseResult.error_message ?? 'eval case failed before result',
+    detail: args.caseResult.error_detail,
+  };
+  return {
+    schema_version: 1,
+    case_id: args.c.id,
+    index: args.index,
+    total: args.total,
+    query: args.c.query,
+    lang: args.c.lang,
+    request: goldenToAskRequest(args.c),
+    expected: args.c.expected,
+    score: args.caseResult,
+    result,
+    trace: args.traced?.trace ?? null,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Baseline + report
 // ---------------------------------------------------------------------------
@@ -264,22 +327,36 @@ function writeReport(
   args: {
     summary: EvalSummary;
     results: CaseResult[];
+    caseTraces: EvalCaseTraceRecord[];
     totalMs: number;
     baseline: Baseline;
   },
-): string {
+): { reportPath: string; caseTracePath: string } {
   const dir = join(stateRoot, 'reports');
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const date = new Date().toISOString().slice(0, 10);
-  const path = join(dir, `${date}-eval.md`);
+  const reportPath = join(dir, `${date}-eval.md`);
+  const caseTracePath = join(dir, `${date}-eval.cases.jsonl`);
   const md = renderReport(date, args);
-  writeFileSync(path, md, 'utf8');
-  return path;
+  writeFileSync(reportPath, md, 'utf8');
+  writeCaseTraceJsonl(caseTracePath, args.caseTraces);
+  return { reportPath, caseTracePath };
+}
+
+export function writeCaseTraceJsonl(path: string, records: EvalCaseTraceRecord[]): void {
+  const body = records.map((record) => JSON.stringify(record)).join('\n');
+  writeFileSync(path, body.length > 0 ? `${body}\n` : '', 'utf8');
 }
 
 function renderReport(
   date: string,
-  args: { summary: EvalSummary; results: CaseResult[]; totalMs: number; baseline: Baseline },
+  args: {
+    summary: EvalSummary;
+    results: CaseResult[];
+    caseTraces: EvalCaseTraceRecord[];
+    totalMs: number;
+    baseline: Baseline;
+  },
 ): string {
   const { summary, results, totalMs, baseline } = args;
   const fmt = (x: number): string => x.toFixed(2);
@@ -294,6 +371,7 @@ function renderReport(
   lines.push(`# Eval — ${date}`);
   lines.push('');
   lines.push(`Cases: ${summary.n}  Wall time: ${totalMs}ms`);
+  lines.push(`Case traces: \`${date}-eval.cases.jsonl\``);
   if (baseline) {
     lines.push(
       `Baseline: ${baseline.date} (MRR=${fmtOpt(baseRow!.mrr)}, H@1=${fmtOpt(baseRow!.hit_at_1)}, CP@5=${fmtOpt(baseRow!.context_precision_at_5)}, CR@5=${fmtOpt(baseRow!.context_recall_at_5)}, Cit=${fmt(baseRow!.citation_pass)}, Kind=${fmtOpt(baseRow!.kind_pass)}, Api=${fmtOpt(baseRow!.api_rule_pass)})`,
