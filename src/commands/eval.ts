@@ -1,16 +1,14 @@
 /**
  * `anydocs-ask eval <projectRoot>` — runs the project's approved Golden cases
- * against an in-process Runtime, computes ARCH §16.3.2 three metrics, and
+ * against an in-process Runtime, computes retrieval / citation / answer
+ * diagnostics, and
  * writes a Markdown report under `<state>/reports/<YYYY-MM-DD>-eval.md`.
  *
- * Metric semantics (locked 2026-05-08, mirrors ARCH §16.3.2):
- *   - R@5             = mean over cases of [ retrieved top-5 pages ∩ expected.must_cite_pages ≠ ∅ ]
- *                       Computed from the trace (always available).
- *   - Citation-pass   = mean over cases of [ kind=='answer' ∧ {answer.citations.pages} ⊆ expected.must_cite_pages ]
- *                       clarify / error responses count as fail (no citations to validate).
- *   - Answer-rule-pass= mean over cases of [ kind=='answer' ∧ all(must_contain) ∧ none(forbid_contain) ]
- *                       clarify / error responses count as fail. Substring matching is
- *                       case-insensitive ASCII-folded; CJK is byte-substring.
+ * Report semantics:
+ *   - Core quality: MRR, Hit@1, Context-R@5, citation anchor, Kind, API rule.
+ *   - Retrieval diagnostics: Hit@3, Hit@5, Context-P@5.
+ *   - Citation calibration: legacy strict Citation-pass and unexpected pages.
+ *   - Answer text diagnostics: brittle keyword/regex overlap.
  *
  * The eval driver builds a Runtime in-process (warm-up loads the embedder +
  * runs fullReindex once). Each case round-trips through `askWithTrace`; the
@@ -85,6 +83,8 @@ export type EvalProgressEvent =
       hit_at_3: boolean;
       mrr: number;
       context_precision_at_5: number;
+      citation_anchor_pass: boolean;
+      unexpected_citation_rate: number;
       citation_pass: boolean;
       /** Diagnostic only — see scoring.ts for the deprecation note. */
       answer_rule_pass: boolean;
@@ -167,6 +167,8 @@ export async function runEval(opts: EvalOptions): Promise<number> {
       hit_at_3: caseResult.hit_at_3,
       mrr: caseResult.mrr,
       context_precision_at_5: caseResult.context_precision_at_5,
+      citation_anchor_pass: caseResult.citation_anchor_pass,
+      unexpected_citation_rate: caseResult.unexpected_citation_rate,
       citation_pass: caseResult.citation_pass,
       answer_rule_pass: caseResult.answer_rule_pass,
     });
@@ -194,7 +196,7 @@ export async function runEval(opts: EvalOptions): Promise<number> {
   process.stdout.write(
     `anydocs-ask eval: wrote ${reportPath}\n` +
       `anydocs-ask eval: wrote ${caseTracePath}\n` +
-      `  MRR=${summary.mrr.toFixed(2)}  H@1=${summary.hit_at_1.toFixed(2)}  H@3=${summary.hit_at_3.toFixed(2)}  H@5=${summary.r_at_5.toFixed(2)}  CP@5=${summary.context_precision_at_5.toFixed(2)}  CR@5=${summary.context_recall_at_5 === null ? '—' : summary.context_recall_at_5.toFixed(2)}  Cit=${summary.citation_pass.toFixed(2)}  Kind=${summary.kind_pass.toFixed(2)}  Api=${summary.api_rule_pass === null ? '—' : summary.api_rule_pass.toFixed(2)}  (${results.length} cases, ${totalMs}ms)\n`,
+      `  MRR=${summary.mrr.toFixed(2)}  H@1=${summary.hit_at_1.toFixed(2)}  CR@5=${summary.context_recall_at_5 === null ? '—' : summary.context_recall_at_5.toFixed(2)}  Anchor=${summary.citation_anchor_pass.toFixed(2)}  Kind=${summary.kind_pass.toFixed(2)}  Api=${summary.api_rule_pass === null ? '—' : summary.api_rule_pass.toFixed(2)}  (retrieval: H@3=${summary.hit_at_3.toFixed(2)} H@5=${summary.r_at_5.toFixed(2)} CP@5=${summary.context_precision_at_5.toFixed(2)}; citation: legacy=${summary.citation_pass.toFixed(2)} unexpected=${summary.unexpected_citation_rate.toFixed(2)}; ${results.length} cases, ${totalMs}ms)\n`,
   );
   opts.onProgress?.({ type: 'done', reportPath, totalMs, summary });
   return 0;
@@ -348,7 +350,7 @@ export function writeCaseTraceJsonl(path: string, records: EvalCaseTraceRecord[]
   writeFileSync(path, body.length > 0 ? `${body}\n` : '', 'utf8');
 }
 
-function renderReport(
+export function renderReport(
   date: string,
   args: {
     summary: EvalSummary;
@@ -374,13 +376,13 @@ function renderReport(
   lines.push(`Case traces: \`${date}-eval.cases.jsonl\``);
   if (baseline) {
     lines.push(
-      `Baseline: ${baseline.date} (MRR=${fmtOpt(baseRow!.mrr)}, H@1=${fmtOpt(baseRow!.hit_at_1)}, CP@5=${fmtOpt(baseRow!.context_precision_at_5)}, CR@5=${fmtOpt(baseRow!.context_recall_at_5)}, Cit=${fmt(baseRow!.citation_pass)}, Kind=${fmtOpt(baseRow!.kind_pass)}, Api=${fmtOpt(baseRow!.api_rule_pass)})`,
+      `Baseline: ${baseline.date} (MRR=${fmtOpt(baseRow!.mrr)}, H@1=${fmtOpt(baseRow!.hit_at_1)}, CR@5=${fmtOpt(baseRow!.context_recall_at_5)}, Anchor=${fmtOpt(baseRow!.citation_anchor_pass)}, Kind=${fmtOpt(baseRow!.kind_pass)}, Api=${fmtOpt(baseRow!.api_rule_pass)})`,
     );
   } else {
     lines.push(`Baseline: (none — first run)`);
   }
   lines.push('');
-  lines.push('## Headline metrics');
+  lines.push('## Core quality');
   lines.push('');
   lines.push('| metric           | value | baseline | Δ     |');
   lines.push('|------------------|-------|----------|-------|');
@@ -391,22 +393,10 @@ function renderReport(
     `| Hit@1            | ${fmt(summary.hit_at_1)}  | ${baseRow ? fmtOpt(baseRow.hit_at_1) : '—   '}    | ${deltaOpt(summary.hit_at_1, baseRow?.hit_at_1)} |`,
   );
   lines.push(
-    `| Hit@3            | ${fmt(summary.hit_at_3)}  | ${baseRow ? fmtOpt(baseRow.hit_at_3) : '—   '}    | ${deltaOpt(summary.hit_at_3, baseRow?.hit_at_3)} |`,
-  );
-  // Hit@5 is the same metric as R@5 — we surface it under the Hit@K name in
-  // the headline so the 1/3/5 progression reads as one ladder, and drop R@5
-  // from the diagnostic section to avoid double-reporting the same number.
-  lines.push(
-    `| Hit@5            | ${fmt(summary.r_at_5)}  | ${baseRow ? fmt(baseRow.r_at_5) : '—   '}    | ${delta(summary.r_at_5, baseRow?.r_at_5)} |`,
-  );
-  lines.push(
-    `| Context-P@5      | ${fmt(summary.context_precision_at_5)}  | ${baseRow ? fmtOpt(baseRow.context_precision_at_5) : '—   '}    | ${deltaOpt(summary.context_precision_at_5, baseRow?.context_precision_at_5)} |`,
-  );
-  lines.push(
     `| Context-R@5      | ${fmtOpt(summary.context_recall_at_5)}  | ${baseRow ? fmtOpt(baseRow.context_recall_at_5) : '—   '}    | ${deltaOpt(summary.context_recall_at_5, baseRow?.context_recall_at_5)} |`,
   );
   lines.push(
-    `| Citation-pass    | ${fmt(summary.citation_pass)}  | ${baseRow ? fmt(baseRow.citation_pass) : '—   '}    | ${delta(summary.citation_pass, baseRow?.citation_pass)} |`,
+    `| Citation-anchor  | ${fmt(summary.citation_anchor_pass)}  | ${baseRow ? fmtOpt(baseRow.citation_anchor_pass) : '—   '}    | ${deltaOpt(summary.citation_anchor_pass, baseRow?.citation_anchor_pass)} |`,
   );
   lines.push(
     `| Kind-pass        | ${fmt(summary.kind_pass)}  | ${baseRow ? fmtOpt(baseRow.kind_pass) : '—   '}    | ${delta(summary.kind_pass, baseRow?.kind_pass)} |`,
@@ -420,7 +410,47 @@ function renderReport(
     if (summary.context_recall_n > 0) lines.push(`Context-R@5 cases: ${summary.context_recall_n}`);
   }
   lines.push('');
-  lines.push('## Diagnostics (not pass/fail signals)');
+  lines.push('## Retrieval diagnostics');
+  lines.push('');
+  lines.push('| metric      | value | baseline | Δ     |');
+  lines.push('|-------------|-------|----------|-------|');
+  lines.push(
+    `| Hit@3       | ${fmt(summary.hit_at_3)}  | ${baseRow ? fmtOpt(baseRow.hit_at_3) : '—   '}    | ${deltaOpt(summary.hit_at_3, baseRow?.hit_at_3)} |`,
+  );
+  lines.push(
+    `| Hit@5       | ${fmt(summary.r_at_5)}  | ${baseRow ? fmt(baseRow.r_at_5) : '—   '}    | ${delta(summary.r_at_5, baseRow?.r_at_5)} |`,
+  );
+  lines.push(
+    `| Context-P@5 | ${fmt(summary.context_precision_at_5)}  | ${baseRow ? fmtOpt(baseRow.context_precision_at_5) : '—   '}    | ${deltaOpt(summary.context_precision_at_5, baseRow?.context_precision_at_5)} |`,
+  );
+  lines.push('');
+  lines.push('Hit@3 / Hit@5 expose retrieval reach, while Context-P@5 exposes top-K noise.');
+  lines.push('These are diagnostics, not final answer quality gates.');
+  lines.push('');
+  lines.push('## Citation calibration');
+  lines.push('');
+  lines.push('`Citation-anchor` is the headline signal: at least one citation points at an expected source.');
+  lines.push('`legacy Citation-pass` is stricter: every cited page must already be in the Golden must/allow list.');
+  lines.push('Use unexpected citation pages to decide whether to expand `allow_cite_pages` or fix retrieval/prompt behavior.');
+  lines.push('');
+  lines.push('| metric                   | value | baseline | Δ     |');
+  lines.push('|--------------------------|-------|----------|-------|');
+  lines.push(
+    `| legacy Citation-pass     | ${fmt(summary.citation_pass)}  | ${baseRow ? fmt(baseRow.citation_pass) : '—   '}    | ${delta(summary.citation_pass, baseRow?.citation_pass)} |`,
+  );
+  lines.push(
+    `| Unexpected-citation-rate | ${fmt(summary.unexpected_citation_rate)}  | ${baseRow ? fmtOpt(baseRow.unexpected_citation_rate) : '—   '}    | ${deltaOpt(summary.unexpected_citation_rate, baseRow?.unexpected_citation_rate)} |`,
+  );
+  const unexpectedCitationCases = results.filter((r) => r.kind === 'answer' && r.unexpected_citation_pages.length > 0);
+  if (unexpectedCitationCases.length > 0) {
+    lines.push('');
+    lines.push(`### Unexpected citation pages (${unexpectedCitationCases.length})`);
+    for (const r of unexpectedCitationCases) {
+      lines.push(`- ${r.case_id}: unexpected=[${r.unexpected_citation_pages.join(', ')}] cited=[${r.cited_pages.join(', ')}]`);
+    }
+  }
+  lines.push('');
+  lines.push('## Answer text diagnostics');
   lines.push('');
   lines.push('`answer_keyword_overlap` is substring/regex matching against the answer:');
   lines.push('brittle to synonyms (false fails) and easily keyword-stuffed (false passes).');
@@ -435,7 +465,7 @@ function renderReport(
 
   const recallFails = results.filter((r) => !r.r_at_5);
   if (recallFails.length > 0) {
-    lines.push(`## R@5 failures (${recallFails.length})`);
+    lines.push(`## Retrieval misses (${recallFails.length})`);
     for (const r of recallFails) {
       lines.push(`- ${r.case_id}: ${r.query}`);
       lines.push(`  - top5: ${r.retrieved_pages_top5.join(', ') || '(empty)'}`);
@@ -443,9 +473,18 @@ function renderReport(
     lines.push('');
   }
 
+  const anchorFails = results.filter((r) => r.kind === 'answer' && !r.citation_anchor_pass);
+  if (anchorFails.length > 0) {
+    lines.push(`## Citation-anchor failures (${anchorFails.length})`);
+    for (const r of anchorFails) {
+      lines.push(`- ${r.case_id}: cited=[${r.cited_pages.join(', ')}]`);
+    }
+    lines.push('');
+  }
+
   const citFails = results.filter((r) => r.kind === 'answer' && !r.citation_pass);
   if (citFails.length > 0) {
-    lines.push(`## Citation-pass failures (${citFails.length})`);
+    lines.push(`## Legacy strict citation failures (${citFails.length})`);
     for (const r of citFails) {
       lines.push(`- ${r.case_id}: cited=[${r.cited_pages.join(', ')}]`);
     }

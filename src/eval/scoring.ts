@@ -40,7 +40,24 @@ export type CaseResult = {
    * Phase 6 alongside Faithfulness.
    */
   context_recall_at_5: number | null;
+  /**
+   * At least one final citation points at an expected source
+   * (`must_cite_pages ∪ allow_cite_pages`). This is the headline citation
+   * signal: the answer is anchored to the approved evidence set even if it
+   * also cites extra, potentially valid pages that the Golden allowlist has
+   * not been calibrated for yet.
+   */
+  citation_anchor_pass: boolean;
+  /**
+   * Legacy strict metric: all cited pages must be in
+   * `must_cite_pages ∪ allow_cite_pages`. Kept for historical comparisons and
+   * Golden allowlist calibration, but too strict for headline quality.
+   */
   citation_pass: boolean;
+  /** Cited pages outside `must_cite_pages ∪ allow_cite_pages`. */
+  unexpected_citation_pages: string[];
+  /** unexpected_citation_pages.length / cited_pages.length, or 0 when uncited. */
+  unexpected_citation_rate: number;
   /**
    * Brittle: substring + regex matching against the LLM answer. Misses
    * synonyms and accepts keyword-stuffed wrong answers. Reported as
@@ -74,6 +91,9 @@ export type EvalSummary = {
   context_precision_at_5: number;
   context_recall_n: number;
   context_recall_at_5: number | null;
+  citation_anchor_pass: number;
+  unexpected_citation_rate: number;
+  /** Legacy strict citation metric; see {@link CaseResult.citation_pass}. */
   citation_pass: number;
   /** Diagnostic only; see {@link CaseResult.answer_rule_pass}. */
   answer_rule_pass: number;
@@ -110,7 +130,10 @@ export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): Ca
 
   const kind = result.type;
   let citedPages: string[] = [];
+  let citationAnchorPass = false;
   let citationPass = false;
+  let unexpectedCitationPages: string[] = [];
+  let unexpectedCitationRate = 0;
   let answerRulePass = false;
   let missingMustContain: string[] = [];
   let missingMustContainRegex: string[] = [];
@@ -124,6 +147,9 @@ export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): Ca
 
   if (result.type === 'answer') {
     citedPages = uniqueOrdered(result.citations.map((cit) => cit.page_id));
+    citationAnchorPass = citedPages.some((p) => allowedCitationPages.has(p));
+    unexpectedCitationPages = citedPages.filter((p) => !allowedCitationPages.has(p));
+    unexpectedCitationRate = citedPages.length === 0 ? 0 : unexpectedCitationPages.length / citedPages.length;
     citationPass = citedPages.length > 0 && citedPages.every((p) => allowedCitationPages.has(p));
 
     const md = result.answer_md;
@@ -165,7 +191,10 @@ export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): Ca
     mrr,
     context_precision_at_5,
     context_recall_at_5,
+    citation_anchor_pass: citationAnchorPass,
     citation_pass: citationPass,
+    unexpected_citation_pages: unexpectedCitationPages,
+    unexpected_citation_rate: unexpectedCitationRate,
     answer_rule_pass: answerRulePass,
     api_rule_pass: apiRulePass,
     retrieved_pages_top5: top5Pages,
@@ -200,7 +229,10 @@ export function failedCase(c: GoldenCase, latencyMs: number): CaseResult {
     mrr: 0,
     context_precision_at_5: 0,
     context_recall_at_5: c.expected.must_cite_pages.length === 0 ? null : 0,
+    citation_anchor_pass: false,
     citation_pass: false,
+    unexpected_citation_pages: [],
+    unexpected_citation_rate: 0,
     answer_rule_pass: false,
     api_rule_pass: hasApiRules ? false : null,
     retrieved_pages_top5: [],
@@ -234,6 +266,8 @@ export function summarizeResults(results: CaseResult[]): EvalSummary {
     context_recall_at_5: recallResults.length === 0
       ? null
       : mean(recallResults.map((r) => r.context_recall_at_5)),
+    citation_anchor_pass: mean(results.map((r) => (r.citation_anchor_pass ? 1 : 0))),
+    unexpected_citation_rate: mean(results.map((r) => r.unexpected_citation_rate)),
     citation_pass: mean(results.map((r) => (r.citation_pass ? 1 : 0))),
     answer_rule_pass: mean(results.map((r) => (r.answer_rule_pass ? 1 : 0))),
     kind_pass: mean(results.map((r) => (r.kind_pass ? 1 : 0))),
