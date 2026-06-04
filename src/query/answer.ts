@@ -146,6 +146,11 @@ export type AskWithTraceResult = {
   queryVector: Float32Array | null;
 };
 
+export type AskRetrievalOnlyResult = {
+  trace: AskTrace;
+  queryVector: Float32Array | null;
+};
+
 export async function ask(deps: AskDeps, req: AskRequest): Promise<AskResult> {
   return (await askWithTrace(deps, req)).result;
 }
@@ -165,20 +170,186 @@ export async function askWithTraceStream(
   return askWithTraceInternal(deps, req, hooks);
 }
 
-async function askWithTraceInternal(
+export async function retrieveOnlyWithTrace(
   deps: AskDeps,
   req: AskRequest,
-  hooks: AskStreamHooks = {},
-): Promise<AskWithTraceResult> {
-  const t0 = performance.now();
-  const emptyTrace = (): AskTrace => ({
+  hooks: Pick<AskStreamHooks, 'signal' | 'onStatus'> = {},
+): Promise<AskRetrievalOnlyResult> {
+  if (req.question === undefined || req.question === null) {
+    return { trace: emptyTrace(), queryVector: null };
+  }
+  const question = req.question.trim();
+  if (question.length === 0 || question.length > MAX_QUESTION_CHARS) {
+    return { trace: emptyTrace(), queryVector: null };
+  }
+  const scopeId = req.context?.scope_id ?? null;
+  if (scopeId !== null && !isValidScopeId(deps.db, scopeId)) {
+    return { trace: emptyTrace(), queryVector: null };
+  }
+  const queryLang = resolveQueryLang(deps.db, question, req);
+  if (utilityAnswerFor(question, queryLang, deps.promptConfig)) {
+    return { trace: emptyTrace(), queryVector: null };
+  }
+
+  throwIfAborted(hooks.signal);
+  await hooks.onStatus?.('retrieving');
+  const retrieval = await runRetrievalPipeline(deps, req, question, queryLang, hooks.signal);
+  return { trace: retrieval.trace, queryVector: retrieval.queryVector };
+}
+
+function emptyTrace(): AskTrace {
+  return {
     fused: [],
     subtree_ask_triggered: false,
     top_final_score: 0,
     confidence: 0,
     tokens_in: null,
     tokens_out: null,
+  };
+}
+
+type RetrievalPipelineOutput = {
+  activeHistory: NonNullable<AskRequest['context']>['history'];
+  apiIntent: boolean;
+  apiReferenceHintTerms: string[];
+  apiReferenceVersionPrefs: string[];
+  confidence: number;
+  entityTerms: string[] | undefined;
+  fusedTrace: AskTraceFusedChunk[];
+  historyWindow: number;
+  intentRoute: IntentRoute;
+  projectSetupIntent: boolean;
+  queryVector: Float32Array;
+  retrieved: RetrievedChunk[];
+  reranked: RerankedChunk[];
+  searchQuestion: string;
+  signatureAuthIntent: boolean;
+  supplementalPageIds: string[];
+  top_final_score: number;
+  trace: AskTrace;
+};
+
+async function runRetrievalPipeline(
+  deps: AskDeps,
+  req: AskRequest,
+  question: string,
+  queryLang: DocsLang,
+  signal?: AbortSignal,
+): Promise<RetrievalPipelineOutput> {
+  const scopeId = req.context?.scope_id ?? null;
+  const currentSubtreeRoot = null;
+  // RFC 0003 §4.2 — multi-turn history-aware retrieve query (M1).
+  // A single LLM intent router owns the semantic decisions that feed
+  // retrieval. Retrieval-only eval uses this exact helper so it measures the
+  // same route/rewrite/rank path as production Ask.
+  const history = req.context?.history ?? [];
+  const intentRouter = deps.intentRouter ?? new LLMIntentRouter(deps.llm);
+  const intentRoute = await intentRouter.route({ question, history, lang: queryLang });
+  const activeHistory = intentRoute.usesHistory ? history : [];
+  const historyWindow = activeHistory.length;
+  const searchQuestion = intentRoute.effectiveQuestion || question;
+  const apiIntent = intentRoute.apiIntent;
+  const signatureAuthIntent = intentRoute.signatureAuthIntent;
+  const retrieveQuestion = intentRoute.usesHistory
+    ? intentRoute.rewritten
+      ? intentRoute.effectiveQuestion
+      : `${activeHistory.map((h) => h.question).join('\n')}\n${question}`
+    : searchQuestion;
+
+  const embedInputs = retrieveQuestion === question ? [question] : [question, retrieveQuestion];
+  const embedded = await deps.embedder.embed(embedInputs);
+  const queryVector = embedded[0]!.vector;
+  const retrieveVector = embedded[1]?.vector ?? queryVector;
+  throwIfAborted(signal);
+
+  const ftsQuery = sanitizeFtsQuery(searchQuestion);
+  const entityTerms = extractEntityTerms(searchQuestion);
+  const projectSetupIntent = intentRoute.projectSetupIntent;
+  const apiReferenceHints = intentRoute.apiReferenceHints;
+  const supplementalContextHints = intentRoute.supplementalContextHints;
+  const supplementalPageIds = intentRoute.supplementalPageIds;
+  const apiReferenceVersionPrefs = intentRoute.apiReferenceVersionPrefs;
+  const apiReferenceHintTerms = apiReferenceHints
+    .flatMap((hint) => hint.toLowerCase().split(/\s+/))
+    .filter(Boolean);
+  const apiReferenceFtsQueries = apiReferenceHints
+    .map((hint) => sanitizeFtsQuery(hint))
+    .filter((hint): hint is string => !!hint);
+  const supplementalFtsQueries = supplementalContextHints
+    .map((hint) => sanitizeFtsQuery(hint))
+    .filter((hint): hint is string => !!hint);
+  const { chunks: retrieved, trace: retrievalTrace } = retrieveWithTrace(deps.db, {
+    queryVector: retrieveVector,
+    ftsQuery,
+    scopeId,
+    entityTerms,
+    currentPageId: null,
+    currentPageLang: queryLang,
+    apiIntent,
+    apiReferenceFtsQueries,
+    supplementalFtsQueries,
+    supplementalPageIds,
+    apiReferencePagePrefix: null,
   });
+
+  const ruleReranked = rerank(retrieved, {
+    queryLang,
+    currentSubtreeRoot,
+    currentPageId: null,
+    query: searchQuestion,
+    entityTerms,
+    apiIntent,
+    apiReferenceHintTerms,
+    apiReferenceVersionPrefs,
+    apiReferencePagePrefix: null,
+  });
+
+  const reranked = deps.reranker
+    ? await applyCrossEncoderRerank(deps.reranker, searchQuestion, ruleReranked, deps.rerankerConfig)
+    : ruleReranked;
+
+  const fusedTrace = buildFusedTrace(reranked, retrievalTrace);
+  const top_final_score = reranked[0]?.final_score ?? 0;
+  const confidence = computeConfidence(reranked);
+  const trace: AskTrace = {
+    fused: fusedTrace,
+    subtree_ask_triggered: false,
+    top_final_score,
+    confidence,
+    tokens_in: null,
+    tokens_out: null,
+    intent_route: intentRoute,
+    ...(historyWindow > 0 ? { history_window: historyWindow } : {}),
+  };
+
+  return {
+    activeHistory,
+    apiIntent,
+    apiReferenceHintTerms,
+    apiReferenceVersionPrefs,
+    confidence,
+    entityTerms,
+    fusedTrace,
+    historyWindow,
+    intentRoute,
+    projectSetupIntent,
+    queryVector,
+    retrieved,
+    reranked,
+    searchQuestion,
+    signatureAuthIntent,
+    supplementalPageIds,
+    top_final_score,
+    trace,
+  };
+}
+
+async function askWithTraceInternal(
+  deps: AskDeps,
+  req: AskRequest,
+  hooks: AskStreamHooks = {},
+): Promise<AskWithTraceResult> {
+  const t0 = performance.now();
 
   // 1. Input validation.
   if (req.question === undefined || req.question === null) {
@@ -240,100 +411,28 @@ async function askWithTraceInternal(
   // 3. Hybrid retrieve.
   throwIfAborted(hooks.signal);
   await hooks.onStatus?.('retrieving');
-  const currentSubtreeRoot = null;
-  // RFC 0003 §4.2 — multi-turn history-aware retrieve query (M1).
-  // A single LLM intent router now owns the semantic decisions that used to
-  // be spread across deterministic query rewrite + API-intent rules:
-  //   - whether this turn is standalone or a follow-up
-  //   - whether session history should enter retrieval / prompt context
-  //   - which retrieval hints should bias API reference/supporting context
-  // The raw current question is still embedded separately for γ feedback
-  // similarity; only the retrieve vector sees the router's effective query.
-  const history = req.context?.history ?? [];
-  const intentRouter = deps.intentRouter ?? new LLMIntentRouter(deps.llm);
-  const intentRoute = await intentRouter.route({ question, history, lang: queryLang });
-  const activeHistory = intentRoute.usesHistory ? history : [];
-  const historyWindow = activeHistory.length;
-  const searchQuestion = intentRoute.effectiveQuestion || question;
-  const apiIntent = intentRoute.apiIntent;
-  const signatureAuthIntent = intentRoute.signatureAuthIntent;
-  const retrieveQuestion = intentRoute.usesHistory
-    ? intentRoute.rewritten
-      ? intentRoute.effectiveQuestion
-      : `${activeHistory.map((h) => h.question).join('\n')}\n${question}`
-    : searchQuestion;
-  // Two distinct vectors when multi-turn is active:
-  //   - `queryVector` (raw current question) is what we return and what γ
-  //     uses for cross-turn similarity comparison. γ asks "did the user
-  //     re-ask the same question?" — that signal must compare current_q to
-  //     prior current_q. If γ saw the history-augmented vector, identical
-  //     questions across turns would never reach the 0.85 threshold because
-  //     the history prefix grows monotonically.
-  //   - `retrieveVector` (history-augmented) is what feeds the vector
-  //     retrieve path. RFC §4.2 — the splice anchors retrieval in the
-  //     dialogue's prior region.
-  // Batched into one embed() call so multi-turn asks pay one round-trip
-  // instead of two (Embedder contract takes a `string[]` for exactly this
-  // reason). Single-turn calls submit one input and keep the alpha.0 cost.
-  const embedInputs = retrieveQuestion === question ? [question] : [question, retrieveQuestion];
-  const embedded = await deps.embedder.embed(embedInputs);
-  const queryVector = embedded[0]!.vector;
-  const retrieveVector = embedded[1]?.vector ?? queryVector;
+  const retrieval = await runRetrievalPipeline(deps, req, question, queryLang, hooks.signal);
   throwIfAborted(hooks.signal);
-  const ftsQuery = sanitizeFtsQuery(searchQuestion);
-  const entityTerms = extractEntityTerms(searchQuestion);
-  const projectSetupIntent = intentRoute.projectSetupIntent;
-  const apiReferenceHints = intentRoute.apiReferenceHints;
-  const supplementalContextHints = intentRoute.supplementalContextHints;
-  const supplementalPageIds = intentRoute.supplementalPageIds;
-  const apiReferenceVersionPrefs = intentRoute.apiReferenceVersionPrefs;
-  const apiReferenceHintTerms = apiReferenceHints
-    .flatMap((hint) => hint.toLowerCase().split(/\s+/))
-    .filter(Boolean);
-  const apiReferenceFtsQueries = apiReferenceHints
-    .map((hint) => sanitizeFtsQuery(hint))
-    .filter((hint): hint is string => !!hint);
-  const supplementalFtsQueries = supplementalContextHints
-    .map((hint) => sanitizeFtsQuery(hint))
-    .filter((hint): hint is string => !!hint);
-  const { chunks: retrieved, trace: retrievalTrace } = retrieveWithTrace(deps.db, {
-    queryVector: retrieveVector,
-    ftsQuery,
-    scopeId,
-    entityTerms,
-    currentPageId: null,
-    currentPageLang: queryLang,
-    apiIntent,
-    apiReferenceFtsQueries,
-    supplementalFtsQueries,
-    supplementalPageIds,
-    apiReferencePagePrefix: null,
-  });
-
-  // 4. Rerank — rule rerank first (cheap, applies structural biases), then
-  // optionally a cross-encoder pass on the top window. The cross-encoder
-  // recovers semantic relevance signals the rules can't express (e.g. that a
-  // chunk literally contains the field definition the user asked about); the
-  // rules still do the cheap structural work (same-subtree, nav order).
-  const ruleReranked = rerank(retrieved, {
-    queryLang,
-    currentSubtreeRoot,
-    currentPageId: null,
-    query: searchQuestion,
-    entityTerms,
+  const {
+    activeHistory,
     apiIntent,
     apiReferenceHintTerms,
     apiReferenceVersionPrefs,
-    apiReferencePagePrefix: null,
-  });
-
-  const reranked = deps.reranker
-    ? await applyCrossEncoderRerank(deps.reranker, searchQuestion, ruleReranked, deps.rerankerConfig)
-    : ruleReranked;
-
-  const fusedTrace = buildFusedTrace(reranked, retrievalTrace);
-  const top_final_score = reranked[0]?.final_score ?? 0;
-  const confidence = computeConfidence(reranked);
+    confidence,
+    entityTerms,
+    fusedTrace,
+    historyWindow,
+    intentRoute,
+    projectSetupIntent,
+    queryVector,
+    retrieved,
+    reranked,
+    searchQuestion,
+    signatureAuthIntent,
+    supplementalPageIds,
+    top_final_score,
+  } = retrieval;
+  const currentSubtreeRoot = null;
 
   // 5. Aggregate.
   // Derive title-match subtrees so aggregate can skip clarify when the user's

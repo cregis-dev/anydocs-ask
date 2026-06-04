@@ -5,13 +5,51 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   askDepsForEval,
+  askDepsForRetrievalEval,
   buildEvalCaseTraceRecord,
+  buildRetrievalEvalCaseTraceRecord,
   evalAskModeForDeps,
+  renderRetrievalReport,
   renderReport,
   runEvalCaseWithRetries,
   shouldRetryEvalResult,
   writeCaseTraceJsonl,
 } from '../src/commands/eval.ts';
+
+test('askDepsForRetrievalEval disables the LLM router without touching runtime.llm', async () => {
+  const db = {};
+  const embedder = {};
+  let llmAccessed = false;
+  const runtime = {
+    db,
+    embedder,
+    get llm() {
+      llmAccessed = true;
+      throw new Error('runtime.llm should not be read in --no-router retrieval eval');
+    },
+    reranker: null,
+    config: {
+      reranker: { enabled: false },
+      prompt: { assistantName: 'Cregis AI Assistant' },
+    },
+  };
+
+  const deps = askDepsForRetrievalEval(runtime, { noRouter: true });
+  const route = await deps.intentRouter!.route({
+    question: 'Cregis API 签名参数怎么拼接？',
+    lang: 'zh',
+    history: [{ question: '支付引擎创建订单怎么做？', answer_summary: '...' }],
+  });
+
+  assert.equal(llmAccessed, false);
+  assert.equal(deps.db, db);
+  assert.equal(deps.embedder, embedder);
+  assert.equal(route.effectiveQuestion, 'Cregis API 签名参数怎么拼接？');
+  assert.equal(route.usesHistory, false);
+  assert.equal(route.rewritten, false);
+  assert.equal(route.apiIntent, false);
+  assert.equal(route.reason, 'retrieval_eval_no_router');
+});
 
 test('askDepsForEval includes project prompt config so eval matches runtime asks', () => {
   const db = {};
@@ -300,4 +338,154 @@ test('renderReport separates core quality, retrieval diagnostics, citation calib
   assert.match(report, /answer_keyword_overlap/);
   assert.doesNotMatch(report, /## Headline metrics/);
   assert.doesNotMatch(report, /\| Citation-pass\s+\|/);
+});
+
+test('renderRetrievalReport only reports retrieval quality and diagnostics', () => {
+  const summary = {
+    n: 2,
+    r_at_5: 0.5,
+    hit_at_1: 0.25,
+    hit_at_3: 0.5,
+    mrr: 0.38,
+    context_precision_at_5: 0.3,
+    context_recall_n: 2,
+    context_recall_at_5: 0.5,
+  };
+  const results = [
+    {
+      case_id: 'case-hit',
+      query: 'How do I create an order?',
+      r_at_5: true,
+      hit_at_1: false,
+      hit_at_3: true,
+      mrr: 0.5,
+      context_precision_at_5: 0.4,
+      context_recall_at_5: 1,
+      retrieved_pages_top5: ['noise', 'payment-engine-api'],
+      latency_ms: 12,
+    },
+    {
+      case_id: 'case-miss',
+      query: 'How do I sign requests?',
+      r_at_5: false,
+      hit_at_1: false,
+      hit_at_3: false,
+      mrr: 0,
+      context_precision_at_5: 0,
+      context_recall_at_5: 0,
+      retrieved_pages_top5: ['noise-a', 'noise-b'],
+      latency_ms: 9,
+    },
+  ];
+
+  const report = renderRetrievalReport('2026-06-04', {
+    summary,
+    results,
+    caseTraces: [],
+    totalMs: 321,
+  });
+
+  assert.match(report, /# Retrieval Eval — 2026-06-04/);
+  assert.match(report, /Case traces: `2026-06-04-retrieval-eval\.cases\.jsonl`/);
+  assert.match(report, /## Core retrieval quality/);
+  assert.match(report, /MRR/);
+  assert.match(report, /Hit@1/);
+  assert.match(report, /Context-R@5/);
+  assert.match(report, /## Retrieval diagnostics/);
+  assert.match(report, /Hit@3/);
+  assert.match(report, /Hit@5/);
+  assert.match(report, /Context-P@5/);
+  assert.match(report, /## Retrieval misses \(1\)/);
+  assert.match(report, /case-miss/);
+  assert.match(report, /<!-- RETRIEVAL_EVAL_SUMMARY /);
+  assert.doesNotMatch(report, /Citation/);
+  assert.doesNotMatch(report, /answer_keyword_overlap/);
+});
+
+test('renderRetrievalReport labels no-router raw retrieval mode', () => {
+  const summary = {
+    n: 1,
+    r_at_5: 1,
+    hit_at_1: 1,
+    hit_at_3: 1,
+    mrr: 1,
+    context_precision_at_5: 1,
+    context_recall_n: 1,
+    context_recall_at_5: 1,
+  };
+
+  const report = renderRetrievalReport('2026-06-04', {
+    summary,
+    results: [],
+    caseTraces: [],
+    totalMs: 12,
+    noRouter: true,
+  });
+
+  assert.match(report, /Router: disabled \(--no-router raw retrieval\)/);
+  assert.match(report, /Case traces: `2026-06-04-retrieval-eval\.raw\.cases\.jsonl`/);
+  assert.match(report, /measures raw retrieval over the user question/);
+});
+
+test('buildRetrievalEvalCaseTraceRecord stores retrieval trace without LLM result', () => {
+  const c = {
+    id: 'case-1',
+    query: 'How do I create an order?',
+    lang: 'en',
+    filters: {},
+    expected: {
+      must_cite_pages: ['payment-engine-quickstart-30min'],
+      must_contain: ['checkout_url'],
+      forbid_contain: [],
+    },
+  };
+  const caseResult = {
+    case_id: 'case-1',
+    query: c.query,
+    r_at_5: true,
+    hit_at_1: true,
+    hit_at_3: true,
+    mrr: 1,
+    context_precision_at_5: 0.2,
+    context_recall_at_5: 1,
+    retrieved_pages_top5: ['payment-engine-quickstart-30min'],
+    latency_ms: 11,
+  };
+  const traced = {
+    trace: {
+      fused: [
+        {
+          chunk_id: 7,
+          page_id: 'payment-engine-quickstart-30min',
+          rrf_score: 0.5,
+          final_score: 0.5,
+          vec_rank: 1,
+          bm25_rank: null,
+          nav_index: 2,
+          nav_index_boost: 0.1,
+        },
+      ],
+      subtree_ask_triggered: false,
+      top_final_score: 0.5,
+      confidence: 1,
+      tokens_in: null,
+      tokens_out: null,
+    },
+    queryVector: new Float32Array([1, 2, 3]),
+  };
+
+  const record = buildRetrievalEvalCaseTraceRecord({
+    c,
+    index: 0,
+    total: 1,
+    caseResult,
+    traced,
+  });
+
+  assert.equal(record.schema_version, 1);
+  assert.equal(record.case_id, 'case-1');
+  assert.equal(record.result, undefined);
+  assert.equal(record.queryVector, undefined);
+  assert.equal(record.score.mrr, 1);
+  assert.equal(record.trace.fused[0].chunk_id, 7);
 });
