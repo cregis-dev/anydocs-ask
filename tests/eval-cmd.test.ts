@@ -7,6 +7,7 @@ import {
   askDepsForEval,
   buildEvalCaseTraceRecord,
   evalAskModeForDeps,
+  renderReport,
   runEvalCaseWithRetries,
   shouldRetryEvalResult,
   writeCaseTraceJsonl,
@@ -120,7 +121,10 @@ test('writeCaseTraceJsonl persists per-case result, score, and retrieval trace w
       mrr: 1,
       context_precision_at_5: 0.2,
       context_recall_at_5: 1,
+      citation_anchor_pass: true,
       citation_pass: true,
+      unexpected_citation_pages: [],
+      unexpected_citation_rate: 0,
       answer_rule_pass: true,
       api_rule_pass: null,
       retrieved_pages_top5: ['payment-engine-quickstart-30min'],
@@ -221,4 +225,79 @@ test('writeCaseTraceJsonl persists per-case result, score, and retrieval trace w
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('renderReport separates core quality, retrieval diagnostics, citation calibration, and answer text diagnostics', () => {
+  const summary = {
+    n: 1,
+    r_at_5: 1,
+    hit_at_1: 1,
+    hit_at_3: 1,
+    mrr: 1,
+    context_precision_at_5: 0.6,
+    context_recall_n: 1,
+    context_recall_at_5: 1,
+    citation_anchor_pass: 1,
+    unexpected_citation_rate: 0.5,
+    citation_pass: 0,
+    answer_rule_pass: 0,
+    kind_pass: 1,
+    api_rule_n: 1,
+    api_rule_pass: 1,
+  };
+  const results = [
+    {
+      case_id: 'case-1',
+      query: 'How do I create an order?',
+      kind: 'answer',
+      expected_kind: 'answer',
+      kind_pass: true,
+      r_at_5: true,
+      hit_at_1: true,
+      hit_at_3: true,
+      mrr: 1,
+      context_precision_at_5: 0.6,
+      context_recall_at_5: 1,
+      citation_anchor_pass: true,
+      citation_pass: false,
+      unexpected_citation_pages: ['extra-page'],
+      unexpected_citation_rate: 0.5,
+      answer_rule_pass: false,
+      api_rule_pass: true,
+      retrieved_pages_top5: ['payment-engine-quickstart-30min'],
+      cited_pages: ['payment-engine-quickstart-30min', 'extra-page'],
+      missing_must_contain: ['checkout_url'],
+      missing_must_contain_regex: [],
+      hit_forbid_contain: [],
+      hit_forbid_contain_regex: [],
+      missing_must_cite_operations: [],
+      missing_must_cite_urls: [],
+      error_code: null,
+      error_message: null,
+      error_detail: null,
+      latency_ms: 123,
+    },
+  ];
+
+  const report = renderReport('2026-06-04', {
+    summary,
+    results,
+    caseTraces: [],
+    totalMs: 1234,
+    baseline: null,
+  });
+
+  assert.match(report, /## Core quality/);
+  assert.match(report, /Citation-anchor/);
+  assert.match(report, /## Retrieval diagnostics/);
+  assert.match(report, /Hit@5/);
+  assert.match(report, /Context-P@5/);
+  assert.match(report, /## Citation calibration/);
+  assert.match(report, /legacy Citation-pass/);
+  assert.match(report, /Unexpected-citation-rate/);
+  assert.match(report, /case-1: unexpected=\[extra-page\]/);
+  assert.match(report, /## Answer text diagnostics/);
+  assert.match(report, /answer_keyword_overlap/);
+  assert.doesNotMatch(report, /## Headline metrics/);
+  assert.doesNotMatch(report, /\| Citation-pass\s+\|/);
 });

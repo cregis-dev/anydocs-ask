@@ -244,6 +244,80 @@ test('scoreCase allows extra citations listed in allow_cite_pages without changi
   assert.equal(scored.citation_pass, true);
 });
 
+test('scoreCase separates citation anchor from unexpected citation pages', () => {
+  const c = golden({
+    expected: {
+      must_cite_pages: ['payment-engine-quickstart-30min'],
+      allow_cite_pages: ['webhook-mechanism'],
+      must_contain: [],
+      forbid_contain: [],
+    },
+  });
+  const result = answer({
+    citations: [
+      {
+        citation_id: 'cit_1',
+        chunk_id: 101,
+        page_id: 'webhook-mechanism',
+        lang: 'en',
+        source_lang: null,
+        title: 'Webhook Callback Mechanism',
+        breadcrumb: [],
+        url: '/en/webhook-mechanism',
+        snippet: 'Callbacks should be idempotent.',
+        in_page_path: 'p[1]',
+      },
+      {
+        citation_id: 'cit_2',
+        chunk_id: 102,
+        page_id: 'unrelated-page',
+        lang: 'en',
+        source_lang: null,
+        title: 'Unrelated',
+        breadcrumb: [],
+        url: '/en/unrelated-page',
+        snippet: 'Noise.',
+        in_page_path: 'p[1]',
+      },
+    ],
+  });
+
+  const scored = scoreCase(c, result, trace(['payment-engine-quickstart-30min']));
+
+  assert.equal(scored.citation_anchor_pass, true, 'allowed citations still anchor the answer');
+  assert.equal(scored.citation_pass, false, 'legacy strict citation fails on unexpected extras');
+  assert.deepEqual(scored.unexpected_citation_pages, ['unrelated-page']);
+  assert.equal(scored.unexpected_citation_rate, 0.5);
+});
+
+test('scoreCase citation anchor fails when answer only cites unexpected pages', () => {
+  const scored = scoreCase(
+    golden(),
+    answer({
+      citations: [
+        {
+          citation_id: 'cit_1',
+          chunk_id: 101,
+          page_id: 'unrelated-page',
+          lang: 'en',
+          source_lang: null,
+          title: 'Unrelated',
+          breadcrumb: [],
+          url: '/en/unrelated-page',
+          snippet: 'Noise.',
+          in_page_path: 'p[1]',
+        },
+      ],
+    }),
+    trace(['payment-engine-api']),
+  );
+
+  assert.equal(scored.citation_anchor_pass, false);
+  assert.equal(scored.citation_pass, false);
+  assert.deepEqual(scored.unexpected_citation_pages, ['unrelated-page']);
+  assert.equal(scored.unexpected_citation_rate, 1);
+});
+
 test('scoreCase preserves structured error diagnostics for eval reports', () => {
   const c = golden({
     expected: {
@@ -296,4 +370,6 @@ test('summarizeResults averages API rules over API cases only', () => {
   assert.equal(summary.mrr, 1, 'both cases hit at rank 1');
   assert.equal(summary.hit_at_1, 1);
   assert.equal(summary.hit_at_3, 1);
+  assert.equal(summary.citation_anchor_pass, 1);
+  assert.equal(summary.unexpected_citation_rate, 0);
 });
