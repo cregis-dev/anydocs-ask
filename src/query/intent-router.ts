@@ -84,8 +84,36 @@ Guidance:
   "third_party_id", "POST /api/v1/payout", and "POST /api/v1/payout/query".
 - For token identifier questions, useful hints include "coins", "chain_id",
   "token_id", and "currency".
+- Prefer these known support pages in supplemental_page_ids when relevant:
+  authentication, webhook-mechanism, error-codes, sdk-overview, introduction,
+  payment-engine-setup, payment-engine-quickstart-30min, pe-business-flow,
+  supported-currencies, waas-setup, waas-quickstart-30min, business-flow,
+  supported-tokens, environment.
+- Webhook/callback success, localhost, and callback_url questions should
+  usually prefer support pages, not API reference.
+- Error-code triage questions should usually prefer error-codes plus
+  authentication/setup pages, not API reference, unless a concrete endpoint
+  path is named.
+- SDK/language choice questions should prefer sdk-overview plus
+  authentication/setup pages, not API reference.
+- Specific WaaS withdrawal from a user deposit address/from_address should use
+  the /api/v1/sub_address_withdrawal hint, not the generic /api/v1/payout
+  hint.
 - If the current question is standalone, effective_question must not include
   unrelated prior-turn terms.`;
+
+const DEFAULT_SUPPLEMENTAL_PAGE_IDS: Record<IntentName, string[]> = {
+  greeting: [],
+  api_reference: [],
+  signature_auth: ['authentication', 'webhook-mechanism'],
+  webhook_status: ['webhook-mechanism', 'waas-quickstart-30min', 'payment-engine-quickstart-30min'],
+  payment_flow: ['payment-engine-quickstart-30min', 'pe-business-flow', 'supported-currencies'],
+  waas_payout: ['waas-quickstart-30min', 'business-flow', 'supported-tokens'],
+  project_setup: ['introduction', 'payment-engine-setup', 'waas-setup', 'environment'],
+  tokens_currencies: ['supported-tokens', 'supported-currencies'],
+  error_troubleshooting: ['error-codes', 'authentication', 'waas-setup', 'payment-engine-setup'],
+  general_docs: [],
+};
 
 export class LLMIntentRouter implements IntentRouter {
   private readonly llm: LLM;
@@ -181,15 +209,31 @@ function normalizeRoute(
   const rawEffective = typeof raw.effective_question === 'string' ? raw.effective_question.trim() : '';
   const effectiveQuestion = rawEffective.length > 0 ? rawEffective : question;
   const retrieval = raw.retrieval ?? {};
-  const apiReferenceHints = cleanList(retrieval.api_reference_hints, 8, 96);
   const supplementalContextHints = cleanList(retrieval.supplemental_context_hints, 6, 120);
-  const supplementalPageIds = cleanList(retrieval.supplemental_page_ids, 6, 80)
-    .filter((id) => /^[A-Za-z0-9_.:-]+$/.test(id));
+  const apiReferenceHints = normalizeApiReferenceHints(
+    intent,
+    product,
+    cleanList(retrieval.api_reference_hints, 8, 96),
+    supplementalContextHints,
+  );
+  const supplementalPageIds = mergeSupplementalPageIds(
+    cleanList(retrieval.supplemental_page_ids, 6, 80)
+      .filter((id) => /^[A-Za-z0-9_.:-]+$/.test(id)),
+    DEFAULT_SUPPLEMENTAL_PAGE_IDS[intent],
+  );
   const apiReferenceVersionPrefs = cleanList(retrieval.api_versions, 3, 8)
     .map((v) => v.toLowerCase())
     .filter((v) => /^v[0-9]+$/.test(v));
   const preferApiReference = retrieval.prefer_api_reference === true;
-  const apiIntent = intent === 'api_reference' || preferApiReference || apiReferenceHints.length > 0;
+  const hasEndpointHint = apiReferenceHints.some(hasApiEndpointHint);
+  const hasApiFieldHint = apiReferenceHints.some(hasApiFieldHintForIntent);
+  const apiIntent =
+    intent === 'api_reference' ||
+    (intent === 'signature_auth' && hasEndpointHint) ||
+    (intent === 'webhook_status' && hasEndpointHint) ||
+    (intent === 'payment_flow' && (preferApiReference || hasEndpointHint || hasApiFieldHint)) ||
+    (intent === 'waas_payout' && (preferApiReference || hasEndpointHint || hasApiFieldHint)) ||
+    (intent === 'tokens_currencies' && (preferApiReference || hasEndpointHint || hasApiFieldHint));
 
   return {
     originalQuestion: question,
@@ -256,4 +300,72 @@ function cleanList(value: unknown, maxItems: number, maxChars: number): string[]
     if (out.length >= maxItems) break;
   }
   return out;
+}
+
+function mergeSupplementalPageIds(primary: string[], defaults: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const id of [...primary, ...defaults]) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    if (out.length >= 6) break;
+  }
+  return out;
+}
+
+function normalizeApiReferenceHints(
+  intent: IntentName,
+  product: IntentProduct,
+  hints: string[],
+  supplementalHints: string[],
+): string[] {
+  const out = [...hints];
+  const haystack = [...hints, ...supplementalHints].join(' ').toLowerCase();
+  if (/\/api\/v1\/payout\b/.test(haystack)) {
+    pushUnique(out, 'payout');
+    pushUnique(out, 'POST /api/v1/payout');
+  }
+  if (
+    /\/api\/v2\/checkout\b/.test(haystack) ||
+    /\b(valid_time|checkout_url|cregis_id|hosted checkout)\b/.test(haystack)
+  ) {
+    pushUnique(out, 'checkout');
+    pushUnique(out, 'POST /api/v2/checkout');
+  }
+  if (/\/api\/v2\/order\/info\b/.test(haystack)) {
+    pushUnique(out, 'order info');
+    pushUnique(out, 'status');
+    pushUnique(out, 'POST /api/v2/order/info');
+  }
+  if (
+    product === 'waas' &&
+    (intent === 'tokens_currencies' || /\b(token_id|chain_id|token identifier|currency)\b/.test(haystack))
+  ) {
+    pushUnique(out, 'coins');
+    pushUnique(out, 'POST /api/v1/coins');
+  }
+  if (
+    product === 'waas' &&
+    /(from_address|user deposit address|specific deposit address|sub[-_ ]?address)/i.test(haystack) &&
+    /(withdraw|withdrawal|payout|from_address)/i.test(haystack)
+  ) {
+    pushUnique(out, 'sub_address_withdrawal');
+    pushUnique(out, 'POST /api/v1/sub_address_withdrawal');
+  }
+  return out.slice(0, 8);
+}
+
+function pushUnique(out: string[], value: string): void {
+  const key = value.toLowerCase();
+  if (out.some((item) => item.toLowerCase() === key)) return;
+  out.push(value);
+}
+
+function hasApiEndpointHint(hint: string): boolean {
+  return /\b(GET|POST|PUT|PATCH|DELETE)\s+\/api\/|\/api\/v[0-9]+\//i.test(hint);
+}
+
+function hasApiFieldHintForIntent(hint: string): boolean {
+  return /\b(checkout_url|cregis_id|valid_time|order_currency|order_amount|data\.status|event_type|cid|third_party_id|from_address|to_address|chain_id|token_id|currency|coins|payout|checkout|order info|sub_address_withdrawal|sub_address_balance)\b/i.test(hint);
 }

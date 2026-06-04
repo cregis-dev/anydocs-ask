@@ -37,7 +37,7 @@ import {
 } from './api-intent.ts';
 import { aggregate, TOP_K_FOR_AGGREGATION, type AggregateOutcome } from './aggregate.ts';
 import { buildPrompt, detectFormatHint } from './prompt.ts';
-import { LLMIntentRouter, type IntentRouter } from './intent-router.ts';
+import { LLMIntentRouter, type IntentRoute, type IntentRouter } from './intent-router.ts';
 import { postprocess } from './postprocess.ts';
 import type { AskRequest, AskResult } from './types.ts';
 
@@ -106,6 +106,10 @@ export type AskTrace = {
    *  0 on the success path. Persisted to runs.jsonl so analyze can track
    *  flake rate over time. */
   citation_retry_count?: number;
+  /** Normalized LLM intent-router decision used to derive retrieval hints,
+   *  history usage, and effective query. Persisted in eval case traces so
+   *  route-vs-retrieval-vs-generation failures can be separated. */
+  intent_route?: IntentRoute;
   /** RFC 0003 M4 — number of prior session turns the pipeline consumed for
    *  THIS call (embedding splice + prompt). Mirrors the field surfaced on
    *  the result body; duplicated into the trace so runs.jsonl analyses can
@@ -407,6 +411,7 @@ async function askWithTraceInternal(
         confidence,
         tokens_in: null,
         tokens_out: null,
+        intent_route: intentRoute,
       },
       queryVector,
     };
@@ -486,6 +491,7 @@ async function askWithTraceInternal(
         tokens_in: null,
         tokens_out: null,
         citation_retry_count: citationRetryCount,
+        intent_route: intentRoute,
       },
       queryVector,
     };
@@ -527,6 +533,7 @@ async function askWithTraceInternal(
       tokens_in: null,
       tokens_out: null,
       citation_retry_count: citationRetryCount,
+      intent_route: intentRoute,
       ...(historyWindow > 0 ? { history_window: historyWindow } : {}),
     },
     queryVector,
@@ -756,16 +763,26 @@ function withMandatoryApiReferenceCitation(
     .filter(([, chunk]) => apiReferenceMatchesHints(chunk, opts.apiReferenceHintTerms));
   if (matchingApiRefs.length === 0) return rawAnswer;
   let answer = rawAnswer;
-  if (
-    !matchingApiRefs.some(([id]) => citedIds.has(id)) &&
-    rawAnswerHasApiAnswerSubstance(answer, opts.apiReferenceHintTerms)
-  ) {
-    const [id, chunk] = matchingApiRefs[0]!;
+  const apiRefsByEndpoint = new Map<string, Array<[string, RerankedChunk]>>();
+  for (const ref of matchingApiRefs) {
+    const endpoint = extractEndpointForMandatoryCitation(ref[1]) ?? ref[1].page_id;
+    const key = normalizeEndpointKey(endpoint);
+    const refs = apiRefsByEndpoint.get(key) ?? [];
+    refs.push(ref);
+    apiRefsByEndpoint.set(key, refs);
+  }
+  for (const refs of apiRefsByEndpoint.values()) {
+    if (refs.some(([id]) => citedIds.has(id))) continue;
+    const [id, chunk] = refs[0]!;
     const endpoint = extractEndpointForMandatoryCitation(chunk);
+    if (!rawAnswerHasApiAnswerSubstanceForEndpoint(answer, endpoint, opts.apiReferenceHintTerms)) {
+      continue;
+    }
     const suffix = opts.answerLang === 'zh'
       ? `\n\nAPI reference：${endpoint ? `\`${endpoint}\` ` : ''}[${id}]。`
       : `\n\nAPI reference: ${endpoint ? `\`${endpoint}\` ` : ''}[${id}].`;
     answer = answer.trimEnd() + suffix;
+    citedIds.add(id);
   }
   return withMandatoryApiParameterExamples(answer, matchingApiRefs, opts);
 }
@@ -796,6 +813,38 @@ function extractEndpointForMandatoryCitation(chunk: RerankedChunk): string | nul
   const match = text.match(/\b(GET|POST|PUT|PATCH|DELETE)\b\s+`?(\/api\/[A-Za-z0-9_./{}:-]+)/i);
   if (!match) return null;
   return `${match[1]!.toUpperCase()} ${match[2]!}`;
+}
+
+function normalizeEndpointKey(endpoint: string): string {
+  return endpoint.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function rawAnswerHasApiAnswerSubstanceForEndpoint(
+  rawAnswer: string,
+  endpoint: string | null,
+  terms: string[],
+): boolean {
+  const normalizedEndpoint = endpoint?.toLowerCase() ?? '';
+  if (normalizedEndpoint.includes('/api/v2/checkout')) {
+    return rawAnswerHasApiAnswerSubstance(rawAnswer, ['checkout']);
+  }
+  if (normalizedEndpoint.includes('/api/v2/order/info')) {
+    return rawAnswerHasApiAnswerSubstance(rawAnswer, ['order', 'info', 'status']) ||
+      /\/api\/v2\/order\/info\b|\bdata\.status\b|callback-first|query fallback/i.test(rawAnswer);
+  }
+  if (normalizedEndpoint.includes('/api/v1/sub_address_balance')) {
+    return rawAnswerHasApiAnswerSubstance(rawAnswer, ['sub_address_balance']);
+  }
+  if (normalizedEndpoint.includes('/api/v1/sub_address_withdrawal')) {
+    return rawAnswerHasApiAnswerSubstance(rawAnswer, ['sub_address_withdrawal']);
+  }
+  if (normalizedEndpoint.includes('/api/v1/coins')) {
+    return rawAnswerHasApiAnswerSubstance(rawAnswer, ['coins']);
+  }
+  if (/\/api\/v[0-9]+\/payout\b/.test(normalizedEndpoint)) {
+    return rawAnswerHasApiAnswerSubstance(rawAnswer, ['payout']);
+  }
+  return rawAnswerHasApiAnswerSubstance(rawAnswer, terms);
 }
 
 function rawAnswerHasApiAnswerSubstance(rawAnswer: string, terms: string[]): boolean {
@@ -931,6 +980,7 @@ function pickContextChunks(
             apiReferenceHintScore(a, opts.apiReferenceHintTerms) ||
           b.final_score - a.final_score,
       )
+      .filter(dedupeApiReferenceChunkByEndpoint())
       .filter((c) => !seen.has(c.chunk_id))
       .slice(0, apiContextLimit);
     if (apiRefs.length > 0) {
@@ -1080,32 +1130,73 @@ function apiReferenceHintScore(c: RerankedChunk, terms: string[] | undefined): n
   return score;
 }
 
+function dedupeApiReferenceChunkByEndpoint(): (chunk: RerankedChunk) => boolean {
+  const seen = new Set<string>();
+  return (chunk) => {
+    const key = normalizeEndpointKey(extractEndpointForMandatoryCitation(chunk) ?? chunk.page_id);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  };
+}
+
 function apiReferenceMatchesHints(c: RerankedChunk, terms: string[] | undefined): boolean {
   if (!terms?.length) return true;
   const haystack = `${c.page_id} ${c.page_title} ${c.text}`.toLowerCase();
-  if (terms.includes('checkout')) {
-    return haystack.includes('checkout') || haystack.includes('/api/v2/checkout');
-  }
+  const wantsCheckout = terms.includes('checkout');
+  const wantsOrderInfo = wantsOrderInfoApi(terms);
   const wantsSubAddressWithdrawal = terms.includes('sub_address_withdrawal');
   const wantsSubAddressBalance = terms.includes('sub_address_balance');
   const wantsCoins = terms.includes('coins');
   const wantsPayout = terms.includes('payout');
-  if (wantsSubAddressWithdrawal || wantsSubAddressBalance || wantsCoins || wantsPayout) {
+  if (
+    wantsCheckout ||
+    wantsOrderInfo ||
+    wantsSubAddressWithdrawal ||
+    wantsSubAddressBalance ||
+    wantsCoins ||
+    wantsPayout
+  ) {
     return (
+      (wantsCheckout && matchesCheckoutApi(haystack)) ||
+      (wantsOrderInfo && matchesOrderInfoApi(haystack)) ||
       (wantsSubAddressWithdrawal && matchesSubAddressWithdrawalApi(haystack)) ||
       (wantsSubAddressBalance && matchesSubAddressBalanceApi(haystack)) ||
       (wantsCoins && matchesCoinsApi(haystack)) ||
       (wantsPayout && matchesWalletPayoutApi(haystack))
     );
   }
-  if (terms.includes('order') && terms.includes('info') && terms.includes('status')) {
-    return (
-      haystack.includes('/order/info') ||
-      haystack.includes('order info') ||
-      haystack.includes('查询订单信息')
-    );
-  }
   return apiReferenceHintScore(c, terms) > 0;
+}
+
+function wantsOrderInfoApi(terms: string[]): boolean {
+  return (
+    (terms.includes('order') && terms.includes('info') &&
+      (terms.includes('status') || terms.includes('data.status'))) ||
+    terms.includes('/api/v2/order/info')
+  );
+}
+
+function matchesCheckoutApi(haystack: string): boolean {
+  return (
+    haystack.includes('/api/v2/checkout') ||
+    haystack.includes('api-v2-checkout') ||
+    haystack.includes('post-api-v2-checkout') ||
+    haystack.includes('create order') ||
+    haystack.includes('创建订单')
+  );
+}
+
+function matchesOrderInfoApi(haystack: string): boolean {
+  return (
+    haystack.includes('/order/info') ||
+    haystack.includes('/api/v2/order/info') ||
+    haystack.includes('api-v2-order-info') ||
+    haystack.includes('post-api-v2-order-info') ||
+    haystack.includes('order info') ||
+    haystack.includes('query order information') ||
+    haystack.includes('查询订单信息')
+  );
 }
 
 function matchesSubAddressWithdrawalApi(haystack: string): boolean {
@@ -1147,6 +1238,7 @@ function matchesWalletPayoutApi(haystack: string): boolean {
 }
 
 function apiReferenceContextLimit(terms: string[] | undefined): number {
+  if (terms?.includes('checkout') && wantsOrderInfoApi(terms)) return 2;
   if (terms?.includes('checkout')) return 1;
   if (terms?.includes('sub_address_withdrawal')) {
     return 1;
