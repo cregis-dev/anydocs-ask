@@ -358,7 +358,12 @@ test('LLMIntentRouter: standalone signature route can ignore unrelated history',
   assert.equal(route.apiIntent, false);
   assert.equal(route.signatureAuthIntent, true);
   assert.deepEqual(route.supplementalContextHints, ['authentication signature API_KEY MD5 sign empty values lexicographical order']);
-  assert.deepEqual(route.supplementalPageIds, ['authentication', 'webhook-mechanism']);
+  assert.deepEqual(route.supplementalPageIds, [
+    'authentication',
+    'webhook-mechanism',
+    'waas-quickstart-30min',
+    'payment-engine-quickstart-30min',
+  ]);
 });
 
 test('LLMIntentRouter: adds intent default pages when the LLM omits them', async () => {
@@ -384,8 +389,8 @@ test('LLMIntentRouter: adds intent default pages when the LLM omits them', async
   assert.equal(route.apiIntent, false);
   assert.deepEqual(route.supplementalPageIds, [
     'webhook-mechanism',
-    'waas-quickstart-30min',
     'payment-engine-quickstart-30min',
+    'pe-business-flow',
   ]);
 });
 
@@ -439,7 +444,11 @@ test('LLMIntentRouter: keeps endpoint-specific signature questions API-aware', a
   });
 
   assert.equal(route.apiIntent, true);
-  assert.deepEqual(route.supplementalPageIds, ['authentication', 'webhook-mechanism']);
+  assert.deepEqual(route.supplementalPageIds, [
+    'authentication',
+    'webhook-mechanism',
+    'waas-quickstart-30min',
+  ]);
 });
 
 test('LLMIntentRouter: keeps endpoint-specific webhook status questions API-aware', async () => {
@@ -489,6 +498,88 @@ test('LLMIntentRouter: normalizes token identifier routes to include the coins e
   assert.ok(route.apiReferenceHints.includes('coins'));
   assert.ok(route.apiReferenceHints.includes('POST /api/v1/coins'));
   assert.equal(route.apiIntent, true);
+});
+
+test('LLMIntentRouter: infers WaaS product for USDT network token questions', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: 'USDT-TRC20、USDT-ERC20、USDT-Polygon 都是 USDT，请求里怎么区分网络？',
+    intent: 'tokens_currencies',
+    product: 'general',
+    retrieval: {
+      prefer_api_reference: false,
+      api_reference_hints: ['USDT', 'network', 'currency'],
+      supplemental_context_hints: [],
+      supplemental_page_ids: [],
+      api_versions: [],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: 'USDT-TRC20、USDT-ERC20、USDT-Polygon 都是 USDT，请求里怎么区分网络？',
+    lang: 'zh',
+  });
+
+  assert.equal(route.product, 'waas');
+  assert.equal(route.apiIntent, true);
+  assert.ok(route.apiReferenceHints.includes('coins'));
+  assert.ok(route.apiReferenceHints.includes('POST /api/v1/coins'));
+  assert.deepEqual(route.supplementalPageIds, ['supported-tokens', 'supported-currencies']);
+});
+
+test('LLMIntentRouter: payment-engine webhook defaults include PE flow pages', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: '同一笔支付引擎订单可能先部分支付再补款吗？回调里我应该怎么做幂等和状态映射？',
+    intent: 'webhook_status',
+    product: 'payment_engine',
+    retrieval: {
+      prefer_api_reference: false,
+      api_reference_hints: ['event_type', 'data.status', 'POST /api/v2/order/info'],
+      supplemental_context_hints: [],
+      supplemental_page_ids: [],
+      api_versions: ['v2'],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: '同一笔支付引擎订单可能先部分支付再补款吗？回调里我应该怎么做幂等和状态映射？',
+    lang: 'zh',
+  });
+
+  assert.equal(route.product, 'payment_engine');
+  assert.equal(route.apiIntent, true);
+  assert.deepEqual(route.supplementalPageIds, [
+    'webhook-mechanism',
+    'payment-engine-quickstart-30min',
+    'pe-business-flow',
+  ]);
+});
+
+test('LLMIntentRouter: normalizes sub-address balance routes to the balance endpoint', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: '我要在出款前查某个子地址的可用余额，currency 参数怎么填？',
+    intent: 'api_reference',
+    product: 'waas',
+    retrieval: {
+      prefer_api_reference: true,
+      api_reference_hints: ['sub address balance', 'currency', 'address'],
+      supplemental_context_hints: [],
+      supplemental_page_ids: [],
+      api_versions: ['v1'],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: '我要在出款前查某个子地址的可用余额，currency 参数怎么填？',
+    lang: 'zh',
+  });
+
+  assert.equal(route.apiIntent, true);
+  assert.ok(route.apiReferenceHints.includes('sub_address_balance'));
+  assert.ok(route.apiReferenceHints.includes('POST /api/v1/sub_address_balance'));
+  assert.deepEqual(route.supplementalPageIds, ['supported-tokens', 'waas-quickstart-30min']);
 });
 
 test('LLMIntentRouter: expands bare API paths into searchable operation hints', async () => {

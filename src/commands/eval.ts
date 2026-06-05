@@ -74,6 +74,7 @@ export type EvalCaseTraceRecord = {
   score: CaseResult;
   result: AskResult;
   trace: AskTrace | null;
+  diagnostics: EvalTraceDiagnostics;
 };
 
 export type RetrievalEvalCaseTraceRecord = {
@@ -87,6 +88,48 @@ export type RetrievalEvalCaseTraceRecord = {
   expected: GoldenCase['expected'];
   score: RetrievalCaseResult;
   trace: AskTrace | null;
+  diagnostics: EvalTraceDiagnostics;
+};
+
+export type EvalTraceDiagnostics = {
+  route: EvalTraceRouteDiagnostic | null;
+  search_question: string | null;
+  retrieve_question: string | null;
+  retrieved_top20: EvalTraceChunkDiagnostic[];
+  prompt_context: EvalTraceChunkDiagnostic[];
+};
+
+export type EvalTraceRouteDiagnostic = {
+  original_question: string;
+  effective_query: string;
+  uses_history: boolean;
+  rewritten: boolean;
+  intent: string;
+  product: string;
+  api_intent: boolean;
+  signature_auth_intent: boolean;
+  project_setup_intent: boolean;
+  api_reference_hints: string[];
+  supplemental_page_ids: string[];
+  api_reference_version_prefs: string[];
+  reason: string | null;
+};
+
+export type EvalTraceChunkDiagnostic = {
+  rank: number;
+  chunk_id: number;
+  page_id: string;
+  page_title?: string;
+  page_url?: string | null;
+  lang?: string;
+  in_page_path?: string;
+  text_preview?: string;
+  final_score: number;
+  rrf_score: number;
+  vec_rank: number | null;
+  bm25_rank: number | null;
+  nav_index: number | null;
+  nav_index_boost: number;
 };
 
 export type EvalProgressEvent =
@@ -424,6 +467,7 @@ export function buildEvalCaseTraceRecord(args: {
     score: args.caseResult,
     result,
     trace: args.traced?.trace ?? null,
+    diagnostics: buildEvalTraceDiagnostics(args.traced?.trace ?? null),
   };
 }
 
@@ -445,6 +489,58 @@ export function buildRetrievalEvalCaseTraceRecord(args: {
     expected: args.c.expected,
     score: args.caseResult,
     trace: args.traced?.trace ?? null,
+    diagnostics: buildEvalTraceDiagnostics(args.traced?.trace ?? null),
+  };
+}
+
+function buildEvalTraceDiagnostics(trace: AskTrace | null): EvalTraceDiagnostics {
+  return {
+    route: trace?.intent_route ? buildRouteDiagnostic(trace.intent_route) : null,
+    search_question: trace?.search_question ?? trace?.intent_route?.effectiveQuestion ?? null,
+    retrieve_question: trace?.retrieve_question ?? null,
+    retrieved_top20: (trace?.fused ?? []).slice(0, 20).map((chunk, index) => buildChunkDiagnostic(chunk, index)),
+    prompt_context: (trace?.selected_context ?? []).map((chunk, index) => buildChunkDiagnostic(chunk, index)),
+  };
+}
+
+function buildRouteDiagnostic(route: NonNullable<AskTrace['intent_route']>): EvalTraceRouteDiagnostic {
+  return {
+    original_question: route.originalQuestion,
+    effective_query: route.effectiveQuestion,
+    uses_history: route.usesHistory,
+    rewritten: route.rewritten,
+    intent: route.intent,
+    product: route.product,
+    api_intent: route.apiIntent,
+    signature_auth_intent: route.signatureAuthIntent,
+    project_setup_intent: route.projectSetupIntent,
+    api_reference_hints: route.apiReferenceHints,
+    supplemental_page_ids: route.supplementalPageIds,
+    api_reference_version_prefs: route.apiReferenceVersionPrefs,
+    reason: route.reason,
+  };
+}
+
+function buildChunkDiagnostic(
+  chunk: AskTrace['fused'][number] | NonNullable<AskTrace['selected_context']>[number],
+  index: number,
+): EvalTraceChunkDiagnostic {
+  const maybeContext = chunk as Partial<NonNullable<AskTrace['selected_context']>[number]>;
+  return {
+    rank: index + 1,
+    chunk_id: chunk.chunk_id,
+    page_id: chunk.page_id,
+    ...(maybeContext.page_title ? { page_title: maybeContext.page_title } : {}),
+    ...(maybeContext.page_url !== undefined ? { page_url: maybeContext.page_url } : {}),
+    ...(maybeContext.lang ? { lang: maybeContext.lang } : {}),
+    ...(maybeContext.in_page_path ? { in_page_path: maybeContext.in_page_path } : {}),
+    ...(maybeContext.text_preview ? { text_preview: maybeContext.text_preview } : {}),
+    final_score: chunk.final_score,
+    rrf_score: chunk.rrf_score,
+    vec_rank: chunk.vec_rank,
+    bm25_rank: chunk.bm25_rank,
+    nav_index: chunk.nav_index,
+    nav_index_boost: chunk.nav_index_boost,
   };
 }
 

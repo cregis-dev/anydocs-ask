@@ -37,7 +37,7 @@ import {
 } from './api-intent.ts';
 import { aggregate, TOP_K_FOR_AGGREGATION, type AggregateOutcome } from './aggregate.ts';
 import { buildPrompt, detectFormatHint } from './prompt.ts';
-import { LLMIntentRouter, type IntentRoute, type IntentRouter } from './intent-router.ts';
+import { LLMIntentRouter, type IntentProduct, type IntentRoute, type IntentRouter } from './intent-router.ts';
 import { postprocess } from './postprocess.ts';
 import type { AskRequest, AskResult } from './types.ts';
 
@@ -88,6 +88,12 @@ export type AskTrace = {
   /** Reranked chunks (sorted descending by final_score). Empty on early-error
    *  paths (validation / invalid_scope). */
   fused: AskTraceFusedChunk[];
+  /** Query text used by title/rerank/context hint logic after intent routing. */
+  search_question?: string;
+  /** Query text embedded for retrieval; may include rewritten multi-turn context. */
+  retrieve_question?: string;
+  /** Chunks actually sent into the LLM prompt after aggregation/context picking. */
+  selected_context?: AskTraceContextChunk[];
   /** True when aggregate decided to fire a clarify (subtree-aggregation ask). */
   subtree_ask_triggered: boolean;
   /** Top final_score from rerank — raw RRF + nav-boost output. Kept for
@@ -129,6 +135,14 @@ export type AskTraceFusedChunk = {
   /** Same formula as rerank.ts navIndexBoostFor. Captured here so analyze can
    *  inspect "why did this chunk win" without re-running the math. */
   nav_index_boost: number;
+};
+
+export type AskTraceContextChunk = AskTraceFusedChunk & {
+  lang: DocsLang;
+  page_title: string;
+  page_url: string | null;
+  in_page_path: string;
+  text_preview: string;
 };
 
 /**
@@ -220,8 +234,10 @@ type RetrievalPipelineOutput = {
   intentRoute: IntentRoute;
   projectSetupIntent: boolean;
   queryVector: Float32Array;
+  retrievalTrace: RetrievalTrace;
   retrieved: RetrievedChunk[];
   reranked: RerankedChunk[];
+  retrieveQuestion: string;
   searchQuestion: string;
   signatureAuthIntent: boolean;
   supplementalPageIds: string[];
@@ -269,6 +285,7 @@ async function runRetrievalPipeline(
   const supplementalContextHints = intentRoute.supplementalContextHints;
   const supplementalPageIds = intentRoute.supplementalPageIds;
   const apiReferenceVersionPrefs = intentRoute.apiReferenceVersionPrefs;
+  const apiReferencePagePrefix = apiReferencePagePrefixForProduct(intentRoute.product);
   const apiReferenceHintTerms = apiReferenceHints
     .flatMap((hint) => hint.toLowerCase().split(/\s+/))
     .filter(Boolean);
@@ -289,7 +306,7 @@ async function runRetrievalPipeline(
     apiReferenceFtsQueries,
     supplementalFtsQueries,
     supplementalPageIds,
-    apiReferencePagePrefix: null,
+    apiReferencePagePrefix,
   });
 
   const ruleReranked = rerank(retrieved, {
@@ -301,7 +318,7 @@ async function runRetrievalPipeline(
     apiIntent,
     apiReferenceHintTerms,
     apiReferenceVersionPrefs,
-    apiReferencePagePrefix: null,
+    apiReferencePagePrefix,
   });
 
   const reranked = deps.reranker
@@ -313,6 +330,8 @@ async function runRetrievalPipeline(
   const confidence = computeConfidence(reranked);
   const trace: AskTrace = {
     fused: fusedTrace,
+    search_question: searchQuestion,
+    retrieve_question: retrieveQuestion,
     subtree_ask_triggered: false,
     top_final_score,
     confidence,
@@ -334,8 +353,10 @@ async function runRetrievalPipeline(
     intentRoute,
     projectSetupIntent,
     queryVector,
+    retrievalTrace,
     retrieved,
     reranked,
+    retrieveQuestion,
     searchQuestion,
     signatureAuthIntent,
     supplementalPageIds,
@@ -425,8 +446,10 @@ async function askWithTraceInternal(
     intentRoute,
     projectSetupIntent,
     queryVector,
+    retrievalTrace,
     retrieved,
     reranked,
+    retrieveQuestion,
     searchQuestion,
     signatureAuthIntent,
     supplementalPageIds,
@@ -456,12 +479,13 @@ async function askWithTraceInternal(
     apiIntent,
     apiReferenceCandidates: reranked,
     apiReferenceHintTerms,
-    apiReferencePagePrefix: null,
+    apiReferencePagePrefix: apiReferencePagePrefixForProduct(intentRoute.product),
     apiReferenceVersionPrefs,
     projectSetupIntent,
     supplementalPageIds,
     queryLang,
   });
+  const selectedContextTrace = buildSelectedContextTrace(pickedChunks, retrievalTrace);
   const formatHint = detectFormatHint(question);
   const prompt = buildPrompt({
     question,
@@ -505,6 +529,9 @@ async function askWithTraceInternal(
       ),
       trace: {
         fused: fusedTrace,
+        search_question: searchQuestion,
+        retrieve_question: retrieveQuestion,
+        selected_context: selectedContextTrace,
         subtree_ask_triggered: false,
         top_final_score,
         confidence,
@@ -584,6 +611,9 @@ async function askWithTraceInternal(
       ),
       trace: {
         fused: fusedTrace,
+        search_question: searchQuestion,
+        retrieve_question: retrieveQuestion,
+        selected_context: selectedContextTrace,
         subtree_ask_triggered: false,
         top_final_score,
         confidence,
@@ -626,6 +656,9 @@ async function askWithTraceInternal(
     },
     trace: {
       fused: fusedTrace,
+      search_question: searchQuestion,
+      retrieve_question: retrieveQuestion,
+      selected_context: selectedContextTrace,
       subtree_ask_triggered: false,
       top_final_score,
       confidence,
@@ -637,6 +670,12 @@ async function askWithTraceInternal(
     },
     queryVector,
   };
+}
+
+function apiReferencePagePrefixForProduct(product: IntentProduct): string | null {
+  if (product === 'payment_engine') return 'api-payment-engine-api-';
+  if (product === 'waas') return 'api-waas-api-';
+  return null;
 }
 
 /**
@@ -690,6 +729,31 @@ function buildFusedTrace(
     nav_index: c.nav_index,
     nav_index_boost: navIndexBoostForTrace(c.nav_index),
   }));
+}
+
+function buildSelectedContextTrace(
+  chunks: RerankedChunk[],
+  retrievalTrace: RetrievalTrace,
+): AskTraceContextChunk[] {
+  return chunks.map((c) => ({
+    chunk_id: c.chunk_id,
+    page_id: c.page_id,
+    lang: c.lang,
+    page_title: c.page_title,
+    page_url: c.page_url,
+    in_page_path: c.in_page_path,
+    text_preview: previewText(c.text),
+    rrf_score: c.rrf_score,
+    final_score: c.final_score,
+    vec_rank: retrievalTrace.vecRanks.get(c.chunk_id) ?? null,
+    bm25_rank: retrievalTrace.bm25Ranks.get(c.chunk_id) ?? null,
+    nav_index: c.nav_index,
+    nav_index_boost: navIndexBoostForTrace(c.nav_index),
+  }));
+}
+
+function previewText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().slice(0, 240);
 }
 
 function navIndexBoostForTrace(navIndex: number | null): number {

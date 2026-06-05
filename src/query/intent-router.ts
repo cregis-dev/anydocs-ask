@@ -204,22 +204,41 @@ function normalizeRoute(
   history: IntentRouterTurn[],
 ): IntentRoute {
   const intent = normalizeIntent(raw.intent);
-  const product = normalizeProduct(raw.product);
   const usesHistory = raw.conversation_mode === 'follow_up' && history.length > 0;
   const rawEffective = typeof raw.effective_question === 'string' ? raw.effective_question.trim() : '';
   const effectiveQuestion = rawEffective.length > 0 ? rawEffective : question;
   const retrieval = raw.retrieval ?? {};
+  const initialApiReferenceHints = cleanList(retrieval.api_reference_hints, 8, 96);
   const supplementalContextHints = cleanList(retrieval.supplemental_context_hints, 6, 120);
+  const product = inferProduct(
+    question,
+    effectiveQuestion,
+    intent,
+    normalizeProduct(raw.product),
+    initialApiReferenceHints,
+    supplementalContextHints,
+  );
   const apiReferenceHints = normalizeApiReferenceHints(
     intent,
     product,
-    cleanList(retrieval.api_reference_hints, 8, 96),
+    initialApiReferenceHints,
+    supplementalContextHints,
+  );
+  const inferredSupplementalPageIds = inferSupplementalPageIds(
+    intent,
+    product,
+    question,
+    effectiveQuestion,
+    apiReferenceHints,
     supplementalContextHints,
   );
   const supplementalPageIds = mergeSupplementalPageIds(
     cleanList(retrieval.supplemental_page_ids, 6, 80)
       .filter((id) => /^[A-Za-z0-9_.:-]+$/.test(id)),
-    DEFAULT_SUPPLEMENTAL_PAGE_IDS[intent],
+    [
+      ...inferredSupplementalPageIds,
+      ...defaultSupplementalPageIds(intent, product),
+    ],
   );
   const apiReferenceVersionPrefs = cleanList(retrieval.api_versions, 3, 8)
     .map((v) => v.toLowerCase())
@@ -285,6 +304,85 @@ function normalizeProduct(value: unknown): IntentProduct {
   }
 }
 
+function inferProduct(
+  question: string,
+  effectiveQuestion: string,
+  intent: IntentName,
+  product: IntentProduct,
+  apiHints: string[],
+  supplementalHints: string[],
+): IntentProduct {
+  if (product === 'payment_engine' || product === 'waas') return product;
+  const haystack = [
+    question,
+    effectiveQuestion,
+    ...apiHints,
+    ...supplementalHints,
+  ].join(' ').toLowerCase();
+  const mentionsPaymentEngine =
+    /payment engine|支付引擎|checkout_url|cregis_id|order_currency|order_amount|hosted checkout|托管收银台|收银台/.test(haystack) ||
+    (intent === 'payment_flow' && /checkout|order|订单|付款|支付/.test(haystack));
+  const mentionsWaas =
+    /\bwaas\b|payout|withdrawal|withdraw|sub[-_ ]?address|from_address|to_address|chain_id|token_id|trc20|erc20|polygon|bep20|coins|钱包|出款|提币|子地址|链|网络/.test(haystack) ||
+    intent === 'waas_payout';
+
+  if (intent === 'project_setup' && mentionsPaymentEngine && mentionsWaas) return 'general';
+  if (intent === 'tokens_currencies' && mentionsWaas && !mentionsPaymentEngine) return 'waas';
+  if (mentionsPaymentEngine && !mentionsWaas) return 'payment_engine';
+  if (mentionsWaas && !mentionsPaymentEngine) return 'waas';
+  if (intent === 'payment_flow') return 'payment_engine';
+  if (intent === 'waas_payout') return 'waas';
+  return product;
+}
+
+function defaultSupplementalPageIds(intent: IntentName, product: IntentProduct): string[] {
+  if (intent === 'signature_auth') {
+    if (product === 'payment_engine') return ['authentication', 'webhook-mechanism', 'payment-engine-quickstart-30min'];
+    if (product === 'waas') return ['authentication', 'webhook-mechanism', 'waas-quickstart-30min'];
+    return ['authentication', 'webhook-mechanism', 'waas-quickstart-30min', 'payment-engine-quickstart-30min'];
+  }
+  if (intent === 'webhook_status') {
+    if (product === 'payment_engine') return ['webhook-mechanism', 'payment-engine-quickstart-30min', 'pe-business-flow'];
+    if (product === 'waas') return ['webhook-mechanism', 'waas-quickstart-30min', 'business-flow'];
+  }
+  if (intent === 'waas_payout') return ['waas-quickstart-30min', 'business-flow', 'waas-setup', 'supported-tokens'];
+  if (intent === 'tokens_currencies') {
+    if (product === 'payment_engine') return ['supported-currencies', 'payment-engine-quickstart-30min'];
+    if (product === 'waas') return ['supported-tokens', 'supported-currencies'];
+  }
+  return DEFAULT_SUPPLEMENTAL_PAGE_IDS[intent];
+}
+
+function inferSupplementalPageIds(
+  intent: IntentName,
+  product: IntentProduct,
+  question: string,
+  effectiveQuestion: string,
+  apiHints: string[],
+  supplementalHints: string[],
+): string[] {
+  const haystack = [
+    question,
+    effectiveQuestion,
+    ...apiHints,
+    ...supplementalHints,
+  ].join(' ').toLowerCase();
+  const out: string[] = [];
+  if (product === 'waas' && /sub_address_balance|sub[-_ ]?address balance|子地址.*余额|余额|balance/.test(haystack)) {
+    out.push('supported-tokens', 'waas-quickstart-30min');
+  }
+  if (product === 'payment_engine' && /order_currency|order_amount|usdt|crypto|cryptocurrency|fx|虚币|加密货币/.test(haystack)) {
+    out.push('supported-currencies', 'payment-engine-quickstart-30min');
+  }
+  if (intent === 'webhook_status' && product === 'payment_engine') {
+    out.push('webhook-mechanism', 'payment-engine-quickstart-30min', 'pe-business-flow');
+  }
+  if (intent === 'webhook_status' && product === 'waas') {
+    out.push('webhook-mechanism', 'waas-quickstart-30min', 'business-flow');
+  }
+  return out;
+}
+
 function cleanList(value: unknown, maxItems: number, maxChars: number): string[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
@@ -344,6 +442,13 @@ function normalizeApiReferenceHints(
   ) {
     pushUnique(out, 'coins');
     pushUnique(out, 'POST /api/v1/coins');
+  }
+  if (
+    product === 'waas' &&
+    /(sub_address_balance|sub[-_ ]?address balance|子地址.*余额|余额|balance)/i.test(haystack)
+  ) {
+    pushUnique(out, 'sub_address_balance');
+    pushUnique(out, 'POST /api/v1/sub_address_balance');
   }
   if (
     product === 'waas' &&

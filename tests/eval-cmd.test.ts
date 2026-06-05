@@ -220,6 +220,8 @@ test('writeCaseTraceJsonl persists per-case result, score, and retrieval trace w
         confidence: 1,
         tokens_in: null,
         tokens_out: null,
+        search_question: c.query,
+        retrieve_question: c.query,
         intent_route: {
           originalQuestion: c.query,
           effectiveQuestion: c.query,
@@ -236,6 +238,23 @@ test('writeCaseTraceJsonl persists per-case result, score, and retrieval trace w
           apiReferenceVersionPrefs: [],
           reason: 'test trace',
         },
+        selected_context: [
+          {
+            chunk_id: 7,
+            page_id: 'payment-engine-quickstart-30min',
+            lang: 'en',
+            page_title: 'Payment Engine Quickstart',
+            page_url: '/en/payment-engine-quickstart-30min',
+            in_page_path: 'p[1]',
+            text_preview: 'checkout_url',
+            rrf_score: 0.5,
+            final_score: 0.5,
+            vec_rank: 1,
+            bm25_rank: null,
+            nav_index: 2,
+            nav_index_boost: 0.1,
+          },
+        ],
       },
       queryVector: new Float32Array([1, 2, 3]),
     };
@@ -259,6 +278,10 @@ test('writeCaseTraceJsonl persists per-case result, score, and retrieval trace w
     assert.equal(parsed.trace.fused[0].chunk_id, 7);
     assert.equal(parsed.trace.intent_route.intent, 'payment_flow');
     assert.deepEqual(parsed.trace.intent_route.supplementalPageIds, ['payment-engine-quickstart-30min']);
+    assert.equal(parsed.diagnostics.route.effective_query, c.query);
+    assert.equal(parsed.diagnostics.retrieved_top20[0].rank, 1);
+    assert.equal(parsed.diagnostics.retrieved_top20[0].page_id, 'payment-engine-quickstart-30min');
+    assert.equal(parsed.diagnostics.prompt_context[0].page_id, 'payment-engine-quickstart-30min');
     assert.equal(parsed.queryVector, undefined);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -470,6 +493,24 @@ test('buildRetrievalEvalCaseTraceRecord stores retrieval trace without LLM resul
       confidence: 1,
       tokens_in: null,
       tokens_out: null,
+      search_question: c.query,
+      retrieve_question: c.query,
+      intent_route: {
+        originalQuestion: c.query,
+        effectiveQuestion: c.query,
+        usesHistory: false,
+        rewritten: false,
+        intent: 'signature_auth',
+        product: 'general',
+        apiIntent: false,
+        signatureAuthIntent: true,
+        projectSetupIntent: false,
+        apiReferenceHints: [],
+        supplementalContextHints: ['signature'],
+        supplementalPageIds: ['authentication'],
+        apiReferenceVersionPrefs: [],
+        reason: 'test retrieval trace',
+      },
     },
     queryVector: new Float32Array([1, 2, 3]),
   };
@@ -488,4 +529,8 @@ test('buildRetrievalEvalCaseTraceRecord stores retrieval trace without LLM resul
   assert.equal(record.queryVector, undefined);
   assert.equal(record.score.mrr, 1);
   assert.equal(record.trace.fused[0].chunk_id, 7);
+  assert.equal(record.diagnostics.route.intent, 'signature_auth');
+  assert.equal(record.diagnostics.route.effective_query, c.query);
+  assert.equal(record.diagnostics.retrieved_top20[0].page_id, 'payment-engine-quickstart-30min');
+  assert.deepEqual(record.diagnostics.prompt_context, []);
 });
