@@ -178,7 +178,7 @@ test('extractEntityTerms: plain 2-entity question without compare hint still ski
 // ---------------------------------------------------------------------------
 
 test('sanitizeFtsQuery: plain words wrapped as quoted tokens joined by OR', () => {
-  assert.equal(sanitizeFtsQuery('how do I login'), '"how" OR "do" OR "I" OR "login"');
+  assert.equal(sanitizeFtsQuery('how do I login'), '"login"');
 });
 
 test('sanitizeFtsQuery: strips MATCH operators', () => {
@@ -194,6 +194,24 @@ test('sanitizeFtsQuery: chinese punctuation acts as token boundary', () => {
   assert.equal(sanitizeFtsQuery('鉴权？怎么做'), '"鉴权" OR "怎么做"');
 });
 
+test('sanitizeFtsQuery: expands long zh signature phrases into searchable domain terms', () => {
+  const query = sanitizeFtsQuery('Cregis API 签名应该怎么拼接参数？sign 字段本身要不要参与签名？');
+  assert.ok(query?.includes('"签名"'));
+  assert.ok(query?.includes('"拼接"'));
+  assert.ok(query?.includes('"参数"'));
+  assert.ok(query?.includes('"字段"'));
+});
+
+test('sanitizeFtsQuery: expands long zh error-code phrases into searchable domain terms', () => {
+  const query = sanitizeFtsQuery(
+    'Cregis API 返回不是 00000 时，我应该先看哪些错误码来判断是签名、白名单还是项目配置问题？',
+  );
+  assert.ok(query?.includes('"错误码"'));
+  assert.ok(query?.includes('"签名"'));
+  assert.ok(query?.includes('"白名单"'));
+  assert.ok(query?.includes('"项目配置"'));
+});
+
 test('sanitizeFtsQuery: returns null when nothing useful survives', () => {
   assert.equal(sanitizeFtsQuery('   '), null);
   assert.equal(sanitizeFtsQuery('?!'), null);
@@ -207,7 +225,7 @@ test('sanitizeFtsQuery: returns null when nothing useful survives', () => {
 test('sanitizeFtsQuery: camelCase token emits both literal and phrase form', () => {
   assert.equal(
     sanitizeFtsQuery('does Markdown support codeGroup?'),
-    '"does" OR "Markdown" OR "support" OR "codeGroup" OR "code Group"',
+    '"Markdown" OR "support" OR "codeGroup" OR "code Group"',
   );
 });
 
@@ -215,6 +233,13 @@ test('sanitizeFtsQuery: deeper compound identifiers split too', () => {
   assert.equal(
     sanitizeFtsQuery('parse XMLHttpRequest body'),
     '"parse" OR "XMLHttpRequest" OR "XML Http Request" OR "body"',
+  );
+});
+
+test('sanitizeFtsQuery: drops English stop words when content terms survive', () => {
+  assert.equal(
+    sanitizeFtsQuery('B0001 after signing: what are the first three Cregis checks I should make?'),
+    '"B0001" OR "signing" OR "Cregis" OR "checks"',
   );
 });
 
