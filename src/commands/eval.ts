@@ -20,20 +20,28 @@ import { join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { Runtime } from '../server/runtime.ts';
 import { loadConfig } from '../config.ts';
+import type { LLM } from '../llm/types.ts';
 import {
   askWithTrace,
   askWithTraceStream,
+  retrieveOnlyWithTrace,
   type AskDeps,
+  type AskRetrievalOnlyResult,
   type AskTrace,
   type AskWithTraceResult,
 } from '../query/answer.ts';
+import { fallbackRoute, type IntentRouter } from '../query/intent-router.ts';
 import { readApproved } from '../golden/store.ts';
 import {
   failedCase,
   scoreCase,
+  scoreRetrievalCase,
+  summarizeRetrievalResults,
   summarizeResults,
   type CaseResult,
   type EvalSummary,
+  type RetrievalCaseResult,
+  type RetrievalEvalSummary,
 } from '../eval/scoring.ts';
 import type { GoldenCase } from '../golden/types.ts';
 import type { AskRequest, AskResult } from '../query/types.ts';
@@ -43,6 +51,8 @@ export type EvalOptions = {
   stateRoot: string;
   /** Compare against this baseline file path. Defaults to most recent prior eval report. */
   baselinePath?: string;
+  /** Retrieval-only eval: bypass LLM router and measure raw question retrieval. */
+  retrievalNoRouter?: boolean;
   /**
    * Optional per-phase progress callback. Receives lifecycle + per-case
    * events as the loop advances. CLI users don't set this (output goes via
@@ -64,6 +74,62 @@ export type EvalCaseTraceRecord = {
   score: CaseResult;
   result: AskResult;
   trace: AskTrace | null;
+  diagnostics: EvalTraceDiagnostics;
+};
+
+export type RetrievalEvalCaseTraceRecord = {
+  schema_version: 1;
+  case_id: string;
+  index: number;
+  total: number;
+  query: string;
+  lang: string;
+  request: AskRequest;
+  expected: GoldenCase['expected'];
+  score: RetrievalCaseResult;
+  trace: AskTrace | null;
+  diagnostics: EvalTraceDiagnostics;
+};
+
+export type EvalTraceDiagnostics = {
+  route: EvalTraceRouteDiagnostic | null;
+  search_question: string | null;
+  retrieve_question: string | null;
+  retrieved_top20: EvalTraceChunkDiagnostic[];
+  prompt_context: EvalTraceChunkDiagnostic[];
+};
+
+export type EvalTraceRouteDiagnostic = {
+  original_question: string;
+  effective_query: string;
+  uses_history: boolean;
+  rewritten: boolean;
+  intent: string;
+  product: string;
+  api_intent: boolean;
+  signature_auth_intent: boolean;
+  project_setup_intent: boolean;
+  api_reference_hints: string[];
+  supplemental_page_ids: string[];
+  api_reference_version_prefs: string[];
+  reason: string | null;
+};
+
+export type EvalTraceChunkDiagnostic = {
+  rank: number;
+  chunk_id: number;
+  page_id: string;
+  page_title?: string;
+  page_url?: string | null;
+  lang?: string;
+  in_page_path?: string;
+  text_preview?: string;
+  final_score: number;
+  rrf_score: number;
+  vec_rank: number | null;
+  bm25_rank: number | null;
+  nav_index: number | null;
+  nav_index_boost: number;
 };
 
 export type EvalProgressEvent =
@@ -127,7 +193,7 @@ export async function runEval(opts: EvalOptions): Promise<number> {
   opts.onProgress?.({ type: 'warm', bootMs: start.boot_ms, chunks: start.initialIndex.chunks.totalChunks });
 
   // 3. Run cases.
-  const deps = askDepsForEval(runtime);
+  const deps = askDepsForRetrievalEval(runtime, { noRouter: opts.retrievalNoRouter === true });
   const results: CaseResult[] = [];
   const caseTraces: EvalCaseTraceRecord[] = [];
   for (let i = 0; i < cases.length; i++) {
@@ -202,6 +268,79 @@ export async function runEval(opts: EvalOptions): Promise<number> {
   return 0;
 }
 
+export async function runRetrievalEval(opts: EvalOptions): Promise<number> {
+  const projectRoot = resolve(opts.projectRoot);
+  const stateRoot = resolve(opts.stateRoot);
+  const { config, source } = await loadConfig(projectRoot);
+  if (source) {
+    process.stdout.write(`anydocs-ask retrieval eval: loaded config from ${source}\n`);
+  }
+
+  const { rows: cases, malformed } = readApproved(stateRoot);
+  if (cases.length === 0) {
+    process.stderr.write(
+      `error: no approved Golden cases at ${stateRoot}/golden/cases.jsonl\n` +
+        `       run 'anydocs-ask golden generate' then 'anydocs-ask golden review' first.\n`,
+    );
+    return 1;
+  }
+  if (malformed > 0) {
+    process.stderr.write(`[ask] retrieval eval: skipped ${malformed} malformed line(s)\n`);
+  }
+  process.stdout.write(`anydocs-ask retrieval eval: ${cases.length} cases loaded\n`);
+
+  const runtime = new Runtime({ projectRoot, stateRoot, config, skipWatcher: true });
+  const t0 = performance.now();
+  const start = await runtime.start();
+  process.stdout.write(
+    `anydocs-ask retrieval eval: warm in ${start.boot_ms}ms — chunks=${start.initialIndex.chunks.totalChunks}\n`,
+  );
+
+  const deps = askDepsForRetrievalEval(runtime, { noRouter: opts.retrievalNoRouter === true });
+  const results: RetrievalCaseResult[] = [];
+  const caseTraces: RetrievalEvalCaseTraceRecord[] = [];
+  for (let i = 0; i < cases.length; i++) {
+    const c = cases[i]!;
+    const t1 = performance.now();
+    let traced: AskRetrievalOnlyResult | null = null;
+    let caseResult: RetrievalCaseResult;
+    try {
+      traced = await retrieveOnlyWithTrace(deps, goldenToAskRequest(c));
+      caseResult = scoreRetrievalCase(c, traced.trace, performance.now() - t1);
+    } catch (err) {
+      process.stderr.write(`[ask] retrieval eval: case ${c.id} threw: ${(err as Error).message}\n`);
+      caseResult = scoreRetrievalCase(c, { fused: [] }, performance.now() - t1);
+    }
+    results.push(caseResult);
+    caseTraces.push(buildRetrievalEvalCaseTraceRecord({
+      c,
+      index: i,
+      total: cases.length,
+      caseResult,
+      traced,
+    }));
+    if ((i + 1) % 20 === 0 || i === cases.length - 1) {
+      process.stdout.write(`  ${i + 1}/${cases.length} retrieval cases done\n`);
+    }
+  }
+  await runtime.stop();
+  const totalMs = Math.round(performance.now() - t0);
+  const summary = summarizeRetrievalResults(results);
+  const { reportPath, caseTracePath } = writeRetrievalReport(stateRoot, {
+    summary,
+    results,
+    caseTraces,
+    totalMs,
+    noRouter: opts.retrievalNoRouter === true,
+  });
+  process.stdout.write(
+    `anydocs-ask retrieval eval: wrote ${reportPath}\n` +
+      `anydocs-ask retrieval eval: wrote ${caseTracePath}\n` +
+      `  MRR=${summary.mrr.toFixed(2)}  H@1=${summary.hit_at_1.toFixed(2)}  CR@5=${summary.context_recall_at_5 === null ? '—' : summary.context_recall_at_5.toFixed(2)}  (retrieval: H@3=${summary.hit_at_3.toFixed(2)} H@5=${summary.r_at_5.toFixed(2)} CP@5=${summary.context_precision_at_5.toFixed(2)}; ${results.length} cases, ${totalMs}ms)\n`,
+  );
+  return 0;
+}
+
 export type EvalAskFn = (deps: AskDeps, req: AskRequest) => Promise<AskWithTraceResult>;
 
 export function evalAskModeForDeps(deps: Pick<AskDeps, 'llm'>): 'stream' | 'json' {
@@ -259,6 +398,42 @@ export function askDepsForEval(
   };
 }
 
+export function askDepsForRetrievalEval(
+  runtime: Pick<Runtime, 'db' | 'embedder' | 'config'> &
+    Partial<Pick<Runtime, 'llm'>> &
+    { reranker?: Runtime['reranker'] },
+  opts: { noRouter?: boolean } = {},
+): AskDeps {
+  if (opts.noRouter === true) {
+    return {
+      db: runtime.db,
+      embedder: runtime.embedder,
+      llm: RETRIEVAL_EVAL_UNUSED_LLM,
+      reranker: runtime.reranker ?? null,
+      rerankerConfig: runtime.config.reranker,
+      promptConfig: runtime.config.prompt,
+      intentRouter: RAW_RETRIEVAL_EVAL_ROUTER,
+    };
+  }
+  return askDepsForEval(runtime as Pick<Runtime, 'db' | 'embedder' | 'llm' | 'config'> & { reranker?: Runtime['reranker'] });
+}
+
+const RAW_RETRIEVAL_EVAL_ROUTER: IntentRouter = {
+  async route({ question }) {
+    return {
+      ...fallbackRoute(question),
+      reason: 'retrieval_eval_no_router',
+    };
+  },
+};
+
+const RETRIEVAL_EVAL_UNUSED_LLM: LLM = {
+  model: 'retrieval-eval-no-router',
+  async generate() {
+    throw new Error('retrieval eval --no-router should not call the LLM');
+  },
+};
+
 function goldenToAskRequest(c: GoldenCase): AskRequest {
   const req: AskRequest = { question: c.query };
   if (c.context_pageId) {
@@ -292,6 +467,80 @@ export function buildEvalCaseTraceRecord(args: {
     score: args.caseResult,
     result,
     trace: args.traced?.trace ?? null,
+    diagnostics: buildEvalTraceDiagnostics(args.traced?.trace ?? null),
+  };
+}
+
+export function buildRetrievalEvalCaseTraceRecord(args: {
+  c: GoldenCase;
+  index: number;
+  total: number;
+  caseResult: RetrievalCaseResult;
+  traced: AskRetrievalOnlyResult | null;
+}): RetrievalEvalCaseTraceRecord {
+  return {
+    schema_version: 1,
+    case_id: args.c.id,
+    index: args.index,
+    total: args.total,
+    query: args.c.query,
+    lang: args.c.lang,
+    request: goldenToAskRequest(args.c),
+    expected: args.c.expected,
+    score: args.caseResult,
+    trace: args.traced?.trace ?? null,
+    diagnostics: buildEvalTraceDiagnostics(args.traced?.trace ?? null),
+  };
+}
+
+function buildEvalTraceDiagnostics(trace: AskTrace | null): EvalTraceDiagnostics {
+  return {
+    route: trace?.intent_route ? buildRouteDiagnostic(trace.intent_route) : null,
+    search_question: trace?.search_question ?? trace?.intent_route?.effectiveQuestion ?? null,
+    retrieve_question: trace?.retrieve_question ?? null,
+    retrieved_top20: (trace?.fused ?? []).slice(0, 20).map((chunk, index) => buildChunkDiagnostic(chunk, index)),
+    prompt_context: (trace?.selected_context ?? []).map((chunk, index) => buildChunkDiagnostic(chunk, index)),
+  };
+}
+
+function buildRouteDiagnostic(route: NonNullable<AskTrace['intent_route']>): EvalTraceRouteDiagnostic {
+  return {
+    original_question: route.originalQuestion,
+    effective_query: route.effectiveQuestion,
+    uses_history: route.usesHistory,
+    rewritten: route.rewritten,
+    intent: route.intent,
+    product: route.product,
+    api_intent: route.apiIntent,
+    signature_auth_intent: route.signatureAuthIntent,
+    project_setup_intent: route.projectSetupIntent,
+    api_reference_hints: route.apiReferenceHints,
+    supplemental_page_ids: route.supplementalPageIds,
+    api_reference_version_prefs: route.apiReferenceVersionPrefs,
+    reason: route.reason,
+  };
+}
+
+function buildChunkDiagnostic(
+  chunk: AskTrace['fused'][number] | NonNullable<AskTrace['selected_context']>[number],
+  index: number,
+): EvalTraceChunkDiagnostic {
+  const maybeContext = chunk as Partial<NonNullable<AskTrace['selected_context']>[number]>;
+  return {
+    rank: index + 1,
+    chunk_id: chunk.chunk_id,
+    page_id: chunk.page_id,
+    ...(maybeContext.page_title ? { page_title: maybeContext.page_title } : {}),
+    ...(maybeContext.page_url !== undefined ? { page_url: maybeContext.page_url } : {}),
+    ...(maybeContext.lang ? { lang: maybeContext.lang } : {}),
+    ...(maybeContext.in_page_path ? { in_page_path: maybeContext.in_page_path } : {}),
+    ...(maybeContext.text_preview ? { text_preview: maybeContext.text_preview } : {}),
+    final_score: chunk.final_score,
+    rrf_score: chunk.rrf_score,
+    vec_rank: chunk.vec_rank,
+    bm25_rank: chunk.bm25_rank,
+    nav_index: chunk.nav_index,
+    nav_index_boost: chunk.nav_index_boost,
   };
 }
 
@@ -345,9 +594,106 @@ function writeReport(
   return { reportPath, caseTracePath };
 }
 
-export function writeCaseTraceJsonl(path: string, records: EvalCaseTraceRecord[]): void {
+function writeRetrievalReport(
+  stateRoot: string,
+  args: {
+    summary: RetrievalEvalSummary;
+    results: RetrievalCaseResult[];
+    caseTraces: RetrievalEvalCaseTraceRecord[];
+    totalMs: number;
+    noRouter?: boolean;
+  },
+): { reportPath: string; caseTracePath: string } {
+  const dir = join(stateRoot, 'reports');
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const date = new Date().toISOString().slice(0, 10);
+  const basename = args.noRouter ? `${date}-retrieval-eval.raw` : `${date}-retrieval-eval`;
+  const reportPath = join(dir, `${basename}.md`);
+  const caseTracePath = join(dir, `${basename}.cases.jsonl`);
+  const md = renderRetrievalReport(date, args);
+  writeFileSync(reportPath, md, 'utf8');
+  writeCaseTraceJsonl(caseTracePath, args.caseTraces);
+  return { reportPath, caseTracePath };
+}
+
+export function writeCaseTraceJsonl(
+  path: string,
+  records: Array<EvalCaseTraceRecord | RetrievalEvalCaseTraceRecord>,
+): void {
   const body = records.map((record) => JSON.stringify(record)).join('\n');
   writeFileSync(path, body.length > 0 ? `${body}\n` : '', 'utf8');
+}
+
+export function renderRetrievalReport(
+  date: string,
+  args: {
+    summary: RetrievalEvalSummary;
+    results: RetrievalCaseResult[];
+    caseTraces: RetrievalEvalCaseTraceRecord[];
+    totalMs: number;
+    noRouter?: boolean;
+  },
+): string {
+  const { summary, results, totalMs } = args;
+  const fmt = (x: number): string => x.toFixed(2);
+  const fmtOpt = (x: number | null | undefined): string => x === null || x === undefined ? '—' : x.toFixed(2);
+  const lines: string[] = [];
+  lines.push(`# Retrieval Eval — ${date}`);
+  lines.push('');
+  lines.push(`Cases: ${summary.n}  Wall time: ${totalMs}ms`);
+  lines.push(`Router: ${args.noRouter ? 'disabled (--no-router raw retrieval)' : 'enabled (routed retrieval)'}`);
+  lines.push(`Case traces: \`${args.noRouter ? `${date}-retrieval-eval.raw` : `${date}-retrieval-eval`}.cases.jsonl\``);
+  lines.push('');
+  lines.push('## Core retrieval quality');
+  lines.push('');
+  lines.push('| metric      | value |');
+  lines.push('|-------------|-------|');
+  lines.push(`| MRR         | ${fmt(summary.mrr)}  |`);
+  lines.push(`| Hit@1       | ${fmt(summary.hit_at_1)}  |`);
+  lines.push(`| Context-R@5 | ${fmtOpt(summary.context_recall_at_5)}  |`);
+  if (summary.context_recall_n > 0) {
+    lines.push('');
+    lines.push(`Context-R@5 cases: ${summary.context_recall_n}`);
+  }
+  lines.push('');
+  lines.push('## Retrieval diagnostics');
+  lines.push('');
+  lines.push('| metric      | value |');
+  lines.push('|-------------|-------|');
+  lines.push(`| Hit@3       | ${fmt(summary.hit_at_3)}  |`);
+  lines.push(`| Hit@5       | ${fmt(summary.r_at_5)}  |`);
+  lines.push(`| Context-P@5 | ${fmt(summary.context_precision_at_5)}  |`);
+  lines.push('');
+  lines.push(
+    args.noRouter
+      ? 'This mode skips the intent router, final answer generation, and citation postprocessing. It measures raw retrieval over the user question.'
+      : 'This mode skips final answer generation and citation postprocessing. It still uses the configured intent router, so route/rewrite effects are included in retrieval metrics.',
+  );
+  lines.push('');
+
+  const recallFails = results.filter((r) => !r.r_at_5);
+  if (recallFails.length > 0) {
+    lines.push(`## Retrieval misses (${recallFails.length})`);
+    for (const r of recallFails) {
+      lines.push(`- ${r.case_id}: ${r.query}`);
+      lines.push(`  - top5: ${r.retrieved_pages_top5.join(', ') || '(empty)'}`);
+    }
+    lines.push('');
+  }
+
+  const top1Fails = results.filter((r) => r.r_at_5 && !r.hit_at_1);
+  if (top1Fails.length > 0) {
+    lines.push(`## Top-1 misses (${top1Fails.length})`);
+    for (const r of top1Fails) {
+      lines.push(`- ${r.case_id}: MRR=${r.mrr.toFixed(2)} top5=[${r.retrieved_pages_top5.join(', ')}]`);
+    }
+    lines.push('');
+  }
+
+  const embed = JSON.stringify({ date, summary });
+  lines.push(`<!-- RETRIEVAL_EVAL_SUMMARY ${embed} -->`);
+  lines.push('');
+  return lines.join('\n');
 }
 
 export function renderReport(

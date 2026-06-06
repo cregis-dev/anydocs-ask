@@ -43,7 +43,7 @@ import { runStatus } from './commands/status.ts';
 import { runWorkspaceInit, runWorkspaceLs, runWorkspaceAdd, runWorkspaceRm } from './commands/workspace.ts';
 import { runRunsExport, runRunsTail } from './commands/runs.ts';
 import { runGoldenGenerate, runGoldenImport, runGoldenReview } from './commands/golden.ts';
-import { runEval } from './commands/eval.ts';
+import { runEval, runRetrievalEval } from './commands/eval.ts';
 import { runAnalyzeRuns } from './commands/analyze.ts';
 import { runConsole } from './commands/console.ts';
 import {
@@ -138,7 +138,7 @@ Usage:
                                              [--rewrite-batch-size N] [--include-console]
   anydocs-ask golden review    <projectRoot> [--reviewer <name>]
   anydocs-ask golden import    <projectRoot> --file <jsonl> [--replace]
-  anydocs-ask eval             <projectRoot> [--baseline <path>]
+  anydocs-ask eval             <projectRoot> [--baseline <path>] [--retrieval-only] [--no-router]
   anydocs-ask analyze runs     <projectRoot> [--since 7d] [--include-console]
   anydocs-ask feedback export   <projectRoot>
   anydocs-ask feedback import   <projectRoot>
@@ -459,6 +459,18 @@ async function main(): Promise<number> {
     }
     case 'eval': {
       const baseline = typeof flags.baseline === 'string' ? flags.baseline : undefined;
+      if (flags['retrieval-only'] === true) {
+        return await runRetrievalEval({
+          projectRoot,
+          stateRoot,
+          ...(baseline !== undefined ? { baselinePath: baseline } : {}),
+          ...(flags['no-router'] === true ? { retrievalNoRouter: true } : {}),
+        });
+      }
+      if (flags['no-router'] === true) {
+        process.stderr.write(`error: --no-router requires --retrieval-only\n`);
+        return 2;
+      }
       return await runEval({
         projectRoot,
         stateRoot,

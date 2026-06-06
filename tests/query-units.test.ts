@@ -178,7 +178,7 @@ test('extractEntityTerms: plain 2-entity question without compare hint still ski
 // ---------------------------------------------------------------------------
 
 test('sanitizeFtsQuery: plain words wrapped as quoted tokens joined by OR', () => {
-  assert.equal(sanitizeFtsQuery('how do I login'), '"how" OR "do" OR "I" OR "login"');
+  assert.equal(sanitizeFtsQuery('how do I login'), '"login"');
 });
 
 test('sanitizeFtsQuery: strips MATCH operators', () => {
@@ -194,6 +194,24 @@ test('sanitizeFtsQuery: chinese punctuation acts as token boundary', () => {
   assert.equal(sanitizeFtsQuery('鉴权？怎么做'), '"鉴权" OR "怎么做"');
 });
 
+test('sanitizeFtsQuery: expands long zh signature phrases into searchable domain terms', () => {
+  const query = sanitizeFtsQuery('Cregis API 签名应该怎么拼接参数？sign 字段本身要不要参与签名？');
+  assert.ok(query?.includes('"签名"'));
+  assert.ok(query?.includes('"拼接"'));
+  assert.ok(query?.includes('"参数"'));
+  assert.ok(query?.includes('"字段"'));
+});
+
+test('sanitizeFtsQuery: expands long zh error-code phrases into searchable domain terms', () => {
+  const query = sanitizeFtsQuery(
+    'Cregis API 返回不是 00000 时，我应该先看哪些错误码来判断是签名、白名单还是项目配置问题？',
+  );
+  assert.ok(query?.includes('"错误码"'));
+  assert.ok(query?.includes('"签名"'));
+  assert.ok(query?.includes('"白名单"'));
+  assert.ok(query?.includes('"项目配置"'));
+});
+
 test('sanitizeFtsQuery: returns null when nothing useful survives', () => {
   assert.equal(sanitizeFtsQuery('   '), null);
   assert.equal(sanitizeFtsQuery('?!'), null);
@@ -207,7 +225,7 @@ test('sanitizeFtsQuery: returns null when nothing useful survives', () => {
 test('sanitizeFtsQuery: camelCase token emits both literal and phrase form', () => {
   assert.equal(
     sanitizeFtsQuery('does Markdown support codeGroup?'),
-    '"does" OR "Markdown" OR "support" OR "codeGroup" OR "code Group"',
+    '"Markdown" OR "support" OR "codeGroup" OR "code Group"',
   );
 });
 
@@ -215,6 +233,13 @@ test('sanitizeFtsQuery: deeper compound identifiers split too', () => {
   assert.equal(
     sanitizeFtsQuery('parse XMLHttpRequest body'),
     '"parse" OR "XMLHttpRequest" OR "XML Http Request" OR "body"',
+  );
+});
+
+test('sanitizeFtsQuery: drops English stop words when content terms survive', () => {
+  assert.equal(
+    sanitizeFtsQuery('B0001 after signing: what are the first three Cregis checks I should make?'),
+    '"B0001" OR "signing" OR "Cregis" OR "checks"',
   );
 });
 
@@ -333,7 +358,10 @@ test('LLMIntentRouter: standalone signature route can ignore unrelated history',
   assert.equal(route.apiIntent, false);
   assert.equal(route.signatureAuthIntent, true);
   assert.deepEqual(route.supplementalContextHints, ['authentication signature API_KEY MD5 sign empty values lexicographical order']);
-  assert.deepEqual(route.supplementalPageIds, ['authentication', 'webhook-mechanism']);
+  assert.deepEqual(route.supplementalPageIds, [
+    'authentication',
+    'webhook-mechanism',
+  ]);
 });
 
 test('LLMIntentRouter: adds intent default pages when the LLM omits them', async () => {
@@ -359,8 +387,8 @@ test('LLMIntentRouter: adds intent default pages when the LLM omits them', async
   assert.equal(route.apiIntent, false);
   assert.deepEqual(route.supplementalPageIds, [
     'webhook-mechanism',
-    'waas-quickstart-30min',
     'payment-engine-quickstart-30min',
+    'pe-business-flow',
   ]);
 });
 
@@ -414,7 +442,10 @@ test('LLMIntentRouter: keeps endpoint-specific signature questions API-aware', a
   });
 
   assert.equal(route.apiIntent, true);
-  assert.deepEqual(route.supplementalPageIds, ['authentication', 'webhook-mechanism']);
+  assert.deepEqual(route.supplementalPageIds, [
+    'authentication',
+    'webhook-mechanism',
+  ]);
 });
 
 test('LLMIntentRouter: keeps endpoint-specific webhook status questions API-aware', async () => {
@@ -464,6 +495,88 @@ test('LLMIntentRouter: normalizes token identifier routes to include the coins e
   assert.ok(route.apiReferenceHints.includes('coins'));
   assert.ok(route.apiReferenceHints.includes('POST /api/v1/coins'));
   assert.equal(route.apiIntent, true);
+});
+
+test('LLMIntentRouter: infers WaaS product for USDT network token questions', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: 'USDT-TRC20、USDT-ERC20、USDT-Polygon 都是 USDT，请求里怎么区分网络？',
+    intent: 'tokens_currencies',
+    product: 'general',
+    retrieval: {
+      prefer_api_reference: false,
+      api_reference_hints: ['USDT', 'network', 'currency'],
+      supplemental_context_hints: [],
+      supplemental_page_ids: [],
+      api_versions: [],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: 'USDT-TRC20、USDT-ERC20、USDT-Polygon 都是 USDT，请求里怎么区分网络？',
+    lang: 'zh',
+  });
+
+  assert.equal(route.product, 'waas');
+  assert.equal(route.apiIntent, true);
+  assert.ok(route.apiReferenceHints.includes('coins'));
+  assert.ok(route.apiReferenceHints.includes('POST /api/v1/coins'));
+  assert.deepEqual(route.supplementalPageIds, ['supported-tokens', 'supported-currencies']);
+});
+
+test('LLMIntentRouter: payment-engine webhook defaults include PE flow pages', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: '同一笔支付引擎订单可能先部分支付再补款吗？回调里我应该怎么做幂等和状态映射？',
+    intent: 'webhook_status',
+    product: 'payment_engine',
+    retrieval: {
+      prefer_api_reference: false,
+      api_reference_hints: ['event_type', 'data.status', 'POST /api/v2/order/info'],
+      supplemental_context_hints: [],
+      supplemental_page_ids: [],
+      api_versions: ['v2'],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: '同一笔支付引擎订单可能先部分支付再补款吗？回调里我应该怎么做幂等和状态映射？',
+    lang: 'zh',
+  });
+
+  assert.equal(route.product, 'payment_engine');
+  assert.equal(route.apiIntent, true);
+  assert.deepEqual(route.supplementalPageIds, [
+    'webhook-mechanism',
+    'payment-engine-quickstart-30min',
+    'pe-business-flow',
+  ]);
+});
+
+test('LLMIntentRouter: normalizes sub-address balance routes to the balance endpoint', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: '我要在出款前查某个子地址的可用余额，currency 参数怎么填？',
+    intent: 'api_reference',
+    product: 'waas',
+    retrieval: {
+      prefer_api_reference: true,
+      api_reference_hints: ['sub address balance', 'currency', 'address'],
+      supplemental_context_hints: [],
+      supplemental_page_ids: [],
+      api_versions: ['v1'],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: '我要在出款前查某个子地址的可用余额，currency 参数怎么填？',
+    lang: 'zh',
+  });
+
+  assert.equal(route.apiIntent, true);
+  assert.ok(route.apiReferenceHints.includes('sub_address_balance'));
+  assert.ok(route.apiReferenceHints.includes('POST /api/v1/sub_address_balance'));
+  assert.deepEqual(route.supplementalPageIds, ['supported-tokens', 'waas-quickstart-30min']);
 });
 
 test('LLMIntentRouter: expands bare API paths into searchable operation hints', async () => {

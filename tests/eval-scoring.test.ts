@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { scoreCase, summarizeResults } from '../src/eval/scoring.ts';
+import {
+  scoreCase,
+  scoreRetrievalCase,
+  summarizeRetrievalResults,
+  summarizeResults,
+} from '../src/eval/scoring.ts';
 import type { GoldenCase } from '../src/golden/types.ts';
 import type { AskTrace } from '../src/query/answer.ts';
 import type { AskResult } from '../src/query/types.ts';
@@ -128,6 +133,56 @@ test('scoreCase MRR / Hit@K are 0/false when no must-cite page appears in the tr
   assert.equal(scored.r_at_5, false);
   assert.equal(scored.mrr, 0);
   assert.equal(scored.context_precision_at_5, 0);
+});
+
+test('scoreRetrievalCase computes retrieval-only metrics without answer/citation fields', () => {
+  const c = golden({
+    expected: {
+      must_cite_pages: ['payment-engine-api', 'payment-engine-quickstart-30min'],
+      allow_cite_pages: ['webhook-mechanism'],
+      must_contain: ['checkout_url'],
+      forbid_contain: [],
+    },
+  });
+
+  const scored = scoreRetrievalCase(
+    c,
+    trace(['noise-1', 'payment-engine-api', 'webhook-mechanism', 'noise-2', 'noise-3']),
+    42,
+  );
+
+  assert.equal(scored.case_id, 'case-1');
+  assert.equal(scored.hit_at_1, false);
+  assert.equal(scored.hit_at_3, true);
+  assert.equal(scored.r_at_5, true);
+  assert.equal(scored.mrr, 1 / 2);
+  assert.equal(scored.context_precision_at_5, 2 / 5);
+  assert.equal(scored.context_recall_at_5, 1 / 2);
+  assert.deepEqual(scored.retrieved_pages_top5, [
+    'noise-1',
+    'payment-engine-api',
+    'webhook-mechanism',
+    'noise-2',
+    'noise-3',
+  ]);
+  assert.equal(scored.latency_ms, 42);
+});
+
+test('summarizeRetrievalResults averages retrieval-only metrics', () => {
+  const results = [
+    scoreRetrievalCase(golden({ id: 'hit-1' }), trace(['payment-engine-api']), 10),
+    scoreRetrievalCase(golden({ id: 'miss' }), trace(['noise']), 20),
+  ];
+
+  const summary = summarizeRetrievalResults(results);
+
+  assert.equal(summary.n, 2);
+  assert.equal(summary.r_at_5, 0.5);
+  assert.equal(summary.hit_at_1, 0.5);
+  assert.equal(summary.hit_at_3, 0.5);
+  assert.equal(summary.mrr, 0.5);
+  assert.equal(summary.context_recall_n, 2);
+  assert.equal(summary.context_recall_at_5, 0.5);
 });
 
 test('scoreCase MRR ignores chunk-level duplication of the same page', () => {

@@ -102,6 +102,35 @@ export type EvalSummary = {
   api_rule_pass: number | null;
 };
 
+export type RetrievalCaseResult = {
+  case_id: string;
+  query: string;
+  /**
+   * @deprecated Kept for parity with full eval. Prefer hit_at_1 / mrr for
+   * headline retrieval quality.
+   */
+  r_at_5: boolean;
+  hit_at_1: boolean;
+  hit_at_3: boolean;
+  mrr: number;
+  context_precision_at_5: number;
+  context_recall_at_5: number | null;
+  retrieved_pages_top5: string[];
+  latency_ms: number;
+};
+
+export type RetrievalEvalSummary = {
+  n: number;
+  /** @deprecated See {@link RetrievalCaseResult.r_at_5}. */
+  r_at_5: number;
+  hit_at_1: number;
+  hit_at_3: number;
+  mrr: number;
+  context_precision_at_5: number;
+  context_recall_n: number;
+  context_recall_at_5: number | null;
+};
+
 export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): CaseResult {
   const expectedKind = c.expected.expected_kind ?? 'answer';
   const mustPages = new Set(c.expected.must_cite_pages);
@@ -212,6 +241,41 @@ export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): Ca
   };
 }
 
+export function scoreRetrievalCase(
+  c: GoldenCase,
+  trace: Pick<AskTrace, 'fused'>,
+  latencyMs: number,
+): RetrievalCaseResult {
+  const mustPages = new Set(c.expected.must_cite_pages);
+  const allowedCitationPages = new Set([
+    ...c.expected.must_cite_pages,
+    ...(c.expected.allow_cite_pages ?? []),
+  ]);
+  const uniquePagesInOrder = uniqueOrdered(trace.fused.map((f) => f.page_id));
+  const top5Pages = uniqueOrdered(trace.fused.slice(0, 5).map((f) => f.page_id));
+  const r_at_5 = top5Pages.some((p) => mustPages.has(p));
+  const hit_at_1 = uniquePagesInOrder.length > 0 && mustPages.has(uniquePagesInOrder[0]!);
+  const hit_at_3 = uniquePagesInOrder.slice(0, 3).some((p) => mustPages.has(p));
+  const mrr = computeMrr(uniquePagesInOrder, mustPages);
+  const context_precision_at_5 = computeContextPrecision(trace.fused.slice(0, 5), allowedCitationPages);
+  const context_recall_at_5 = mustPages.size === 0
+    ? null
+    : [...mustPages].filter((p) => top5Pages.includes(p)).length / mustPages.size;
+
+  return {
+    case_id: c.id,
+    query: c.query,
+    r_at_5,
+    hit_at_1,
+    hit_at_3,
+    mrr,
+    context_precision_at_5,
+    context_recall_at_5,
+    retrieved_pages_top5: top5Pages,
+    latency_ms: Math.round(latencyMs),
+  };
+}
+
 export function failedCase(c: GoldenCase, latencyMs: number): CaseResult {
   const expectedKind = c.expected.expected_kind ?? 'answer';
   const hasApiRules =
@@ -247,6 +311,24 @@ export function failedCase(c: GoldenCase, latencyMs: number): CaseResult {
     error_message: null,
     error_detail: null,
     latency_ms: Math.round(latencyMs),
+  };
+}
+
+export function summarizeRetrievalResults(results: RetrievalCaseResult[]): RetrievalEvalSummary {
+  const recallResults = results.filter(
+    (r): r is RetrievalCaseResult & { context_recall_at_5: number } => r.context_recall_at_5 !== null,
+  );
+  return {
+    n: results.length,
+    r_at_5: mean(results.map((r) => (r.r_at_5 ? 1 : 0))),
+    hit_at_1: mean(results.map((r) => (r.hit_at_1 ? 1 : 0))),
+    hit_at_3: mean(results.map((r) => (r.hit_at_3 ? 1 : 0))),
+    mrr: mean(results.map((r) => r.mrr)),
+    context_precision_at_5: mean(results.map((r) => r.context_precision_at_5)),
+    context_recall_n: recallResults.length,
+    context_recall_at_5: recallResults.length === 0
+      ? null
+      : mean(recallResults.map((r) => r.context_recall_at_5)),
   };
 }
 
