@@ -337,9 +337,7 @@ function inferProduct(
 
 function defaultSupplementalPageIds(intent: IntentName, product: IntentProduct): string[] {
   if (intent === 'signature_auth') {
-    if (product === 'payment_engine') return ['authentication', 'webhook-mechanism', 'payment-engine-quickstart-30min'];
-    if (product === 'waas') return ['authentication', 'webhook-mechanism', 'waas-quickstart-30min'];
-    return ['authentication', 'webhook-mechanism', 'waas-quickstart-30min', 'payment-engine-quickstart-30min'];
+    return ['authentication', 'webhook-mechanism'];
   }
   if (intent === 'webhook_status') {
     if (product === 'payment_engine') return ['webhook-mechanism', 'payment-engine-quickstart-30min', 'pe-business-flow'];

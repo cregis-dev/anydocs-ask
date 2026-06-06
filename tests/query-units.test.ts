@@ -361,8 +361,6 @@ test('LLMIntentRouter: standalone signature route can ignore unrelated history',
   assert.deepEqual(route.supplementalPageIds, [
     'authentication',
     'webhook-mechanism',
-    'waas-quickstart-30min',
-    'payment-engine-quickstart-30min',
   ]);
 });
 
@@ -447,7 +445,6 @@ test('LLMIntentRouter: keeps endpoint-specific signature questions API-aware', a
   assert.deepEqual(route.supplementalPageIds, [
     'authentication',
     'webhook-mechanism',
-    'waas-quickstart-30min',
   ]);
 });
 
