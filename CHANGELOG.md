@@ -4,14 +4,39 @@
 
 ## Unreleased
 
+（待下一版收集）
+
+## 0.4.0-alpha.4 — 2026-06-08
+
+第一个挂 0.4 版本号的 alpha — 把累积 9 个 PR（自 v0.3.1 起的 #93–#102，跳已发的 #91）一并打包。重点是 **ask 主路径质量改造**（intent router + greetings 短路 + 当前页面去偏 + reranker stage）+ **Studio A+ 视图接通**。还无 0.4.0 GA 的 flip enabled —— `aplus.enabled` / `reranker` 默认仍 off。
+
 ### 新增
 
-- **RFC 0006 0.4.0-alpha.3 — Studio A+ 视图接通**（A7）—— `feedback/suggestions-loader.ts` 扫 `<stateRoot>/feedback/suggestions/{c_*.json,.shadow/c_*.json}` + 解析为 UI VM。Console Feedback tab 三件事：
+- **RFC 0006 0.4.0-alpha.3 — Studio A+ 视图接通**（[#93](https://github.com/cregis-dev/anydocs-ask/pull/93)，A7）—— `feedback/suggestions-loader.ts` 扫 `<stateRoot>/feedback/suggestions/{c_*.json,.shadow/c_*.json}` + 解析为 UI VM。Console Feedback tab 三件事：
   - KPI tile `A+ candidates` 从硬编码 "—" 接通真数；区分 `shadow mode` vs `live · operator flipped`（aplus.enabled=true 时）；无 suggestions 时回退到 `unlocks at 50` 占位
   - 新增 `aplus_candidates` filter chip，过滤到出现在任意 cluster 的 feedback 行（chip 计数 + 列表 narrowing 与 no_citations / cit-check 同形态）
   - Drawer 新增 SUGGESTION 段：cluster_id + center question + peer queries（≤ 8 条）+ shadow/live 徽章 + suggestion markdown 预览（≤ 1600 chars 折叠）+ 绝对文件路径（operator 在编辑器里打开）
 
   **不依赖反馈量门槛** —— 即使 hermes-docs ≤ 15 条反馈，operator 跑 `feedback diagnose --shadow` 后 Studio 就能看到效果。`aplus.enabled=true` flip 留给 0.4.0 GA（≥ 50 反馈 + 4 周观察窗后由 operator 决定）。
+
+- **LLM intent router**（[#99](https://github.com/cregis-dev/anydocs-ask/pull/99)）—— 新增 `src/query/intent-router.ts`（474 行）+ 重写 `src/query/answer.ts`（+904 行）。ask 主路径在 retrieval 之前先用 LLM 判定 query intent，决定走完整检索 / 短路返回 / clarify 分支。降低 conceptual / chitchat 类问题的无谓检索开销。零配置变化、默认启用。
+
+- **Reranker stage（cross-encoder）**（[#102](https://github.com/cregis-dev/anydocs-ask/pull/102)）—— 新增 `src/reranker/` 模块：`bge-cross-encoder.ts`（BGE 跨编码器实现）+ `factory.ts` + `mock.ts` + `types.ts`。可选的 retrieval 后处理阶段，**默认 off**（`anydocs.ask.json` 加 `reranker.{type:'none'|'bge-cross-encoder', ...}` 段）。golden cases 同步扩展（`eval/cregis-developer-docs/cases.jsonl` +80 行）。
+
+- **Eval metric reporting 改造**（[#101](https://github.com/cregis-dev/anydocs-ask/pull/101)）—— `src/commands/eval.ts` + `src/eval/scoring.ts` 重写，输出更细的指标（rank 度量、variance baseline）。新增 `docs/eval-golden-set-curation.md` + `docs/eval-variance-baseline.md` 两份评测文档。
+
+- **CI: publish 前 dump OIDC claims 取证**（[#95](https://github.com/cregis-dev/anydocs-ask/pull/95)）—— `release.yml` 在 `npm publish` 之前用 `actions/github-script@v7` + `core.getIDToken('npm:registry.npmjs.org')` dump 14 个关键 OIDC claim 字段（sub / repository / workflow_ref / environment / 等）到日志。`continue-on-error: true` 兜底，故障不阻断真实 publish。背景：v0.3.1 三次 OIDC publish 全 E404，本字段已用 debug 分支验证假设 2（claim mismatch）排除；这条嵌入是为下次 publish 仍 E404 时省一次 debug 分支。
+
+### 修复
+
+- **fix(query): answer greetings without retrieval & near-tie subtrees**（[#98](https://github.com/cregis-dev/anydocs-ask/pull/98)）—— 寒暄类 query 不再走完整检索；near-tie subtrees 不强制 clarify，直接给答案。
+- **fix: avoid current page context biasing ask answers**（[#97](https://github.com/cregis-dev/anydocs-ask/pull/97)）—— widget 内嵌时不让当前 page 的内容污染 retrieval ranking。
+- **fix: improve api reference retrieval citations**（[#100](https://github.com/cregis-dev/anydocs-ask/pull/100)）—— `src/query/sanitize.ts` + `retrieval.ts` 调整，API reference 类 query 的 citation URL 更准。
+- **fix(eval): improve cregis api retrieval coverage**（[#96](https://github.com/cregis-dev/anydocs-ask/pull/96)）—— 提升 cregis-developer-docs golden set 的 API 召回覆盖。
+
+### 文档
+
+- **docs(backlog): 新增 docs/backlog.md**（[#94](https://github.com/cregis-dev/anydocs-ask/pull/94)）—— 记录两条 ask 主路径轻量化候选。
 
 ## 0.3.1 — 2026-05-24
 
