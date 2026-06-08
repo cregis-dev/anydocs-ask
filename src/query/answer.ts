@@ -1007,7 +1007,27 @@ function rawAnswerHasApiAnswerSubstanceForEndpoint(
   if (/\/api\/v[0-9]+\/payout\b/.test(normalizedEndpoint)) {
     return rawAnswerHasApiAnswerSubstance(rawAnswer, ['payout']);
   }
+  // Generic fallthrough for endpoints without a tuned topic-substance branch
+  // (e.g. /api/v1/address/create, /api/v1/collection, /api/v1/trade/page).
+  // Require the answer to literally name this endpoint's path before injecting
+  // its reference citation. This fixes the "answer names the right endpoint
+  // but forgot to attach the reference page" case WITHOUT gaming the metric on
+  // answers that recommend a *different* endpoint (where the path is absent).
+  if (endpoint) {
+    return answerMentionsEndpointPath(rawAnswer, endpoint);
+  }
   return rawAnswerHasApiAnswerSubstance(rawAnswer, terms);
+}
+
+/**
+ * True when the answer text literally contains this endpoint's `/api/vN/...`
+ * path. Used as the substance guard for endpoints without a tuned branch.
+ * Exported for unit tests.
+ */
+export function answerMentionsEndpointPath(rawAnswer: string, endpoint: string): boolean {
+  const match = endpoint.match(/\/api\/v[0-9]+\/[A-Za-z0-9_./{}:-]+/);
+  if (!match) return false;
+  return rawAnswer.toLowerCase().includes(match[0].toLowerCase());
 }
 
 function rawAnswerHasApiAnswerSubstance(rawAnswer: string, terms: string[]): boolean {
@@ -1306,29 +1326,26 @@ function dedupeApiReferenceChunkByEndpoint(): (chunk: RerankedChunk) => boolean 
 function apiReferenceMatchesHints(c: RerankedChunk, terms: string[] | undefined): boolean {
   if (!terms?.length) return true;
   const haystack = `${c.page_id} ${c.page_title} ${c.text}`.toLowerCase();
-  const wantsCheckout = terms.includes('checkout');
-  const wantsOrderInfo = wantsOrderInfoApi(terms);
-  const wantsSubAddressWithdrawal = terms.includes('sub_address_withdrawal');
-  const wantsSubAddressBalance = terms.includes('sub_address_balance');
-  const wantsCoins = terms.includes('coins');
-  const wantsPayout = terms.includes('payout');
   if (
-    wantsCheckout ||
-    wantsOrderInfo ||
-    wantsSubAddressWithdrawal ||
-    wantsSubAddressBalance ||
-    wantsCoins ||
-    wantsPayout
+    (terms.includes('checkout') && matchesCheckoutApi(haystack)) ||
+    (wantsOrderInfoApi(terms) && matchesOrderInfoApi(haystack)) ||
+    (terms.includes('sub_address_withdrawal') && matchesSubAddressWithdrawalApi(haystack)) ||
+    (terms.includes('sub_address_balance') && matchesSubAddressBalanceApi(haystack)) ||
+    (terms.includes('coins') && matchesCoinsApi(haystack)) ||
+    (terms.includes('payout') && matchesWalletPayoutApi(haystack))
   ) {
-    return (
-      (wantsCheckout && matchesCheckoutApi(haystack)) ||
-      (wantsOrderInfo && matchesOrderInfoApi(haystack)) ||
-      (wantsSubAddressWithdrawal && matchesSubAddressWithdrawalApi(haystack)) ||
-      (wantsSubAddressBalance && matchesSubAddressBalanceApi(haystack)) ||
-      (wantsCoins && matchesCoinsApi(haystack)) ||
-      (wantsPayout && matchesWalletPayoutApi(haystack))
-    );
+    return true;
   }
+  // Previously a special-token query (checkout / payout / coins / …) was
+  // EXCLUSIVE to its matched pages and returned false for everything else.
+  // That dropped genuinely-relevant sibling endpoints — e.g. a "create a
+  // deposit sub-address" query also carries a 'coins' hint, which excluded
+  // the retrieved /api/v1/address/create reference page from injection.
+  // Fall through to generic hint overlap so any retrieved API page the query
+  // references stays eligible. Over-injection is bounded downstream by the
+  // per-endpoint path-mention substance guard in
+  // withMandatoryApiReferenceCitation (a citation is only injected when the
+  // answer actually names that endpoint's path).
   return apiReferenceHintScore(c, terms) > 0;
 }
 
