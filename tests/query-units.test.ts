@@ -198,6 +198,20 @@ test('answerMentionsEndpointPath: endpoint string without an /api path -> false'
   assert.equal(answerMentionsEndpointPath('any answer body', 'create sub address'), false);
 });
 
+test('answerMentionsEndpointPath: a longer sibling path does not satisfy a shorter endpoint (prefix-collision guard)', () => {
+  // The answer only names /api/v1/payout/query; the /api/v1/payout reference
+  // must NOT be considered "mentioned" just because it is a string prefix.
+  const answer = '查询历史交易请用 `POST /api/v1/payout/query`。';
+  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/payout'), false);
+  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/payout/query'), true);
+});
+
+test('answerMentionsEndpointPath: trailing punctuation on the extracted endpoint still matches clean prose', () => {
+  const answer = 'Call `/api/v1/address/create` to create a deposit sub-address.';
+  // Endpoint extracted from a chunk may carry a trailing period.
+  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/address/create.'), true);
+});
+
 // ---------------------------------------------------------------------------
 // sanitize.ts
 // ---------------------------------------------------------------------------
