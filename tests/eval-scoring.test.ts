@@ -66,7 +66,7 @@ function answer(overrides: Partial<Extract<AskResult, { type: 'answer' }>> = {})
         source_lang: null,
         title: 'POST /api/v2/checkout',
         breadcrumb: [],
-        url: '/en/reference/payment-engine-api#post-api-v2-checkout',
+        url: '/en/reference/payment-engine-api#api-post-api-v2-checkout',
         snippet: 'POST /api/v2/checkout accepts order_currency and has a 30 per minute limit.',
         in_page_path: 'post-api-v2-checkout/p[1]',
       },
@@ -236,7 +236,7 @@ test('scoreCase scores API operation and citation URL rules only when configured
     expected: {
       must_cite_pages: ['payment-engine-api'],
       must_cite_operations: ['POST /api/v2/checkout'],
-      must_cite_urls: ['/en/reference/payment-engine-api#post-api-v2-checkout'],
+      must_cite_urls: ['/en/reference/payment-engine-api#api-post-api-v2-checkout'],
       must_contain: ['order_currency'],
       forbid_contain: [],
     },
@@ -250,6 +250,26 @@ test('scoreCase scores API operation and citation URL rules only when configured
 
   assert.equal(scored.api_rule_pass, true);
   assert.deepEqual(scored.missing_must_cite_operations, []);
+  assert.deepEqual(scored.missing_must_cite_urls, []);
+});
+
+test('scoreCase treats legacy API operation paths as the same public citation URL', () => {
+  const c = golden({
+    expected: {
+      must_cite_pages: ['payment-engine-api'],
+      must_cite_urls: ['/en/reference/payment-engine-api/post-api-v2-checkout'],
+      must_contain: ['order_currency'],
+      forbid_contain: [],
+    },
+  });
+
+  const scored = scoreCase(
+    c,
+    answer({ answer_md: 'Use `order_currency`.' }),
+    trace(['payment-engine-api']),
+  );
+
+  assert.equal(scored.api_rule_pass, true);
   assert.deepEqual(scored.missing_must_cite_urls, []);
 });
 
