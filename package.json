@@ -6,7 +6,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cregis-dev/anydocs-ask"
+    "url": "git+https://github.com/cregis-dev/anydocs-ask.git"
   },
   "homepage": "https://github.com/cregis-dev/anydocs-ask#readme",
   "main": "./dist/index.js",
