@@ -1684,7 +1684,7 @@ test('postprocess: citation URL appends heading anchor when in_page_path encodes
   assert.equal(out.citations[0]!.url, '/frontend/auth#bearer-token');
 });
 
-test('postprocess: OpenAPI synthetic citations keep operation-level URL', () => {
+test('postprocess: OpenAPI synthetic citations link to public Scalar source route', () => {
   const chunkById = new Map<string, RerankedChunk>([
     [
       'cit_1',
@@ -1696,7 +1696,7 @@ test('postprocess: OpenAPI synthetic citations keep operation-level URL', () => 
     ],
   ]);
   const out = postprocess({ answerLang: 'zh', rawAnswer: '... [cit_1]', chunkById });
-  assert.equal(out.citations[0]!.url, '/zh/reference/payment-engine-api/post-api-v2-order-info#response-fields');
+  assert.equal(out.citations[0]!.url, '/zh/reference/payment-engine-api#api-post-api-v2-order-info');
 });
 
 test('postprocess: cit_N markers renumbered to 1..K matching citations[] order', () => {

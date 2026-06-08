@@ -136,7 +136,17 @@ function buildCitationUrl(chunk: RerankedChunk): string | null {
 }
 
 function publicCitationPageUrl(chunk: RerankedChunk): string {
+  const openApiUrl = publicOpenApiCitationUrl(chunk);
+  if (openApiUrl) return openApiUrl;
   return chunk.page_url!;
+}
+
+function publicOpenApiCitationUrl(chunk: RerankedChunk): string | null {
+  if (!chunk.page_url || !chunk.page_id.startsWith('api-')) return null;
+  const match = /^\/(zh|en)\/reference\/([^/#?]+)\/([^/#?]+)(?:[#?].*)?$/.exec(chunk.page_url);
+  if (!match) return null;
+  const [, lang, sourceSlug, operationSlug] = match;
+  return `/${lang}/reference/${sourceSlug}#api-${operationSlug}`;
 }
 
 function snippetFromChunk(text: string): string {
