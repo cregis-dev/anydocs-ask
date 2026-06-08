@@ -1,12 +1,12 @@
 {
   "name": "@anydocs/ask",
-  "version": "0.3.1",
+  "version": "0.4.0-alpha.4",
   "description": "Local-first Q&A service for anydocs projects — respects authoring intent, supports multilingual",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cregis-dev/anydocs-ask"
+    "url": "git+https://github.com/cregis-dev/anydocs-ask.git"
   },
   "homepage": "https://github.com/cregis-dev/anydocs-ask#readme",
   "main": "./dist/index.js",
