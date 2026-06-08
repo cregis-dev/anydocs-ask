@@ -390,7 +390,23 @@ function apiRuleHaystack(answerMd: string, citations: Citation[]): string {
 }
 
 function citationUrlHit(citations: Citation[], expected: string): boolean {
-  return citations.some((c) => (c.url ?? '') === expected || (c.url ?? '').includes(expected));
+  const normalizedExpected = normalizeApiReferenceCitationUrl(expected);
+  return citations.some((c) => {
+    const actual = c.url ?? '';
+    const normalizedActual = normalizeApiReferenceCitationUrl(actual);
+    return (
+      actual === expected ||
+      actual.includes(expected) ||
+      normalizedActual === normalizedExpected ||
+      normalizedActual.includes(normalizedExpected)
+    );
+  });
+}
+
+function normalizeApiReferenceCitationUrl(url: string): string {
+  const match = /^(\/(?:zh|en)\/reference\/[^/#?]+)\/([^/#?]+)([#?].*)?$/.exec(url);
+  if (!match) return url;
+  return `${match[1]}#api-${match[2]}`;
 }
 
 function substringHit(text: string, needle: string): boolean {
