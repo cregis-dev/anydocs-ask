@@ -159,7 +159,7 @@ function mockIntentRoute(userPrompt: string): string {
     });
   }
 
-  if (/event_type|data\.status|order info|状态映射|partial_paid|paid_remain/i.test(question)) {
+  if (/event_type|data\.status|order info|状态映射|paid_partial|paid_remain/i.test(question)) {
     return JSON.stringify({
       conversation_mode: 'standalone',
       effective_question: question,
@@ -168,7 +168,7 @@ function mockIntentRoute(userPrompt: string): string {
       retrieval: {
         prefer_api_reference: true,
         api_reference_hints: ['order info data status event_type', 'POST /api/v2/order/info'],
-        supplemental_context_hints: ['支付引擎 业务流程 回调机制 event_type 状态映射 幂等 partial_paid paid_remain'],
+        supplemental_context_hints: ['支付引擎 业务流程 回调机制 event_type 状态映射 幂等 paid_partial paid_remain'],
         supplemental_page_ids: ['webhook-mechanism', 'pe-business-flow'],
         api_versions: ['v2'],
       },
