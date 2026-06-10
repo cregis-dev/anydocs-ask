@@ -923,7 +923,10 @@ function withMandatoryApiReferenceCitation(
   const citedIds = new Set([...rawAnswer.matchAll(CITATION_MARKER_IN_ANSWER)].map((m) => m[1]!));
   const matchingApiRefs = [...chunkById.entries()]
     .filter(([, chunk]) => isApiReferenceChunk(chunk))
-    .filter(([, chunk]) => apiReferenceMatchesHints(chunk, opts.apiReferenceHintTerms));
+    // allowGenericFallthrough: the path-mention substance guard below bounds
+    // over-injection, so a sibling endpoint the answer actually names stays
+    // eligible even under a special-token query.
+    .filter(([, chunk]) => apiReferenceMatchesHints(chunk, opts.apiReferenceHintTerms, true));
   if (matchingApiRefs.length === 0) return rawAnswer;
   let answer = rawAnswer;
   const apiRefsByEndpoint = new Map<string, Array<[string, RerankedChunk]>>();
@@ -1007,7 +1010,40 @@ function rawAnswerHasApiAnswerSubstanceForEndpoint(
   if (/\/api\/v[0-9]+\/payout\b/.test(normalizedEndpoint)) {
     return rawAnswerHasApiAnswerSubstance(rawAnswer, ['payout']);
   }
+  // Generic fallthrough for endpoints without a tuned topic-substance branch
+  // (e.g. /api/v1/address/create, /api/v1/collection, /api/v1/trade/page).
+  // Require the answer to literally name this endpoint's path before injecting
+  // its reference citation. This fixes the "answer names the right endpoint
+  // but forgot to attach the reference page" case WITHOUT gaming the metric on
+  // answers that recommend a *different* endpoint (where the path is absent).
+  if (endpoint) {
+    return answerMentionsEndpointPath(rawAnswer, endpoint);
+  }
   return rawAnswerHasApiAnswerSubstance(rawAnswer, terms);
+}
+
+/**
+ * True when the answer text literally contains this endpoint's `/api/vN/...`
+ * path. Used as the substance guard for endpoints without a tuned branch.
+ * Exported for unit tests.
+ */
+export function answerMentionsEndpointPath(rawAnswer: string, endpoint: string): boolean {
+  const match = endpoint.match(/\/api\/v[0-9]+\/[A-Za-z0-9_./{}:-]+/);
+  if (!match) return false;
+  // Trim trailing prose punctuation captured from a chunk (e.g. "…/create.").
+  const path = match[0].replace(/[.,:;)\]}]+$/, '').toLowerCase();
+  if (!path) return false;
+  const haystack = rawAnswer.toLowerCase();
+  // Boundary-aware containment: reject a prefix hit where the answer actually
+  // names a longer sibling endpoint (e.g. endpoint /api/v1/payout must NOT be
+  // satisfied by an answer that only mentions /api/v1/payout/query).
+  for (let from = 0; ; ) {
+    const idx = haystack.indexOf(path, from);
+    if (idx === -1) return false;
+    const next = haystack[idx + path.length];
+    if (next === undefined || !/[a-z0-9_/-]/.test(next)) return true;
+    from = idx + path.length;
+  }
 }
 
 function rawAnswerHasApiAnswerSubstance(rawAnswer: string, terms: string[]): boolean {
@@ -1303,7 +1339,25 @@ function dedupeApiReferenceChunkByEndpoint(): (chunk: RerankedChunk) => boolean 
   };
 }
 
-function apiReferenceMatchesHints(c: RerankedChunk, terms: string[] | undefined): boolean {
+/**
+ * Whether an API-reference chunk is eligible for a hinted query.
+ *
+ * `allowGenericFallthrough` distinguishes the two call sites:
+ * - Context selection (`pickContextChunks`, default `false`) keeps the original
+ *   special-token EXCLUSIVITY: a checkout/payout/coins/… query only admits its
+ *   matched pages. Falling through here would feed sibling endpoints into the
+ *   prompt and can nudge the LLM to answer with the wrong endpoint.
+ * - Citation injection (`withMandatoryApiReferenceCitation`, `true`) opts into a
+ *   generic hint-overlap fallthrough so a genuinely-relevant sibling endpoint
+ *   (e.g. /api/v1/address/create on a query that also carries a 'coins' hint)
+ *   stays eligible. Over-injection there is bounded by the per-endpoint
+ *   answer-path-mention substance guard (answerMentionsEndpointPath).
+ */
+function apiReferenceMatchesHints(
+  c: RerankedChunk,
+  terms: string[] | undefined,
+  allowGenericFallthrough = false,
+): boolean {
   if (!terms?.length) return true;
   const haystack = `${c.page_id} ${c.page_title} ${c.text}`.toLowerCase();
   const wantsCheckout = terms.includes('checkout');
@@ -1312,22 +1366,25 @@ function apiReferenceMatchesHints(c: RerankedChunk, terms: string[] | undefined)
   const wantsSubAddressBalance = terms.includes('sub_address_balance');
   const wantsCoins = terms.includes('coins');
   const wantsPayout = terms.includes('payout');
-  if (
+  const wantsSpecial =
     wantsCheckout ||
     wantsOrderInfo ||
     wantsSubAddressWithdrawal ||
     wantsSubAddressBalance ||
     wantsCoins ||
-    wantsPayout
-  ) {
-    return (
+    wantsPayout;
+  if (wantsSpecial) {
+    if (
       (wantsCheckout && matchesCheckoutApi(haystack)) ||
       (wantsOrderInfo && matchesOrderInfoApi(haystack)) ||
       (wantsSubAddressWithdrawal && matchesSubAddressWithdrawalApi(haystack)) ||
       (wantsSubAddressBalance && matchesSubAddressBalanceApi(haystack)) ||
       (wantsCoins && matchesCoinsApi(haystack)) ||
       (wantsPayout && matchesWalletPayoutApi(haystack))
-    );
+    ) {
+      return true;
+    }
+    if (!allowGenericFallthrough) return false;
   }
   return apiReferenceHintScore(c, terms) > 0;
 }

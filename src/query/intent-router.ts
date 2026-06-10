@@ -218,10 +218,18 @@ function normalizeRoute(
     initialApiReferenceHints,
     supplementalContextHints,
   );
+  // When the user literally types an API endpoint path in the question
+  // (e.g. "for a WaaS `/api/v1/payout` request …"), that is an unambiguous
+  // API-reference signal. The LLM router sometimes buckets such queries'
+  // hints into supplemental_context_hints and leaves api_reference_hints
+  // empty, which keeps apiIntent=false and skips reference-citation injection.
+  // Promote explicit endpoints from the question text so the deterministic
+  // gate doesn't depend on the LLM remembering to fill the right bucket.
+  const questionEndpointHints = extractEndpointHintsFromQuestion(question, effectiveQuestion);
   const apiReferenceHints = normalizeApiReferenceHints(
     intent,
     product,
-    initialApiReferenceHints,
+    [...questionEndpointHints, ...initialApiReferenceHints],
     supplementalContextHints,
   );
   const inferredSupplementalPageIds = inferSupplementalPageIds(
@@ -457,6 +465,24 @@ function normalizeApiReferenceHints(
     pushUnique(out, 'POST /api/v1/sub_address_withdrawal');
   }
   return out.slice(0, 8);
+}
+
+/**
+ * Extract explicit `/api/vN/...` endpoint paths the user typed in the question
+ * (across the original + effective phrasing) and return them as hint strings.
+ * Only fires on a literal endpoint path, so it never mislabels a topical
+ * question as API-reference intent.
+ */
+function extractEndpointHintsFromQuestion(...questions: string[]): string[] {
+  const out: string[] = [];
+  const re = /\/api\/v[0-9]+\/[a-z0-9_]+(?:\/[a-z0-9_]+)*/gi;
+  for (const q of questions) {
+    if (!q) continue;
+    for (const m of q.matchAll(re)) {
+      pushUnique(out, m[0].toLowerCase());
+    }
+  }
+  return out;
 }
 
 function pushUnique(out: string[], value: string): void {

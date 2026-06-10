@@ -109,7 +109,7 @@ test('langFromScopeId: unsupported lang prefix returns null', () => {
 // extractEntityTerms (answer.ts internal helper)
 // ---------------------------------------------------------------------------
 
-import { extractEntityTerms } from '../src/query/answer.ts';
+import { extractEntityTerms, answerMentionsEndpointPath } from '../src/query/answer.ts';
 
 test('extractEntityTerms: comma-separated triple', () => {
   assert.deepEqual(
@@ -171,6 +171,45 @@ test('extractEntityTerms: plain 2-entity question without compare hint still ski
   // Without `compare`/`vs`, a single `and` is not enough — too easy to
   // accidentally trigger on generic phrases.
   assert.equal(extractEntityTerms('how does sessions and memory work?'), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// answerMentionsEndpointPath — substance guard for mandatory API citation
+// ---------------------------------------------------------------------------
+
+test('answerMentionsEndpointPath: answer that names the endpoint path -> true', () => {
+  const answer = '调用 `POST /api/v1/address/create` 接口为用户创建充值子地址。';
+  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/address/create'), true);
+});
+
+test('answerMentionsEndpointPath: answer that recommends a different endpoint -> false (anti-gaming)', () => {
+  // Y-group: the answer talks about sub_address_withdrawal, so injecting a
+  // /api/v1/collection citation would contradict the prose. Guard must refuse.
+  const answer = 'The endpoint used for sweeping funds is `POST /api/v1/sub_address_withdrawal`.';
+  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/collection'), false);
+});
+
+test('answerMentionsEndpointPath: match is case-insensitive on the path', () => {
+  const answer = 'Use /API/V1/COINS to list supported tokens.';
+  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/coins'), true);
+});
+
+test('answerMentionsEndpointPath: endpoint string without an /api path -> false', () => {
+  assert.equal(answerMentionsEndpointPath('any answer body', 'create sub address'), false);
+});
+
+test('answerMentionsEndpointPath: a longer sibling path does not satisfy a shorter endpoint (prefix-collision guard)', () => {
+  // The answer only names /api/v1/payout/query; the /api/v1/payout reference
+  // must NOT be considered "mentioned" just because it is a string prefix.
+  const answer = '查询历史交易请用 `POST /api/v1/payout/query`。';
+  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/payout'), false);
+  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/payout/query'), true);
+});
+
+test('answerMentionsEndpointPath: trailing punctuation on the extracted endpoint still matches clean prose', () => {
+  const answer = 'Call `/api/v1/address/create` to create a deposit sub-address.';
+  // Endpoint extracted from a chunk may carry a trailing period.
+  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/address/create.'), true);
 });
 
 // ---------------------------------------------------------------------------
@@ -470,6 +509,60 @@ test('LLMIntentRouter: keeps endpoint-specific webhook status questions API-awar
 
   assert.equal(route.apiIntent, true);
   assert.ok(route.apiReferenceHints.includes('status'));
+});
+
+test('LLMIntentRouter: promotes an explicit endpoint typed in the question when the LLM leaves api_reference_hints empty', async () => {
+  // Observed failure mode: the LLM buckets the cue into supplemental_context_hints
+  // and leaves api_reference_hints empty, so apiIntent stayed false even though
+  // the user literally typed `/api/v1/payout`. The question-endpoint extraction
+  // must recover the endpoint deterministically.
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: 'For a WaaS `/api/v1/payout` request, show the exact ordered string before MD5.',
+    intent: 'signature_auth',
+    product: 'waas',
+    retrieval: {
+      prefer_api_reference: false,
+      api_reference_hints: [],
+      supplemental_context_hints: ['signature', 'MD5', 'ordered string', 'payout'],
+      supplemental_page_ids: [],
+      api_versions: [],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: 'For a WaaS `/api/v1/payout` request, can you show the exact ordered string used before MD5 signature computation?',
+    lang: 'en',
+  });
+
+  assert.equal(route.apiIntent, true);
+  assert.ok(route.apiReferenceHints.includes('/api/v1/payout'));
+  assert.ok(route.apiReferenceHints.includes('payout'));
+});
+
+test('LLMIntentRouter: a topical question with no endpoint in the text and empty hints stays non-API', async () => {
+  // Negative control: question-endpoint extraction must not fire when there is
+  // no literal `/api/vN/...` path, so topical questions are not mislabeled.
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: 'Should the sign field itself be included when building the MD5 string?',
+    intent: 'signature_auth',
+    product: 'waas',
+    retrieval: {
+      prefer_api_reference: false,
+      api_reference_hints: [],
+      supplemental_context_hints: ['signature generation', 'MD5 signing', 'WaaS API authentication'],
+      supplemental_page_ids: [],
+      api_versions: [],
+    },
+  }));
+  const router = new LLMIntentRouter(llm);
+  const route = await router.route({
+    question: 'Should the `sign` field itself be included when building the MD5 string for a WaaS API request?',
+    lang: 'en',
+  });
+
+  assert.equal(route.apiIntent, false);
 });
 
 test('LLMIntentRouter: normalizes token identifier routes to include the coins endpoint', async () => {
