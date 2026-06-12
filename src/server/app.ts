@@ -36,6 +36,8 @@ import {
   isWidgetRequest,
   type WidgetGateOutcome,
 } from '../widget/server-gate.ts';
+import { handleMcpRequest } from '../mcp/server.ts';
+import { resolveMcpToken } from '../mcp/gate.ts';
 
 const SSE_HEARTBEAT_MS = 2_000;
 const SSE_DELTA_FLUSH_MS = 150;
@@ -76,6 +78,12 @@ export function createApp(deps: AppDeps): Hono {
   // endpoints. Outlives a request but lives with the Hono app instance
   // (so test setup/teardown gets a fresh one per Runtime).
   const widgetRateLimiter = new InProcessRateLimiter();
+
+  // RFC 0007 — MCP endpoint state. The limiter is shared across /mcp requests
+  // and lives with the app instance; the bearer token is read from the env
+  // once at app-build time (null = open endpoint, intended for loopback).
+  const mcpRateLimiter = new InProcessRateLimiter();
+  const mcpToken = resolveMcpToken();
 
   // Gate runs before each widget-flavoured /v1/ask call. Non-widget
   // callers (no X-Project-Key header) skip the gate and behave exactly
@@ -145,6 +153,35 @@ export function createApp(deps: AppDeps): Hono {
       status: 'ok',
       warm: true,
       booted_at: runtime.bootedAtMs,
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // MCP — RFC 0007. Stateless Streamable HTTP knowledge-base interface for
+  // agents. Disabled by default (config.mcp.enabled); the gate inside
+  // handleMcpRequest returns 404 when off. While warm-up is in flight we
+  // short-circuit to 503 (the index isn't ready), mirroring the ask path.
+  // -----------------------------------------------------------------------
+  app.post('/mcp', async (c) => {
+    if (runtime.config.mcp.enabled && !runtime.warm) {
+      return c.json(
+        { jsonrpc: '2.0', error: { code: -32002, message: 'warming_up' }, id: null },
+        503,
+      );
+    }
+    return handleMcpRequest(c.req.raw, {
+      config: runtime.config.mcp,
+      serverHost: runtime.config.server.host,
+      token: mcpToken,
+      rateLimiter: mcpRateLimiter,
+      toolDeps: {
+        db: runtime.db,
+        embedder: runtime.embedder,
+        reranker: runtime.reranker,
+        rerankerConfig: runtime.config.reranker,
+        promptConfig: runtime.config.prompt,
+        resolveLlm: () => runtime.llm,
+      },
     });
   });
 

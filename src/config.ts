@@ -216,6 +216,34 @@ export type WidgetConfig = {
 
 export const WIDGET_MAX_ALLOWED_ORIGINS = 50;
 
+/**
+ * RFC 0007 — MCP 知识库接口（Streamable HTTP）。把 ask 暴露成可被其他 agent
+ * 调用的 MCP server，进程内挂在现有 Hono app 的 `POST /mcp`。
+ *
+ * - `enabled`: 整段功能开关。`false`（默认）= `/mcp` endpoint 不挂、运行时与
+ *   未启用前字节等价。
+ * - `tools`: 启用哪些 tool。`search`（包 retrieve，不烧 LLM）/ `ask`（包 ask，
+ *   消耗 LLM 配额）/ `fetch_page`（按 page_id 取整页）。默认 `['search','ask']`；
+ *   成本敏感的 operator 可只留 `['search']`。
+ * - `rateLimitPerMinute`: per-token（无 token 时 per-origin）token bucket 上限。
+ * - `allowedOrigins`: 浏览器型 MCP 客户端的 Origin 白名单；空数组 = 不校验
+ *   Origin（server-to-server 客户端本就不带 Origin 头）。
+ *
+ * 鉴权 token 走环境变量 `ANYDOCS_MCP_TOKEN`（密钥不入配置文件）：设置后
+ * `Authorization: Bearer <token>` 必须匹配，否则 401。
+ */
+export const MCP_TOOL_NAMES = ['search', 'ask', 'fetch_page'] as const;
+export type McpToolName = (typeof MCP_TOOL_NAMES)[number];
+
+export type McpConfig = {
+  enabled: boolean;
+  tools: McpToolName[];
+  rateLimitPerMinute: number;
+  allowedOrigins: string[];
+};
+
+export const MCP_MAX_ALLOWED_ORIGINS = 50;
+
 export type PromptConfig = {
   /**
    * Optional project-specific assistant identity. This replaces only the
@@ -246,6 +274,7 @@ export type ResolvedConfig = {
   multiTurn: MultiTurnConfig;
   citationSemanticCheck: CitationSemanticCheckConfig;
   widget: WidgetConfig;
+  mcp: McpConfig;
   aplus: AplusConfig;
   prompt: PromptConfig;
 };
@@ -333,6 +362,13 @@ const DEFAULTS: ResolvedConfig = {
     // RFC 0004 alignment PR (2026-05-24): schema 留位，三字段都不被代码消费。
     // alpha.0 才接通 W1 协议规格。flip enabled=true 在此阶段不产生任何行为。
     enabled: false,
+    rateLimitPerMinute: 60,
+    allowedOrigins: [],
+  },
+  mcp: {
+    // RFC 0007: 默认关闭。flip enabled=true 才挂 `POST /mcp`。
+    enabled: false,
+    tools: ['search', 'ask'],
     rateLimitPerMinute: 60,
     allowedOrigins: [],
   },
@@ -465,6 +501,7 @@ function mergeWithDefaults(
     warnings,
   );
   applyWidget(user.widget, out.widget, warnings);
+  applyMcp(user.mcp, out.mcp, warnings);
   applyAplus(user.aplus, out.aplus, warnings);
   applyPrompt(user.prompt, out.prompt, warnings);
   return out;
@@ -719,6 +756,101 @@ function applyWidget(value: unknown, target: WidgetConfig, warnings: string[]): 
     if (rejected > 0) {
       warnings.push(
         `anydocs.ask.json: widget.allowedOrigins ignored ${rejected} non-string / non-origin item(s)`,
+      );
+    }
+  }
+}
+
+/**
+ * RFC 0007 — `mcp` 段。形状校验 + 默认填充，逻辑与 applyWidget 平行。
+ */
+function applyMcp(value: unknown, target: McpConfig, warnings: string[]): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'mcp' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.enabled !== undefined) {
+    if (typeof obj.enabled === 'boolean') {
+      target.enabled = obj.enabled;
+    } else {
+      warnings.push(`anydocs.ask.json: mcp.enabled must be a boolean; using default`);
+    }
+  }
+  if (obj.tools !== undefined) {
+    if (!Array.isArray(obj.tools)) {
+      warnings.push(`anydocs.ask.json: mcp.tools must be an array of tool names; using default`);
+    } else {
+      const seen = new Set<McpToolName>();
+      let rejected = 0;
+      for (const item of obj.tools) {
+        if (typeof item === 'string' && (MCP_TOOL_NAMES as readonly string[]).includes(item)) {
+          seen.add(item as McpToolName);
+        } else {
+          rejected++;
+        }
+      }
+      // Preserve canonical order regardless of how the operator listed them.
+      target.tools = MCP_TOOL_NAMES.filter((name) => seen.has(name));
+      if (rejected > 0) {
+        warnings.push(
+          `anydocs.ask.json: mcp.tools ignored ${rejected} unknown tool name(s); valid: ${MCP_TOOL_NAMES.join(', ')}`,
+        );
+      }
+    }
+  }
+  if (obj.rateLimitPerMinute !== undefined) {
+    const v = obj.rateLimitPerMinute;
+    if (typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v) && v >= 1 && v <= 10_000) {
+      target.rateLimitPerMinute = v;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: mcp.rateLimitPerMinute must be an integer in [1, 10000]; using default`,
+      );
+    }
+  }
+  if (obj.allowedOrigins !== undefined) {
+    if (!Array.isArray(obj.allowedOrigins)) {
+      warnings.push(`anydocs.ask.json: mcp.allowedOrigins must be an array of strings; using default`);
+      return;
+    }
+    const origins: string[] = [];
+    let rejected = 0;
+    for (const item of obj.allowedOrigins) {
+      if (typeof item !== 'string') {
+        rejected++;
+        continue;
+      }
+      const trimmed = item.trim();
+      let ok = false;
+      try {
+        const u = new URL(trimmed);
+        if ((u.protocol === 'http:' || u.protocol === 'https:') && u.pathname === '/' && !u.search && !u.hash) {
+          ok = true;
+        }
+      } catch {
+        // not a valid URL
+      }
+      if (!ok) {
+        rejected++;
+        continue;
+      }
+      origins.push(trimmed);
+      if (origins.length === MCP_MAX_ALLOWED_ORIGINS) {
+        const remaining = obj.allowedOrigins.length - obj.allowedOrigins.indexOf(item) - 1;
+        if (remaining > 0) {
+          warnings.push(
+            `anydocs.ask.json: mcp.allowedOrigins keeps only first ${MCP_MAX_ALLOWED_ORIGINS} item(s); ignored ${remaining} extra item(s)`,
+          );
+        }
+        break;
+      }
+    }
+    target.allowedOrigins = origins;
+    if (rejected > 0) {
+      warnings.push(
+        `anydocs.ask.json: mcp.allowedOrigins ignored ${rejected} non-string / non-origin item(s)`,
       );
     }
   }

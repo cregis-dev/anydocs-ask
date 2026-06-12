@@ -4,7 +4,13 @@
 
 ## Unreleased
 
-（待下一版收集）
+### 新增
+
+- **RFC 0007 — MCP 知识库接口（Streamable HTTP）** —— 把 ask 暴露成可被其他 agent 调用的 MCP server，进程内挂在现有 Hono app 的 `POST /mcp`。新增 `src/mcp/`（`server.ts` / `tools.ts` / `gate.ts` / `types.ts`）+ 查询层 `search()`（`src/query/answer.ts`，纯检索、无 LLM）。
+  - **传输**：官方 `@modelcontextprotocol/sdk@1.x` 的 Streamable HTTP **无状态**模式（每请求一个 server+transport，`enableJsonResponse`），与现有 `/v1/ask` 一样多轮由调用方自管。
+  - **tools**：`search`（混合检索→片段+URL+breadcrumb，**LLM-free**，注入静态 intent router）、`ask`（完整 RAG 答案+校验 citations，消耗 LLM）、`fetch_page`（按 page_id 取整页）。`config.mcp.tools` 控制启用哪些；只开 `search` 的部署**无需 LLM provider / API key**。
+  - **鉴权 / 安全**：`POST /mcp` 默认关（`mcp.enabled:false`）；bearer token 走 env `ANYDOCS_MCP_TOKEN`（密钥不入配置文件）；per-token / per-origin token bucket 限流（复用 widget `InProcessRateLimiter`）；loopback bind 上的端口无关 DNS-rebinding Host 守卫 + 可选 Origin 白名单。
+  - **配置**：`anydocs.ask.json` 新增 `mcp` 段 `{ enabled, tools, rateLimitPerMinute, allowedOrigins }`，默认零行为变化。
 
 ## 0.4.0-alpha.4 — 2026-06-08
 

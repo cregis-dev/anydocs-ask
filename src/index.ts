@@ -11,7 +11,7 @@ export { Runtime } from './server/runtime.ts';
 export type { RuntimeOptions, RuntimeStartResult } from './server/runtime.ts';
 export { loadConfig } from './config.ts';
 export type { ResolvedConfig } from './config.ts';
-export { ask } from './query/answer.ts';
+export { ask, search } from './query/answer.ts';
 export type {
   AskRequest,
   AskResult,
@@ -20,4 +20,6 @@ export type {
   AskError,
   Citation,
   ClarifyOption,
+  SearchHit,
+  SearchResult,
 } from './query/types.ts';
