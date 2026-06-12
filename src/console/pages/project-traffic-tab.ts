@@ -107,7 +107,7 @@ function healthStrip(w: TrafficWindow): Html {
       <div class="kpi">
         <div class="k-lab">queries · ${w.days}d</div>
         <div class="k-val">${t.count}</div>
-        <div class="k-foot">reader ${t.countReader} · console ${t.countConsole}</div>
+        <div class="k-foot">reader ${t.countReader} · console ${t.countConsole} · mcp ${t.countMcp}</div>
         ${raw(`<div style="margin-top:6px;">${sparkCount}</div>`)}
       </div>
       <div class="kpi">
@@ -163,6 +163,7 @@ function runsCard(w: TrafficWindow): Html {
             <option value="">all sources</option>
             <option value="reader">reader</option>
             <option value="console">console</option>
+            <option value="mcp">mcp</option>
           </select>
           <select id="tf-kind" class="select" style="height: 30px; padding: 0 24px 0 10px; font-size: var(--t-12); width: auto;">
             <option value="">all kinds</option>

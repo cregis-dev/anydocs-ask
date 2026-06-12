@@ -13,11 +13,12 @@
 /**
  * Origin of the request. `reader` = real user traffic via the public
  * /v1/ask endpoint. `console` = author dogfooding via the dev console
- * ask 体验台 with persist=true (ARCH §17.8). Missing in jsonl rows
- * written before 2026-05-11 — readers MUST treat absent source as
+ * ask 体验台 with persist=true (ARCH §17.8). `mcp` = an external agent
+ * calling the MCP `ask` tool over POST /mcp (RFC 0007). Missing in jsonl
+ * rows written before 2026-05-11 — readers MUST treat absent source as
  * `reader` for back-compat.
  */
-export type RunSource = 'reader' | 'console';
+export type RunSource = 'reader' | 'console' | 'mcp';
 
 export type RunRecord = {
   ts: string;

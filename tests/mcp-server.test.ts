@@ -24,6 +24,7 @@ import type { McpToolName } from '../src/config.ts';
 import { openDatabase } from '../src/db/index.ts';
 import { MockEmbedder } from '../src/embedding/mock.ts';
 import { MockLLM } from '../src/llm/mock.ts';
+import { loadTrafficWindow } from '../src/console/traffic-state.ts';
 
 async function buildProject(): Promise<{ root: string; cleanup: () => Promise<void> }> {
   const root = await fs.mkdtemp(join(tmpdir(), 'anydocs-mcp-srv-'));
@@ -85,13 +86,13 @@ async function buildProject(): Promise<{ root: string; cleanup: () => Promise<vo
   return { root, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
 }
 
-type SetupOpts = { enabled?: boolean; tools?: McpToolName[]; start?: boolean };
+type SetupOpts = { enabled?: boolean; tools?: McpToolName[]; start?: boolean; runs?: boolean };
 
 async function setup(opts: SetupOpts = {}) {
   const { root, cleanup: rmTmp } = await buildProject();
   const stateRoot = await fs.mkdtemp(join(tmpdir(), 'anydocs-mcp-state-'));
   const { config } = await loadConfig(root);
-  config.runs.enabled = false;
+  config.runs.enabled = opts.runs ?? false;
   config.mcp.enabled = opts.enabled ?? true;
   if (opts.tools) config.mcp.tools = opts.tools;
   const db = openDatabase({ dbPath: ':memory:' });
@@ -107,6 +108,7 @@ async function setup(opts: SetupOpts = {}) {
   if (opts.start ?? true) await runtime.start();
   return {
     runtime,
+    stateRoot,
     app: createApp({ runtime }),
     cleanup: async () => {
       await runtime.stop();
@@ -212,6 +214,35 @@ test('mcp: search rejects bad scope_id with a tool error', async () => {
     const { json } = await rpc(app, toolCall('search', { query: 'x', scope_id: 'does-not-exist' }));
     assert.equal(json.result.isError, true);
     assert.match(json.result.content[0].text, /invalid_scope/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('mcp: ask writes a runs record tagged source=mcp (Studio Traffic)', async () => {
+  const { app, stateRoot, cleanup } = await setup({ runs: true });
+  try {
+    const { status } = await rpc(app, toolCall('ask', { question: '如何鉴权？' }));
+    assert.equal(status, 200);
+    const win = loadTrafficWindow(stateRoot, 7);
+    assert.equal(win.totals.countMcp, 1, 'expected one mcp-sourced run');
+    assert.equal(win.totals.countReader, 0);
+    assert.equal(win.totals.countConsole, 0);
+    const mcpRows = win.records.filter((r) => r.source === 'mcp');
+    assert.equal(mcpRows.length, 1);
+    assert.equal(mcpRows[0]!.query, '如何鉴权？');
+    assert.equal(mcpRows[0]!.session_id, null); // stateless → no session
+  } finally {
+    await cleanup();
+  }
+});
+
+test('mcp: search does NOT write a run (LLM-free retrieval, not a Q&A turn)', async () => {
+  const { app, stateRoot, cleanup } = await setup({ runs: true, tools: ['search'] });
+  try {
+    await rpc(app, toolCall('search', { query: 'JWT bearer token' }));
+    const win = loadTrafficWindow(stateRoot, 7);
+    assert.equal(win.totals.count, 0, 'search must not produce runs');
   } finally {
     await cleanup();
   }

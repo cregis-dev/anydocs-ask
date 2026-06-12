@@ -26,8 +26,10 @@ import type { Embedder } from '../embedding/types.ts';
 import type { LLM } from '../llm/types.ts';
 import type { Reranker } from '../reranker/types.ts';
 import type { McpToolName, PromptConfig, RerankerConfig } from '../config.ts';
-import { ask, search } from '../query/answer.ts';
-import type { AskDeps } from '../query/answer.ts';
+import { performance } from 'node:perf_hooks';
+import { askWithTrace, search } from '../query/answer.ts';
+import type { AskDeps, AskTrace } from '../query/answer.ts';
+import type { AskResult } from '../query/types.ts';
 import { fallbackRoute, type IntentRouter } from '../query/intent-router.ts';
 
 /**
@@ -44,6 +46,18 @@ export type McpToolDeps = {
   promptConfig: PromptConfig;
   /** Resolve the answer LLM; only `ask` calls it. Throws if unavailable. */
   resolveLlm: () => LLM;
+  /**
+   * Persist an MCP `ask` turn to runs.jsonl as source=mcp (Studio Traffic).
+   * Provided by the server wiring; omitted in unit tests that don't assert on
+   * runs. A no-op (or absent) when runs are disabled.
+   */
+  recordAskRun?: (entry: {
+    question: string;
+    scopeId: string | null;
+    result: AskResult;
+    trace: AskTrace;
+    latencyMs: number;
+  }) => void;
 };
 
 /** Text-only tool result, matching the SDK's CallToolResult content shape. */
@@ -166,10 +180,15 @@ export function registerMcpTools(
         } catch (err) {
           return text(`ask failed (llm_unavailable): ${(err as Error).message}`, true);
         }
-        const result = await ask(
+        const scopeId = scope_id ?? null;
+        const t0 = performance.now();
+        const { result, trace } = await askWithTrace(
           { ...retrievalDeps, llm, intentRouter: undefined },
-          { question, context: { scope_id: scope_id ?? null } },
+          { question, context: { scope_id: scopeId } },
         );
+        const latencyMs =
+          result.type === 'answer' ? result.latency_ms : Math.round(performance.now() - t0);
+        deps.recordAskRun?.({ question, scopeId, result, trace, latencyMs });
         if (result.type === 'error') {
           return text(`ask failed (${result.code}): ${result.message}`, true);
         }
