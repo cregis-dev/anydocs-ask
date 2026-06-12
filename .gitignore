@@ -1,5 +1,5 @@
 # Claude Code per-developer local settings
-.claude/settings.local.json
+.claude/
 
 # anydocs-ask index database (local persistence; see ARCHITECTURE.md §3)
 .anydocs-ask/
