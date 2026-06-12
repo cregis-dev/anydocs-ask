@@ -178,7 +178,16 @@ export function registerMcpTools(
         try {
           llm = deps.resolveLlm();
         } catch (err) {
-          return text(`ask failed (llm_unavailable): ${(err as Error).message}`, true);
+          // Don't echo the provider-specific error (which can name the LLM
+          // vendor / a missing config key) back to the MCP client; log it
+          // server-side and return a generic code the agent can act on.
+          process.stderr.write(
+            `[mcp] ask llm_unavailable: ${(err as Error)?.message ?? String(err)}\n`,
+          );
+          return text(
+            'ask failed (llm_unavailable): no answer LLM is configured on this server',
+            true,
+          );
         }
         const scopeId = scope_id ?? null;
         const t0 = performance.now();
@@ -308,7 +317,10 @@ function fetchPage(db: DbHandle, pageId: string, preferLang: string | null): Fet
 
   let breadcrumb: BreadcrumbNode[] = [];
   try {
-    breadcrumb = JSON.parse(chosen.breadcrumb) as BreadcrumbNode[];
+    // Guard the type, not just the parse: a row that parses to a non-array
+    // (DB corruption) would otherwise blow up `breadcrumbPath()`'s `.map`.
+    const parsed = JSON.parse(chosen.breadcrumb) as unknown;
+    if (Array.isArray(parsed)) breadcrumb = parsed as BreadcrumbNode[];
   } catch {
     breadcrumb = [];
   }

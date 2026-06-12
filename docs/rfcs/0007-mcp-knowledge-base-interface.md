@@ -1,9 +1,10 @@
 # RFC 0007 — MCP 知识库接口（Streamable HTTP）
 
-> Status: Accepted（2026-06-12 审核通过；alpha.0 K1-K5 已落地 + 测试）
+> Status: Implemented（K1–K5 已于 0.4.0-alpha.5 发版 + 测试；K6 / GA flip 待续）
+> 实装状态（2026-06-13）：K1–K5 已于 **0.4.0-alpha.5**（2026-06-12）发版（非原标的 v2）—— `/mcp` Streamable HTTP stateless + `search`/`ask`/`fetch_page` + bearer/origin 限流 + loopback Host 守卫，并随包发到 npm（next tag）。见 CHANGELOG 0.4.0-alpha.5 / PR #109/#110/#111。剩 = K6 真机 dogfood 常态化 + operator GA flip（enabled=true）。
 > Author: @shawndslee
 > Date: 2026-06-12
-> 范围版本: `@anydocs/ask` v2（仅 HTTP；设计稿可在 0.5 周期推进、随后 alpha 落地）
+> 范围版本: K1–K5 已发版于 `@anydocs/ask` **0.4.0-alpha.5**（原标的 v2；实际提前并入 0.4，仅 HTTP）
 > 设计依据: [ARCHITECTURE.md §13](../../ARCHITECTURE.md)（「MCP 接口 | 仅 HTTP | v2，预留 `@anydocs/ask-mcp` 包名」）/ [PRD §7](../../PRD.md)（「MCP / agent 调用接口 | v2 | 与 v1 用户场景正交」）
 > 阻塞依赖: 无硬阻塞。[RFC 0005](./0005-citation-semantic-validation.md)（让 `ask` tool 的引用可信）+ [RFC 0004](./0004-embedded-ask-widget.md) 的 server-gate（鉴权 / 限流基建可复用）是软依赖，均已在 main。
 
@@ -91,13 +92,15 @@
 
 ## 3. 实现里程碑
 
+> ✅ **已实装**：K1–K5 实际**提前**并入 **0.4.0-alpha.5**（非下方原标的 v2-alpha.*）一次发版。下表保留作原始规划参照。
+
 ```
-alignment PR   (升档时)        Status Draft→Accepted + mcp schema 留位        零行为变化
-v2-alpha.0     (≈ 升档后)      K1 /mcp 骨架 + config.mcp 消费 + stateless     端点可握手，tool 空挂
-v2-alpha.1                     K2 search tool（包 retrieve）                  内部 dogfood
-v2-alpha.2                     K3 ask tool（包 ask）+ K4 鉴权/限流            带配额
-v2-alpha.3                     K5 fetch_page（可选）+ K6 真机客户端 dogfood   Claude Code 接本仓 docs
-v2.0.0                         operator flip enabled=true                     GA
+alignment PR   (升档时)        Status Draft→Accepted + mcp schema 留位        零行为变化       ✅ → 0.4.0-alpha.5
+v2-alpha.0     原 ≈ 升档后     K1 /mcp 骨架 + config.mcp 消费 + stateless     端点可握手        ✅ → 0.4.0-alpha.5
+v2-alpha.1                     K2 search tool（包 retrieve）                  内部 dogfood     ✅ → 0.4.0-alpha.5
+v2-alpha.2                     K3 ask tool（包 ask）+ K4 鉴权/限流            带配额           ✅ → 0.4.0-alpha.5
+v2-alpha.3                     K5 fetch_page（可选）+ K6 真机客户端 dogfood   Claude Code 接本仓 docs  K5 ✅ → 0.4.0-alpha.5 / K6 🔄 dogfood 常态化中
+v2.0.0                         operator flip enabled=true                     GA              ⏳ 待 operator flip
 ```
 
 绝对日期不预设；里程碑顺序锁定。**alignment PR 范围严格限于**:

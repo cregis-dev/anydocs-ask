@@ -448,8 +448,13 @@ export function createApp(deps: AppDeps): Hono {
         // Parallel to the `question` backfill above; same trade-off (24h TTL
         // race covered by body override below).
         if (typeof parsed.answer_md === 'string') generated = parsed.answer_md;
-      } catch {
-        // ignore — partial feedback is still useful.
+      } catch (err) {
+        // Partial feedback is still useful, so we don't fail-hard — but a
+        // payload that won't parse means the answers-table row is corrupt;
+        // surface it to stderr so the data-integrity issue is visible.
+        process.stderr.write(
+          `[feedback] answers.payload parse failed for answer_id=${answer_id}: ${(err as Error)?.message ?? String(err)}\n`,
+        );
       }
     } else if (typeof obj.question === 'string' && obj.question.length > 0) {
       // Forward-compat: Reader MAY include `question` in the request body

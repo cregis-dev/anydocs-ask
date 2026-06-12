@@ -1,6 +1,7 @@
 # RFC 0005 — Citation 语义校验（B.2：复用主 LLM）
 
-> Status: Accepted（2026-05-23 方向锁定为 B.2 复用主 LLM 路径）
+> Status: Implemented（shadow 全链路 V1–V5 已于 0.3.0 发版；H1 硬门槛待启）
+> 实装状态（2026-06-13）：V1–V5 shadow 校验全链路已于 **0.3.0** 发版（citation-validator + claim-extractor + finalizeAskCall 异步触发 + runs.jsonl `citation-check-update` tail + Studio verdict 展示），默认 `citationSemanticCheck.enabled=false`（见 CHANGELOG 0.3.0 / PR #72,#74）。剩 = **H1 硬门槛**（校验失败时拦答案）仍 pending。
 > Author: @shawndslee
 > Date: 2026-05-20（Accepted 于 2026-05-23）
 > 范围版本: `@anydocs/ask` 0.3.x
@@ -96,14 +97,16 @@
 
 ## 3. 实现里程碑
 
+> ✅ **已实装**：V1–V5 全部于 **0.3.0** 发版（shadow 模式，默认关）。
+
 ```
-0.3.0-alpha.0  对齐 PR：RFC Accept + config schema 留位          零行为变化
-0.3.0-alpha.1  V1 校验模块 + V2 claim 句抽取                     核心
-0.3.0-alpha.2  V3 shadow 集成 + V4 trace 扩展 + V6 config 接通   可发布
-0.3.0          V5 Studio 展示（依赖 RFC 0002 已就绪）+ 整体回归   交付
+0.3.0-alpha.0  对齐 PR：RFC Accept + config schema 留位          零行为变化   ✅ → 0.3.0
+0.3.0-alpha.1  V1 校验模块 + V2 claim 句抽取                     核心         ✅ → 0.3.0
+0.3.0-alpha.2  V3 shadow 集成 + V4 trace 扩展 + V6 config 接通   可发布       ✅ → 0.3.0
+0.3.0          V5 Studio 展示（依赖 RFC 0002 已就绪）+ 整体回归   交付         ✅ → 0.3.0
 ```
 
-绝对日期不预设；里程碑顺序锁定，alpha.0 启动时锚定（与 RFC 0003 同样的节奏管理）。
+~~绝对日期不预设；里程碑顺序锁定，alpha.0 启动时锚定~~ —— **V1–V5 已全部发版（见 CHANGELOG 0.3.0 / PR #72,#74）**；后续 H1 硬门槛（校验失败拦答案）另起子 RFC。
 
 ---
 

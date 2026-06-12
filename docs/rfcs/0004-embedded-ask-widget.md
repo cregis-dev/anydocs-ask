@@ -1,9 +1,10 @@
 # RFC 0004 — 嵌入式 Ask Widget
 
-> Status: Accepted（2026-05-24 升档；0.4 设计稿 + 原型范围锁定）
+> Status: MVP Implemented（W1–W5 已于 0.3.0 发版并真机回归；0.5+ GA 阶段待启）
+> 实装状态（2026-06-13）：嵌入式 Widget MVP 全栈（W1–W5）已于 **0.3.0**（2026-05-24）一次发版 —— `GET /widget/v1.js` + `/widget/chat` + 跨域 server-gate（CORS / origin 校验 / token bucket）+ SSE 流式 + β 反馈 + localStorage 历史；hermes-docs flip `widget.enabled=true` 跑过真机回归（见 CHANGELOG 0.3.0 / PR #77–#81,#83）。**已超出本文档原"仅设计稿"范围。** 剩 = 0.5+ GA 阶段（WG1–WG4）+ cross-origin direct mode。
 > Author: @shawndslee
 > Date: 2026-05-20（Accepted 于 2026-05-24）
-> 范围版本: `@anydocs/ask` 0.4（设计稿）/ 0.5+（落地）
+> 范围版本: `@anydocs/ask` 0.3（MVP 已发版）/ 0.5+（GA 实装）
 > 设计依据: [PRD §10.2](../../PRD.md#102-版本路线按时间顺序) / [PRD §10.7](../../PRD.md#107-新增明确不做与-112-红线一致) 第 7 条
 > 阻塞依赖: [RFC 0003](./0003-multi-turn-session-rewrite.md)（多轮 + session 重写必须先 GA）
 
@@ -73,16 +74,18 @@
 
 ## 3. 实现里程碑
 
-### 3.1 0.4 设计 / 原型阶段
+### 3.1 0.4 设计 / 原型阶段 —— ✅ 已发版（实际并入 0.3.0，超出原"仅设计稿"范围）
+
+> ✅ **已实装**：下方原计划「0.4 仅设计稿 + 原型」，实际 W1–W5 全栈作为可演示 MVP 于 **0.3.0**（2026-05-24）一次发版（alpha.0→alpha.3 完整栈 + hermes-docs 真机回归），非 future-dated 的 ≈2026-06/07。下表保留作原始规划参照。
 
 ```
-alignment PR   (2026-05-24, 本 PR)  Status 升档 + widget schema 留位       零行为变化
-0.4.0-alpha.0  (≈ 2026-06)         W1 协议规格 + W2 形态决策              设计敲定
-0.4.0-alpha.1  (≈ 2026-06–07)      W3 MVP 原型可跑                       dogfood
-0.4.0          (≈ 2026-07)         W4 CORS + W5 联调确认                  与 partner 对齐
+alignment PR   (2026-05-24)        Status 升档 + widget schema 留位       零行为变化      ✅ → 0.3.0
+0.4.0-alpha.0  原 ≈ 2026-06        W1 协议规格 + W2 形态决策              设计敲定        ✅ → 0.3.0
+0.4.0-alpha.1  原 ≈ 2026-06–07     W3 MVP 原型可跑                       dogfood         ✅ → 0.3.0
+0.4.0          原 ≈ 2026-07        W4 CORS + W5 联调确认                  与 partner 对齐  ✅ → 0.3.0
 ```
 
-绝对日期不预设；里程碑顺序锁定。alignment PR 的范围严格限于：
+~~绝对日期不预设；里程碑顺序锁定。~~ —— **W1–W5 已全部发版（见 CHANGELOG 0.3.0 / PR #77–#81,#83）**。alignment PR 的原始范围严格限于：
 
 - 本文档 Status: Draft → Accepted
 - `anydocs.ask.json` 增 `widget` 段，默认 `{ enabled:false, rateLimitPerMinute:60, allowedOrigins:[] }`
