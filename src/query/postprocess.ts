@@ -20,7 +20,7 @@
 
 import type { DocsLang } from '../anydocs/types.ts';
 import type { RerankedChunk } from './rerank.ts';
-import type { Citation } from './types.ts';
+import type { Citation, SearchHit } from './types.ts';
 
 export type PostprocessInput = {
   answerLang: DocsLang;
@@ -119,6 +119,25 @@ function citationFromChunk(
     url: buildCitationUrl(chunk),
     snippet: snippetFromChunk(chunk.text),
     in_page_path: chunk.in_page_path,
+  };
+}
+
+/**
+ * RFC 0007 — map a reranked chunk to a public {@link SearchHit} for the MCP
+ * `search` tool. Reuses the same URL-building + snippet logic as citations so
+ * `search` and `ask` surface byte-identical sources for the same chunk.
+ */
+export function searchHitFromChunk(chunk: RerankedChunk): SearchHit {
+  return {
+    chunk_id: chunk.chunk_id,
+    page_id: chunk.page_id,
+    lang: chunk.lang,
+    title: chunk.page_title,
+    breadcrumb: chunk.breadcrumb,
+    url: buildCitationUrl(chunk),
+    snippet: snippetFromChunk(chunk.text),
+    in_page_path: chunk.in_page_path,
+    score: chunk.final_score,
   };
 }
 

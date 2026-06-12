@@ -121,3 +121,26 @@ export type AskError = {
 };
 
 export type AskResult = AskAnswer | AskClarify | AskError;
+
+/**
+ * RFC 0007 — a single retrieval hit returned by `search()` (the MCP `search`
+ * tool's payload). Shaped like {@link Citation} minus the `citation_id`
+ * answer-marker, plus a `score`. The calling agent uses these as grounding
+ * passages and synthesizes with its own model — no LLM runs on our side.
+ */
+export type SearchHit = {
+  chunk_id: number;
+  page_id: string;
+  lang: DocsLang;
+  title: string;
+  breadcrumb: BreadcrumbNode[];
+  url: string | null;
+  snippet: string;
+  in_page_path: string;
+  /** Final rerank score (descending). Relative, not normalized to [0,1]. */
+  score: number;
+};
+
+export type SearchResult =
+  | { type: 'hits'; hits: SearchHit[] }
+  | { type: 'error'; code: string; message: string };

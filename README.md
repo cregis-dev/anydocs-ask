@@ -219,6 +219,33 @@ pnpm dev serve /Users/me/work/product-docs
 
 **`GET /v1/health`** — 预热完成后返回 `{"status":"ok"}`，预热期间返回 `{"status":"warming"}`；Reader 发起首次提问前应轮询此接口。
 
+**`POST /mcp`** — MCP 知识库接口（RFC 0007），把本项目文档暴露成可被 Claude Code / Cursor 等 agent 调用的 [MCP](https://modelcontextprotocol.io) server，走 Streamable HTTP **无状态**传输。默认关闭，需在 `anydocs.ask.json` 开 `mcp.enabled=true`。三个 tool：
+
+| tool | 作用 | 成本 |
+|---|---|---|
+| `search` | 混合检索，返回相关片段 + 来源页 + URL + breadcrumb | **无 LLM**（只开此 tool 可不配 API Key） |
+| `ask` | 合成答案 + 校验过的 citations | 消耗服务端 LLM |
+| `fetch_page` | 按 `page_id` 取整页原文 | 无 LLM |
+
+```jsonc
+// anydocs.ask.json
+{
+  "mcp": {
+    "enabled": true,
+    "tools": ["search", "ask"],     // 想省 LLM 成本可只留 ["search"]
+    "rateLimitPerMinute": 60,
+    "allowedOrigins": []             // 浏览器型客户端的 Origin 白名单（server-to-server 留空）
+  }
+}
+```
+
+鉴权用 bearer token，走环境变量 `ANYDOCS_MCP_TOKEN`（密钥不入配置文件）；设置后调用须带 `Authorization: Bearer <token>`，否则 401。未设置则端点开放——仅适合 loopback / 可信内网（此时端口无关的 DNS-rebinding Host 守卫生效）。在 MCP 客户端里注册（以 Claude Code 为例）：
+
+```bash
+claude mcp add --transport http anydocs-ask http://127.0.0.1:3100/mcp \
+  --header "Authorization: Bearer $ANYDOCS_MCP_TOKEN"
+```
+
 ### 完整子命令参考
 
 > 全局安装（`npm install -g @anydocs/ask`）后 `anydocs-ask <cmd>` 直接可用。从源码运行时，把下方所有 `anydocs-ask <cmd>` 换成 `pnpm dev <cmd>`（仓库根目录），或 `pnpm build` 后用 `node dist/cli.js <cmd>`。
@@ -321,6 +348,15 @@ the runtime workspace under `<workspace>/state/<projectId>/golden/cases.jsonl`.
     "threshold": 50,                   // 反馈数量产品门槛
     "observationWindow": "28d",        // 4 周观察窗
     "embedSimilarityThreshold": 0.65   // bge-m3 cosine 聚类阈值
+  },
+
+  // RFC 0007 — MCP 知识库接口（POST /mcp，Streamable HTTP 无状态）
+  "mcp": {
+    "enabled": false,
+    "tools": ["search", "ask"],        // search(无LLM) / ask(耗LLM) / fetch_page
+    "rateLimitPerMinute": 60,          // per (token|origin) token bucket
+    "allowedOrigins": []               // 浏览器型客户端的 Origin 白名单
+    // 鉴权 token 走 env ANYDOCS_MCP_TOKEN，不入此文件
   }
 }
 ```

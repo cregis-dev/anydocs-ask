@@ -38,8 +38,8 @@ import {
 import { aggregate, TOP_K_FOR_AGGREGATION, type AggregateOutcome } from './aggregate.ts';
 import { buildPrompt, detectFormatHint } from './prompt.ts';
 import { LLMIntentRouter, type IntentProduct, type IntentRoute, type IntentRouter } from './intent-router.ts';
-import { postprocess } from './postprocess.ts';
-import type { AskRequest, AskResult } from './types.ts';
+import { postprocess, searchHitFromChunk } from './postprocess.ts';
+import type { AskRequest, AskResult, SearchResult } from './types.ts';
 
 const MAX_QUESTION_CHARS = 500;
 const HARD_MAX_CHUNKS = 20;
@@ -209,6 +209,56 @@ export async function retrieveOnlyWithTrace(
   await hooks.onStatus?.('retrieving');
   const retrieval = await runRetrievalPipeline(deps, req, question, queryLang, hooks.signal);
   return { trace: retrieval.trace, queryVector: retrieval.queryVector };
+}
+
+/** Default / hard ceiling for `search()` hit count (RFC 0007 `search` tool). */
+export const SEARCH_DEFAULT_TOP_K = 8;
+export const SEARCH_MAX_TOP_K = HARD_MAX_CHUNKS;
+
+/**
+ * RFC 0007 — retrieval-only entry point behind the MCP `search` tool. Runs the
+ * exact same hybrid retrieve + rerank path as `ask()` (so `search` and `ask`
+ * agree on what's relevant) but stops before the LLM call and returns the top
+ * reranked chunks as public {@link SearchResult} hits. No LLM tokens spent.
+ *
+ * Reuses `ask`'s input validation so an agent passing a bad scope_id / empty
+ * question gets a typed error instead of silent empty hits.
+ */
+export async function search(
+  deps: AskDeps,
+  req: AskRequest,
+  topK: number = SEARCH_DEFAULT_TOP_K,
+): Promise<SearchResult> {
+  if (req.question === undefined || req.question === null) {
+    return { type: 'error', code: 'invalid_question', message: "field 'question' is required" };
+  }
+  const question = req.question.trim();
+  if (question.length === 0) {
+    return { type: 'error', code: 'invalid_question', message: 'question must not be empty' };
+  }
+  if (question.length > MAX_QUESTION_CHARS) {
+    return {
+      type: 'error',
+      code: 'invalid_question',
+      message: `question exceeds ${MAX_QUESTION_CHARS} characters`,
+    };
+  }
+  const scopeId = req.context?.scope_id ?? null;
+  if (scopeId !== null && !isValidScopeId(deps.db, scopeId)) {
+    return {
+      type: 'error',
+      code: 'invalid_scope',
+      message: `scope_id '${scopeId}' is not a published subtree`,
+    };
+  }
+
+  const limit = Number.isFinite(topK)
+    ? Math.min(SEARCH_MAX_TOP_K, Math.max(1, Math.floor(topK)))
+    : SEARCH_DEFAULT_TOP_K;
+  const queryLang = resolveQueryLang(deps.db, question, req);
+  const retrieval = await runRetrievalPipeline(deps, req, question, queryLang);
+  const hits = retrieval.reranked.slice(0, limit).map(searchHitFromChunk);
+  return { type: 'hits', hits };
 }
 
 function emptyTrace(): AskTrace {
