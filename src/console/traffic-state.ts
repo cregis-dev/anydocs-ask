@@ -29,6 +29,7 @@ export type TrafficTotals = {
   count: number;
   countReader: number;
   countConsole: number;
+  countMcp: number;
   meanConfidence: number | null;
   p50LatencyMs: number | null;
   p95LatencyMs: number | null;
@@ -70,6 +71,7 @@ function computeTotals(records: RunRecord[]): TrafficTotals {
     count: records.length,
     countReader: 0,
     countConsole: 0,
+    countMcp: 0,
     meanConfidence: null,
     p50LatencyMs: null,
     p95LatencyMs: null,
@@ -82,7 +84,9 @@ function computeTotals(records: RunRecord[]): TrafficTotals {
   let errs = 0;
   let clarifies = 0;
   for (const r of records) {
-    if (runSource(r) === 'console') totals.countConsole++;
+    const src = runSource(r);
+    if (src === 'console') totals.countConsole++;
+    else if (src === 'mcp') totals.countMcp++;
     else totals.countReader++;
     if (r.answer.confidence !== null) confs.push(r.answer.confidence);
     lats.push(r.answer.latency_ms);

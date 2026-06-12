@@ -23,7 +23,7 @@ import { askWithTrace, askWithTraceStream, type AskTrace } from '../query/answer
 import { persistAnswer } from './answer-cache.ts';
 import type { AskRequest, AskResult, Citation } from '../query/types.ts';
 import type { LLM } from '../llm/types.ts';
-import type { RunCitation, RunCitationCheckUpdate, RunRecord } from '../runs/types.ts';
+import type { RunCitation, RunCitationCheckUpdate, RunRecord, RunSource } from '../runs/types.ts';
 import { observeAsk } from '../feedback/gamma.ts';
 import { renderAskPage, getMarkedScript } from './web-ask.ts';
 import { extractClaimChunkPairs } from '../query/claim-extractor.ts';
@@ -181,6 +181,22 @@ export function createApp(deps: AppDeps): Hono {
         rerankerConfig: runtime.config.reranker,
         promptConfig: runtime.config.prompt,
         resolveLlm: () => runtime.llm,
+        // RFC 0007 — record each MCP `ask` turn to runs.jsonl as source=mcp so
+        // it shows up in Studio Traffic alongside reader/console. Stateless →
+        // no session (session_id stays null). appendRun no-ops when runs off.
+        recordAskRun: ({ question, scopeId, result, trace, latencyMs }) => {
+          appendRun(runtime, {
+            requestId: randomUUID(),
+            sessionId: null,
+            query: question,
+            filters: scopeId ? { scope_id: scopeId } : {},
+            contextPageId: null,
+            result,
+            trace,
+            latencyMs,
+            source: 'mcp',
+          });
+        },
       },
     });
   });
@@ -804,14 +820,14 @@ function appendRun(
      *  request path. RunRecord.session_id allows analyze/Studio to fold
      *  per-dialogue runs (RFC 0003 M6 fallback for feedback rows whose
      *  column is null — pre-PR #61 β rows). */
-    sessionId: string;
+    sessionId: string | null;
     query: string;
     filters: Record<string, unknown>;
     contextPageId: string | null;
     result: AskResult;
     trace: AskTrace;
     latencyMs: number;
-    source: 'reader' | 'console';
+    source: RunSource;
   },
 ): void {
   if (!runtime.runs.isEnabled) return;
