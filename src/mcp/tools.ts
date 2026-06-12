@@ -196,13 +196,15 @@ export function registerMcpTools(
       {
         title: 'Fetch a documentation page',
         description:
-          'Retrieve the full text of a documentation page by its page_id (as returned by `search`). Use this to read a whole page after `search` surfaces a relevant snippet.',
+          'Retrieve the full text of a documentation page by its page_id (as returned by `search`). Use this to read a whole page after `search` surfaces a relevant snippet. A page_id can exist in several languages — pass the `lang` from the search hit to read the matching one; otherwise the default language is returned and the others are listed.',
         inputSchema: {
           page_id: z.string().min(1).describe('The page_id to fetch (from a `search` hit).'),
           lang: z
             .string()
             .optional()
-            .describe('Preferred language code (e.g. "en", "zh"). Omit to take any published language.'),
+            .describe(
+              'Language code (e.g. "en", "zh") — pass the `lang` field from the search hit to get the matching language. Omit to return the default; available languages are listed in the response.',
+            ),
         },
       },
       async ({ page_id, lang }) => {
@@ -210,11 +212,13 @@ export function registerMcpTools(
         if (!page) {
           return text(`fetch_page failed (not_found): no published page with page_id '${page_id}'`, true);
         }
+        const otherLangs = page.availableLangs.filter((l) => l !== page.lang);
         const header =
           `# ${page.title}\n` +
           (page.url ? `URL: ${page.url}\n` : '') +
           (page.breadcrumb.length ? `Path: ${breadcrumbPath(page.breadcrumb)}\n` : '') +
-          `Language: ${page.lang}\n`;
+          `Language: ${page.lang}\n` +
+          (otherLangs.length ? `Also available in: ${otherLangs.join(', ')} (pass lang= to switch)\n` : '');
         return text(`${header}\n${page.body}`);
       },
     );
@@ -229,10 +233,32 @@ type FetchedPage = {
   title: string;
   url: string | null;
   lang: string;
+  /** All published languages for this page_id, sorted (≥ 1, includes `lang`). */
+  availableLangs: string[];
   breadcrumb: BreadcrumbNode[];
   /** Page text reconstructed by concatenating its chunks in order. */
   body: string;
 };
+
+/**
+ * Pick which published language to serve for a page.
+ *
+ * `search` hits carry their own `lang`, so an agent that passes it back gets
+ * the matching language. When `lang` is omitted we fall back to the first
+ * language in sorted order — deterministic (not SQLite row order), so repeated
+ * calls are stable and the response can honestly list the alternatives.
+ */
+export function pickPageLang(
+  langs: ReadonlyArray<string>,
+  preferLang: string | null,
+): { lang: string; available: string[] } | null {
+  const available = [...new Set(langs)].sort();
+  if (available.length === 0) return null;
+  if (preferLang && available.includes(preferLang)) {
+    return { lang: preferLang, available };
+  }
+  return { lang: available[0]!, available };
+}
 
 /**
  * Reconstruct a page's text from the indexed chunks. Pages aren't stored as
@@ -248,9 +274,13 @@ function fetchPage(db: DbHandle, pageId: string, preferLang: string | null): Fet
        WHERE page_id = ? AND status = 'published'`,
     )
     .all(pageId) as PageMetaRow[];
-  if (rows.length === 0) return null;
 
-  const chosen = (preferLang ? rows.find((r) => r.lang === preferLang) : undefined) ?? rows[0]!;
+  const picked = pickPageLang(
+    rows.map((r) => r.lang),
+    preferLang,
+  );
+  if (!picked) return null;
+  const chosen = rows.find((r) => r.lang === picked.lang)!;
 
   type ChunkTextRow = { text: string };
   const chunks = db
@@ -268,6 +298,7 @@ function fetchPage(db: DbHandle, pageId: string, preferLang: string | null): Fet
     title: chosen.title,
     url: chosen.url,
     lang: chosen.lang,
+    availableLangs: picked.available,
     breadcrumb,
     body: chunks.map((c) => c.text).join('\n\n'),
   };

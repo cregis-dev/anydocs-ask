@@ -29,8 +29,13 @@ async function buildProject(): Promise<{ root: string; cleanup: () => Promise<vo
   const root = await fs.mkdtemp(join(tmpdir(), 'anydocs-mcp-srv-'));
   await fs.mkdir(join(root, 'navigation'), { recursive: true });
   await fs.mkdir(join(root, 'pages', 'zh'), { recursive: true });
+  await fs.mkdir(join(root, 'pages', 'en'), { recursive: true });
   await fs.writeFile(
     join(root, 'navigation', 'zh.json'),
+    JSON.stringify({ version: 1, items: [{ type: 'page', pageId: 'p' }] }),
+  );
+  await fs.writeFile(
+    join(root, 'navigation', 'en.json'),
     JSON.stringify({ version: 1, items: [{ type: 'page', pageId: 'p' }] }),
   );
   await fs.writeFile(
@@ -50,6 +55,28 @@ async function buildProject(): Promise<{ root: string; cleanup: () => Promise<vo
             type: 'paragraph',
             id: 'p1',
             children: [{ type: 'text', text: '使用 JWT bearer token 完成 API 鉴权。' }],
+          },
+        ],
+      },
+    }),
+  );
+  await fs.writeFile(
+    join(root, 'pages', 'en', 'p.json'),
+    JSON.stringify({
+      id: 'p',
+      lang: 'en',
+      slug: 'p',
+      title: 'Authentication',
+      status: 'published',
+      url: '/en/p',
+      content: {
+        version: 1,
+        blocks: [
+          { type: 'heading', id: 'h1', level: 1, children: [{ type: 'text', text: 'Authentication' }] },
+          {
+            type: 'paragraph',
+            id: 'p1',
+            children: [{ type: 'text', text: 'Use a JWT bearer token to authenticate API calls.' }],
           },
         ],
       },
@@ -171,7 +198,9 @@ test('mcp: tools/call search returns grounded hits', async () => {
     const payload = JSON.parse(json.result.content[0].text);
     assert.ok(payload.count >= 1, `expected ≥1 hit, got ${payload.count}`);
     assert.equal(payload.hits[0].page_id, 'p');
-    assert.equal(payload.hits[0].url, '/zh/p');
+    // page_id is shared across languages; the hit carries its own lang + URL.
+    assert.match(payload.hits[0].url, /^\/(en|zh)\/p$/);
+    assert.match(payload.hits[0].lang, /^(en|zh)$/);
   } finally {
     await cleanup();
   }
@@ -201,15 +230,33 @@ test('mcp: tools/call ask returns a synthesized answer', async () => {
   }
 });
 
-test('mcp: tools/call fetch_page reconstructs page text', async () => {
+test('mcp: tools/call fetch_page reconstructs page text in the requested lang', async () => {
   const { app, cleanup } = await setup({ tools: ['search', 'fetch_page'] });
   try {
-    const { status, json } = await rpc(app, toolCall('fetch_page', { page_id: 'p' }));
+    const { status, json } = await rpc(app, toolCall('fetch_page', { page_id: 'p', lang: 'zh' }));
     assert.equal(status, 200);
     assert.notEqual(json.result.isError, true);
     const txt = json.result.content[0].text as string;
     assert.match(txt, /# 鉴权/);
     assert.match(txt, /JWT bearer token/);
+    assert.match(txt, /Language: zh/);
+    // Surfaces the other published language so the agent can switch.
+    assert.match(txt, /Also available in: en/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('mcp: fetch_page without lang returns a deterministic default + lists alternatives', async () => {
+  const { app, cleanup } = await setup({ tools: ['fetch_page'] });
+  try {
+    const { json } = await rpc(app, toolCall('fetch_page', { page_id: 'p' }));
+    const txt = json.result.content[0].text as string;
+    // Default is the first language in sorted order ('en' < 'zh'), regardless
+    // of SQLite row order — stable across calls.
+    assert.match(txt, /Language: en/);
+    assert.match(txt, /# Authentication/);
+    assert.match(txt, /Also available in: zh/);
   } finally {
     await cleanup();
   }
