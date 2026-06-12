@@ -38,6 +38,7 @@ import {
 } from '../widget/server-gate.ts';
 
 const SSE_HEARTBEAT_MS = 2_000;
+const SSE_DELTA_FLUSH_MS = 150;
 const SSE_INITIAL_PADDING_BYTES = 4_096;
 const SSE_FLUSH_PADDING_BYTES = 4_096;
 
@@ -225,6 +226,8 @@ export function createApp(deps: AppDeps): Hono {
         await writeFlushPadding();
       };
       let heartbeat: ReturnType<typeof setInterval> | null = null;
+      let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
+      let lastDeltaFlushAt = 0;
       let wroteFirstDelta = false;
       const startHeartbeat = () => {
         if (heartbeat) return;
@@ -236,6 +239,25 @@ export function createApp(deps: AppDeps): Hono {
         if (!heartbeat) return;
         clearInterval(heartbeat);
         heartbeat = null;
+      };
+      const clearDeltaFlushTimer = () => {
+        if (!deltaFlushTimer) return;
+        clearTimeout(deltaFlushTimer);
+        deltaFlushTimer = null;
+      };
+      const flushDeltaPadding = async () => {
+        if (stream.aborted) return;
+        lastDeltaFlushAt = performance.now();
+        await writeFlushPadding();
+      };
+      const scheduleDeltaFlush = () => {
+        if (deltaFlushTimer || stream.aborted) return;
+        const elapsed = performance.now() - lastDeltaFlushAt;
+        const delay = Math.max(0, SSE_DELTA_FLUSH_MS - elapsed);
+        deltaFlushTimer = setTimeout(() => {
+          deltaFlushTimer = null;
+          void flushDeltaPadding();
+        }, delay);
       };
 
       await writeComment(' '.repeat(SSE_INITIAL_PADDING_BYTES));
@@ -251,6 +273,7 @@ export function createApp(deps: AppDeps): Hono {
       const abortController = new AbortController();
       stream.onAbort(() => {
         stopHeartbeat();
+        clearDeltaFlushTimer();
         abortController.abort();
       });
       const t0 = performance.now();
@@ -271,13 +294,16 @@ export function createApp(deps: AppDeps): Hono {
               await write('delta', { text });
               if (!wroteFirstDelta) {
                 wroteFirstDelta = true;
-                await writeFlushPadding();
+                await flushDeltaPadding();
+              } else {
+                scheduleDeltaFlush();
               }
             },
           },
         );
       } catch (err) {
         stopHeartbeat();
+        clearDeltaFlushTimer();
         if (stream.aborted || abortController.signal.aborted) return;
         await write('result', {
           type: 'error',
@@ -288,7 +314,11 @@ export function createApp(deps: AppDeps): Hono {
         return;
       }
       stopHeartbeat();
+      clearDeltaFlushTimer();
       if (stream.aborted || abortController.signal.aborted) return;
+      if (wroteFirstDelta) {
+        await flushDeltaPadding();
+      }
 
       const bodyOut = finalizeAskCall({
         runtime,
