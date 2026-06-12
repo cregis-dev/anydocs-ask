@@ -4,13 +4,24 @@
 
 ## Unreleased
 
+## 0.4.0-alpha.5 — 2026-06-12
+
+第二个挂 0.4 版本号的 alpha —— 打包 **RFC 0007 MCP 知识库接口** 的完整 alpha.0 链路（[#109](https://github.com/cregis-dev/anydocs-ask/pull/109) / [#110](https://github.com/cregis-dev/anydocs-ask/pull/110) / [#111](https://github.com/cregis-dev/anydocs-ask/pull/111)），并修通自 0.3.1 起连续 4 次 E404 的 **npm OIDC trusted publishing**。`mcp` 段默认关，无 breaking change。
+
 ### 新增
 
-- **RFC 0007 — MCP 知识库接口（Streamable HTTP）** —— 把 ask 暴露成可被其他 agent 调用的 MCP server，进程内挂在现有 Hono app 的 `POST /mcp`。新增 `src/mcp/`（`server.ts` / `tools.ts` / `gate.ts` / `types.ts`）+ 查询层 `search()`（`src/query/answer.ts`，纯检索、无 LLM）。
-  - **传输**：官方 `@modelcontextprotocol/sdk@1.x` 的 Streamable HTTP **无状态**模式（每请求一个 server+transport，`enableJsonResponse`），与现有 `/v1/ask` 一样多轮由调用方自管。
+- **RFC 0007 — MCP 知识库接口（Streamable HTTP）**（[#109](https://github.com/cregis-dev/anydocs-ask/pull/109)）—— 把 ask 暴露成可被其他 agent 调用的 MCP server，进程内挂在现有 Hono app 的 `POST /mcp`。新增 `src/mcp/`（`server.ts` / `tools.ts` / `gate.ts` / `types.ts`）+ 查询层 `search()`（`src/query/answer.ts`，纯检索、无 LLM）。
+  - **传输**：官方 `@modelcontextprotocol/sdk@1.29` 的 Streamable HTTP **无状态**模式（每请求一个 server+transport，`enableJsonResponse`），与现有 `/v1/ask` 一样多轮由调用方自管。
   - **tools**：`search`（混合检索→片段+URL+breadcrumb，**LLM-free**，注入静态 intent router）、`ask`（完整 RAG 答案+校验 citations，消耗 LLM）、`fetch_page`（按 page_id 取整页）。`config.mcp.tools` 控制启用哪些；只开 `search` 的部署**无需 LLM provider / API key**。
   - **鉴权 / 安全**：`POST /mcp` 默认关（`mcp.enabled:false`）；bearer token 走 env `ANYDOCS_MCP_TOKEN`（密钥不入配置文件）；per-token / per-origin token bucket 限流（复用 widget `InProcessRateLimiter`）；loopback bind 上的端口无关 DNS-rebinding Host 守卫 + 可选 Origin 白名单。
   - **配置**：`anydocs.ask.json` 新增 `mcp` 段 `{ enabled, tools, rateLimitPerMinute, allowedOrigins }`，默认零行为变化。
+
+- **MCP ask 流量进 Studio Traffic（source=mcp）**（[#111](https://github.com/cregis-dev/anydocs-ask/pull/111)）—— `RunSource` 增 `'mcp'`；MCP `ask` 改走 `askWithTrace` + `McpToolDeps.recordAskRun` 回调写入 runs（stateless → `session_id=null`），Traffic tab 三分计数 + footer `· mcp N` + source 筛选增 mcp 项；`search` 因 LLM-free / 非 Q&A turn 不记 run。analyze / golden 默认纳入 mcp 流量、仅排除 console。
+
+### 修复
+
+- **fix(mcp): fetch_page 语言选择确定性化**（[#110](https://github.com/cregis-dev/anydocs-ask/pull/110)）—— 不传 lang 时原本取 SQLite 首行（行序不确定，会出现 search 命中 zh、fetch 回 en 的错配）。改为纯函数 `pickPageLang`（排序取首个）+ 输出 `Also available in: <langs>` 透明列出可用语言 + 描述提示回传 search hit 的 lang。
+- **ci(release): 修通 npm OIDC trusted publishing（连续 4 次 E404 的根因）** —— 根因不是此前怀疑的"包成熟度门槛"，而是 CI 用 Node 22 **自带的 npm 10.9.x，低于 OIDC trusted publishing 要求的 npm ≥ 11.5.1**；npm 10.x 不做 OIDC token exchange，`npm publish` 拿不到有效凭证，registry 对 scoped 包返回 E404（而非 403）。`release.yml` 在 publish 前加 `npm install -g npm@latest`。同时修一处潜伏 bug：publish 现按版本号是否含预发布标识派生 `--tag`（prerelease→`next`、GA→`latest`），避免预发布版被发到 `latest`。
 
 ## 0.4.0-alpha.4 — 2026-06-08
 

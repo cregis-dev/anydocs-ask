@@ -34,6 +34,16 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: pnpm
 
+      # OIDC trusted publishing 要求 npm CLI >= 11.5.1，而 Node 22 自带 npm 10.9.x
+      # 不具备 OIDC token exchange 能力 —— 这正是 0.3.1 / 0.4.0-alpha.4 连续 4 次
+      # `npm publish` 返回 E404 的根因（npm 对 scoped 包用 404 而非 403 表示凭证不被接受）。
+      # 升级到 latest 后 publish 才能用 GitHub 签发的 OIDC token 完成 trusted publishing。
+      # 背景见 memory: project_npm_publish_oidc_404.md。
+      - name: Upgrade npm for OIDC trusted publishing (needs >= 11.5.1)
+        run: |
+          npm install -g npm@latest
+          npm --version
+
       - name: Verify tag matches package.json version
         run: |
           PKG=$(node -p "require('./package.json').version")
@@ -86,5 +96,19 @@ jobs:
               core.warning(`Failed to dump OIDC claims: ${e.message}`);
             }
 
+      # prerelease（含 -alpha/-beta/-rc 等 semver 预发布标识）必须发到 `next` dist-tag，
+      # 否则 npm 默认把它发到 `latest`，会让 `npm install @anydocs/ask` 给所有人装上预发布版。
+      # GA 版本（无预发布标识）正常进 `latest`。
+      - name: Determine npm dist-tag
+        id: disttag
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          if [[ "$VER" == *-* ]]; then
+            echo "tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Publishing $VER to dist-tag: $([[ "$VER" == *-* ]] && echo next || echo latest)"
+
       - name: Publish to npm (OIDC + provenance)
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public --tag ${{ steps.disttag.outputs.tag }}
