@@ -62,6 +62,14 @@ function seedFeedback(
     signal_source?: string;
     bad_citation_ids?: string[];
   }>,
+  // created_at for the seeded rows. Defaults to *now* so rows always fall
+  // inside the diagnose 28d observation window regardless of when the suite
+  // runs. A hardcoded absolute date is a time-bomb: once real time advances
+  // > 28d past it, the window excludes every row and the candidate-count
+  // assertions break (this is exactly what happened to the old
+  // `Date.UTC(2026, 4, 16)` constant post-2026-06-13). Tests that assert on
+  // the derived ISO-week cluster_id pass an explicit fixed date instead.
+  createdAt: number = Date.now(),
 ): number[] {
   const db = openDatabase({ stateRoot, skipMigrations: true });
   const stmt = db.prepare(
@@ -71,7 +79,7 @@ function seedFeedback(
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
   const ids: number[] = [];
-  const now = Date.UTC(2026, 4, 16);
+  const now = createdAt;
   try {
     for (const r of rows) {
       const info = stmt.run(
@@ -249,9 +257,14 @@ test('export excludes already-reviewed rows', async () => {
 test('import applies approved decision → curated row inserted + source marked', async () => {
   const s = await makeScenario({ feedbackEnabled: true });
   try {
-    const [id] = seedFeedback(s.stateRoot, [
-      { answer_id: 'a1', question: 'q', generated: 'g', rating: -1 },
-    ]);
+    // Fixed date so the derived cluster_id week prefix is deterministic
+    // (2026-05-16 → ISO week 20, asserted below). Export/import don't
+    // window-filter, so an "old" seed date is fine for this flow.
+    const [id] = seedFeedback(
+      s.stateRoot,
+      [{ answer_id: 'a1', question: 'q', generated: 'g', rating: -1 }],
+      Date.UTC(2026, 4, 16),
+    );
     await runFeedbackExport({ projectRoot: s.projectRoot, stateRoot: s.stateRoot });
 
     const inbox = join(s.stateRoot, 'feedback', 'inbox');
