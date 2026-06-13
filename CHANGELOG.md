@@ -4,6 +4,21 @@
 
 ## Unreleased
 
+## 0.4.0-alpha.6 — 2026-06-13
+
+小修补 alpha —— review 驱动的 **RFC 文档对齐实况** + **三处低危加固** + **拆一个既有 CI 时间炸弹**（[#113](https://github.com/cregis-dev/anydocs-ask/pull/113)）。无 breaking change；npm tarball 仅含 `dist/`，本版可装到的实质变化是三处加固（RFC 文档不进包）。
+
+### 修复
+
+- **MCP `ask` 的 LLM 错误信息脱敏** —— `resolveLlm()` 抛错时不再把 provider 细节回吐给调用方，改为通用 `ask failed (llm_unavailable)` + 细节写 stderr（[src/mcp/tools.ts](src/mcp/tools.ts)）。
+- **`fetch_page` breadcrumb 类型守卫** —— DB 存到非数组 breadcrumb（损坏）时不再炸 `breadcrumbPath` 的 `.map`，加 `Array.isArray` 守卫降级为空 path（[src/mcp/tools.ts](src/mcp/tools.ts)）+ 新增单测。
+- **feedback `answers.payload` 解析失败可观测** —— 原静默 `catch {}` 改为写 stderr 警告，露出 answer-cache 数据损坏，便于 ops 排查（[src/server/app.ts](src/server/app.ts)）。
+- **fix(test): 拆 feedback-cmd diagnose 的 28d 窗口时间炸弹** —— `seedFeedback` 把 `created_at` 硬编码成 `2026-05-16`，而 diagnose 的 28d 观察窗口按真实墙钟算，真实时间过 2026-06-13 后 fixture 跌出窗口致两个 diagnose 测试在 CI 红（自 #90 埋雷，现到期）。改 `seedFeedback` 默认 `Date.now()`，唯一依赖固定日期的 cluster_id 周前缀测试显式传旧日期。
+
+### 文档
+
+- **RFC 0003–0007 对齐发版实况** —— 5 个 RFC 的 Status / 里程碑表停在「待实施 / 未来式」语气，与 CHANGELOG（事实源）脱节，按实况对齐并保留历史 rationale。重点 **RFC 0004 widget**：文档原写「0.4 仅设计稿 / 0.5+ 落地」，实际 W1–W5 MVP 全栈已于 0.3.0 发版并 hermes-docs 真机回归。
+
 ## 0.4.0-alpha.5 — 2026-06-12
 
 第二个挂 0.4 版本号的 alpha —— 打包 **RFC 0007 MCP 知识库接口** 的完整 alpha.0 链路（[#109](https://github.com/cregis-dev/anydocs-ask/pull/109) / [#110](https://github.com/cregis-dev/anydocs-ask/pull/110) / [#111](https://github.com/cregis-dev/anydocs-ask/pull/111)），并修通自 0.3.1 起连续 4 次 E404 的 **npm OIDC trusted publishing**。`mcp` 段默认关，无 breaking change。
