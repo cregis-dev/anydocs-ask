@@ -293,6 +293,25 @@ test('mcp: fetch_page without lang returns a deterministic default + lists alter
   }
 });
 
+test('mcp: fetch_page tolerates a non-array breadcrumb (DB corruption) without crashing', async () => {
+  const { app, runtime, cleanup } = await setup({ tools: ['fetch_page'] });
+  try {
+    // Corrupt the stored breadcrumb to a JSON object (not an array). A naive
+    // `JSON.parse(...) as BreadcrumbNode[]` would later blow up `breadcrumbPath`'s
+    // `.map`; the Array.isArray guard must degrade it to an empty path instead.
+    runtime.db.prepare(`UPDATE pages SET breadcrumb = '{}' WHERE page_id = 'p'`).run();
+    const { status, json } = await rpc(app, toolCall('fetch_page', { page_id: 'p' }));
+    assert.equal(status, 200);
+    assert.notEqual(json.result.isError, true);
+    const txt = json.result.content[0].text as string;
+    assert.match(txt, /# Authentication/);
+    // Breadcrumb degraded to empty → no `Path:` line emitted.
+    assert.doesNotMatch(txt, /^Path:/m);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('mcp: fetch_page unknown page_id → tool error', async () => {
   const { app, cleanup } = await setup({ tools: ['fetch_page'] });
   try {
