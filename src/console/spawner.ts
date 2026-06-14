@@ -38,6 +38,18 @@ export function createNodeSpawner(): Spawner {
     const child = spawn(process.execPath, args, {
       stdio: ['ignore', 'inherit', 'inherit'],
       detached: false,
+      // Console-managed children always serve the retrieval MCP so CAWP can
+      // mount the project via the console `/mcp/:name` proxy with no
+      // per-project config (ADR-038). Auth is enforced once at the console
+      // proxy; the child binds loopback and is only reachable through the
+      // proxy, so its own MCP token is explicitly cleared (open on loopback)
+      // — never inherit the console's ANYDOCS_CONSOLE_MCP_TOKEN here.
+      env: {
+        ...process.env,
+        ANYDOCS_MCP_ENABLED: '1',
+        ANYDOCS_MCP_TOOLS: 'search,fetch_page',
+        ANYDOCS_MCP_TOKEN: '',
+      },
     });
     return wrapChild(child);
   };

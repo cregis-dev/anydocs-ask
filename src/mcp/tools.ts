@@ -98,6 +98,23 @@ export function registerMcpTools(
 ): void {
   const enabled = new Set(opts.enabledTools);
 
+  // Contract tool (ADR-038 §2): every MCP server CAWP connects to must expose
+  // a read-only `health` tool. CAWP's `connectMcp` asserts its presence at
+  // startup (else it refuses the server) and filters it out of the
+  // agent-visible tool list. Registered unconditionally — it is a liveness
+  // probe, not a feature gated by `config.mcp.tools`. Takes no arguments and
+  // never touches the LLM.
+  server.registerTool(
+    'health',
+    {
+      title: 'Health check',
+      description:
+        'Read-only liveness probe for this documentation knowledge base. Returns {ok:true} when the server is serving. Takes no arguments.',
+      inputSchema: {},
+    },
+    async () => text(JSON.stringify({ ok: true, server: 'anydocs-ask', tools: [...enabled] })),
+  );
+
   const retrievalDeps: AskDeps = {
     db: deps.db,
     embedder: deps.embedder,
@@ -114,7 +131,7 @@ export function registerMcpTools(
       {
         title: 'Search the documentation',
         description:
-          'Semantic + keyword search over the indexed documentation. Returns the most relevant passages with their source page, URL, and breadcrumb so you can ground answers in the docs. Use this to find supporting material and cite it yourself; it does NOT generate a written answer (use `ask` for that).',
+          'Semantic + keyword search over the indexed documentation. Returns the most relevant passages with their source page, URL, and breadcrumb so you can ground answers in the docs. Use this to find supporting material, then write and cite the answer yourself; it returns passages only and does NOT generate a written answer.',
         inputSchema: {
           query: z.string().min(1).max(500).describe('Natural-language search query.'),
           scope_id: z

@@ -174,7 +174,13 @@ test('mcp: tools/list reflects config.mcp.tools', async () => {
     const { status, json } = await rpc(app, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
     assert.equal(status, 200);
     const names = (json.result.tools as Array<{ name: string }>).map((t) => t.name).sort();
-    assert.deepEqual(names, ['ask', 'fetch_page', 'search']);
+    // `health` is a contract tool (ADR-038 §2): always present, independent of
+    // config.mcp.tools. Filter it out to assert the configured feature set.
+    assert.ok(names.includes('health'), 'health contract tool must always be present');
+    assert.deepEqual(
+      names.filter((n) => n !== 'health'),
+      ['ask', 'fetch_page', 'search'],
+    );
   } finally {
     await cleanup();
   }
@@ -185,7 +191,22 @@ test('mcp: tools/list omits disabled tools (search-only)', async () => {
   try {
     const { json } = await rpc(app, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
     const names = (json.result.tools as Array<{ name: string }>).map((t) => t.name);
-    assert.deepEqual(names, ['search']);
+    // `health` (contract tool) is always present alongside the configured set.
+    assert.deepEqual(names.filter((n) => n !== 'health').sort(), ['search']);
+    assert.ok(names.includes('health'));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('mcp: tools/call health returns ok (contract tool, always present)', async () => {
+  const { app, cleanup } = await setup({ tools: ['search'] });
+  try {
+    const { status, json } = await rpc(app, toolCall('health', {}));
+    assert.equal(status, 200);
+    assert.notEqual(json.result.isError, true);
+    const body = JSON.parse((json.result.content as Array<{ text: string }>)[0]!.text);
+    assert.equal(body.ok, true);
   } finally {
     await cleanup();
   }

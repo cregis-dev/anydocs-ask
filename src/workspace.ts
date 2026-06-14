@@ -322,6 +322,12 @@ export type ProjectListing = {
   projectId: string | null;
   /** state/<projectId>/index.db exists */
   indexed: boolean;
+  /** Docs-site title (anydocs.config.json `name`), or null. Surfaced to
+   * CAWP's knowledge-base catalog so an agent's prompt can say what KB it is. */
+  title: string | null;
+  /** Doc-owner one-liner on coverage / when to use (anydocs.config.json
+   * `description`), or null. Surfaced to CAWP's KB prompt section. */
+  description: string | null;
 };
 
 /**
@@ -338,32 +344,64 @@ export function scanProjects(workspacePath: string): ProjectListing[] {
 
   for (const [name, projPath] of Object.entries(registry)) {
     if (!existsSync(projPath)) {
-      out.push({ name, path: projPath, valid: false, missing: ['path not found'], projectId: null, indexed: false });
+      out.push({
+        name,
+        path: projPath,
+        valid: false,
+        missing: ['path not found'],
+        projectId: null,
+        indexed: false,
+        title: null,
+        description: null,
+      });
       continue;
     }
     const missing: string[] = [];
     if (!existsSync(join(projPath, 'pages'))) missing.push('pages/');
     if (!existsSync(join(projPath, 'navigation'))) missing.push('navigation/');
-    const projectId = readProjectIdSafe(projPath);
+    const meta = readProjectMetaSafe(projPath);
     const indexed =
-      projectId !== null &&
-      existsSync(join(resolveStateRoot(workspacePath, projectId), 'index.db'));
-    out.push({ name, path: projPath, valid: missing.length === 0, missing, projectId, indexed });
+      meta.projectId !== null &&
+      existsSync(join(resolveStateRoot(workspacePath, meta.projectId), 'index.db'));
+    out.push({
+      name,
+      path: projPath,
+      valid: missing.length === 0,
+      missing,
+      projectId: meta.projectId,
+      indexed,
+      title: meta.title,
+      description: meta.description,
+    });
   }
 
   out.sort((a, b) => a.name.localeCompare(b.name));
   return out;
 }
 
-function readProjectIdSafe(projPath: string): string | null {
+/** Project metadata read from `<projectRoot>/anydocs.config.json`. All fields
+ * degrade to null when the file is missing/unreadable or the field is absent. */
+type ProjectMeta = { projectId: string | null; title: string | null; description: string | null };
+
+function readProjectMetaSafe(projPath: string): ProjectMeta {
   const configPath = join(projPath, 'anydocs.config.json');
-  if (!existsSync(configPath)) return null;
+  const empty: ProjectMeta = { projectId: null, title: null, description: null };
+  if (!existsSync(configPath)) return empty;
   try {
-    const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as { projectId?: unknown };
-    return typeof parsed.projectId === 'string' && parsed.projectId.length > 0
-      ? parsed.projectId
-      : null;
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as {
+      projectId?: unknown;
+      name?: unknown;
+      description?: unknown;
+    };
+    const str = (v: unknown): string | null =>
+      typeof v === 'string' && v.trim().length > 0 ? v.trim() : null;
+    return {
+      projectId: str(parsed.projectId),
+      // `name` is the docs-site title (e.g. "Cregis Developer Docs").
+      title: str(parsed.name),
+      description: str(parsed.description),
+    };
   } catch {
-    return null;
+    return empty;
   }
 }

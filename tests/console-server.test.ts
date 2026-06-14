@@ -4226,3 +4226,99 @@ test('GET /p/:name: Feedback tab SSR — KPI placeholder when no suggestions dir
     await cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// MCP knowledge-base proxy — POST /mcp/:name (CAWP mount, ADR-038)
+// ---------------------------------------------------------------------------
+
+test('POST /mcp/:name: lazy-starts child and reverse-proxies to child /mcp', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const calls: ProxyCall[] = [];
+    const fetchFn = makeStubFetch(calls, () => ({
+      status: 200,
+      body: { jsonrpc: '2.0', id: 1, result: { tools: [] } },
+    }));
+    const registry = makeRegistry();
+    const app = createConsoleApp({ workspacePath: ws, consolePort: 4100, registry, fetchFn });
+    const rpcBody = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const res = await app.request('/mcp/docs-zh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+      body: rpcBody,
+    });
+    assert.equal(res.status, 200);
+    // Forwarded to the child's /mcp on the allocated port, body verbatim.
+    assert.equal(calls[0]!.url, 'http://127.0.0.1:4101/mcp');
+    assert.equal(calls[0]!.method, 'POST');
+    assert.equal(calls[0]!.body, rpcBody);
+    // Child is running (lazy-started by the proxy).
+    assert.equal(registry.list().filter((e) => !e.exited).length, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /mcp/:name: 404 unknown project', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await fs.mkdir(join(ws, 'projects'), { recursive: true });
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      fetchFn: makeStubFetch([], () => ({ status: 200, body: {} })),
+    });
+    const res = await app.request('/mcp/nope', { method: 'POST', body: '{}' });
+    assert.equal(res.status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('POST /mcp/:name: bearer gate — 401 without/with wrong token, 200 with correct', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const calls: ProxyCall[] = [];
+    const fetchFn = makeStubFetch(calls, () => ({ status: 200, body: { ok: true } }));
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      fetchFn,
+      mcpToken: 'sekret',
+    });
+    const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' };
+
+    const noTok = await app.request('/mcp/docs-zh', opts);
+    assert.equal(noTok.status, 401);
+    assert.equal(noTok.headers.get('WWW-Authenticate'), 'Bearer');
+
+    const wrong = await app.request('/mcp/docs-zh', {
+      ...opts,
+      headers: { ...opts.headers, Authorization: 'Bearer nope' },
+    });
+    assert.equal(wrong.status, 401);
+
+    const right = await app.request('/mcp/docs-zh', {
+      ...opts,
+      headers: { ...opts.headers, Authorization: 'Bearer sekret' },
+    });
+    assert.equal(right.status, 200);
+
+    // CAWP's default convention: raw token via X-MCP-Secret is also accepted.
+    const viaSecret = await app.request('/mcp/docs-zh', {
+      ...opts,
+      headers: { ...opts.headers, 'X-MCP-Secret': 'sekret' },
+    });
+    assert.equal(viaSecret.status, 200);
+
+    // Both accepted-auth requests reached the child (proxy forwards body, not
+    // the auth header — the child runs token-less on loopback).
+    assert.equal(calls.length, 2);
+  } finally {
+    await cleanup();
+  }
+});
