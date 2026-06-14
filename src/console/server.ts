@@ -13,6 +13,7 @@
  */
 
 import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { timingSafeEqual } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { Hono } from 'hono';
@@ -71,6 +72,14 @@ export type ConsoleAppDeps = {
   idleTimeoutMin?: number;
   registry: ProcessRegistry;
   /**
+   * Workspace-level MCP bearer token for the `/mcp/:name` proxy (CAWP mount,
+   * ADR-038). When set, the proxy requires `Authorization: Bearer <token>`;
+   * when null/undefined the proxy is open (loopback / trusted-network deploys).
+   * Resolved once from env `ANYDOCS_CONSOLE_MCP_TOKEN` by the caller. This is
+   * distinct from each child's own MCP token (which the spawner clears).
+   */
+  mcpToken?: string | null;
+  /**
    * fetch implementation used to reverse-proxy ask calls into child
    * processes. Injectable for tests; defaults to globalThis.fetch.
    */
@@ -94,6 +103,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   const fetchFn = deps.fetchFn ?? globalThis.fetch;
   const ops = deps.ops ?? defaultOps;
   const idleTimeoutMin = deps.idleTimeoutMin ?? 15;
+  const mcpToken = (deps.mcpToken ?? '').trim() || null;
 
   function buildNav(current: string | null): {
     projects: ProjectListing[];
@@ -677,6 +687,89 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   });
 
   // -----------------------------------------------------------------------
+  // MCP knowledge-base proxy — stable per-project `/mcp/:name` endpoint for
+  // external agents (CAWP mount, ADR-038). Reverse-proxies MCP-over-
+  // StreamableHTTP to the child's `/mcp`, hiding the dynamic, idle-reaped
+  // child port behind one stable console URL. The child is force-enabled for
+  // MCP and pinned to search/fetch_page by the spawner; auth is enforced once
+  // here (workspace bearer token), so the loopback child needs no token.
+  //
+  // Lazy-start + touch mirrors the ask proxy: a cold project warms on first
+  // connect (~5–10s for bge-m3) and stays warm while the agent uses it.
+  // ---------------------------------------------------------------------
+  app.all('/mcp/:name', async (c) => {
+    const name = c.req.param('name');
+
+    // Workspace token gate (when a token is configured). Accept the token via
+    // either `Authorization: Bearer <token>` (standard MCP clients) or the raw
+    // `X-MCP-Secret: <token>` header — the latter is CAWP's default MCP auth
+    // convention, so a CAWP agent mounts this proxy with zero runtime changes
+    // (just CAWP_MCP_<NAME>_SECRET). Both carry the same workspace token.
+    if (mcpToken !== null && !mcpAuthOk(c.req.header('Authorization'), c.req.header('X-MCP-Secret'), mcpToken)) {
+      return c.json({ ok: false, error: 'unauthorized' }, 401, {
+        'WWW-Authenticate': 'Bearer',
+      });
+    }
+
+    const method = c.req.method;
+    if (method !== 'POST' && method !== 'GET' && method !== 'DELETE') {
+      return c.json({ ok: false, error: `method not allowed: ${method}` }, 405);
+    }
+
+    const project = findProject(deps.workspacePath, name);
+    if (!project) {
+      return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
+    }
+    if (!project.valid) {
+      return c.json(
+        { ok: false, error: `project '${name}' invalid (missing: ${project.missing.join(', ')})` },
+        400,
+      );
+    }
+
+    let port = deps.registry.getPort(name);
+    if (port === null) {
+      const start = await deps.registry.start(name);
+      if (!start.ok) {
+        return c.json({ ok: false, error: `failed to start child: ${start.error}` }, 502);
+      }
+      port = start.port;
+    }
+    deps.registry.touch(name);
+
+    // Forward the MCP transport headers verbatim (content-type + the
+    // `Accept: application/json, text/event-stream` the SDK client requires).
+    // The Authorization header is intentionally NOT forwarded — the child
+    // runs token-less on loopback; auth terminates at this proxy.
+    const fwdHeaders: Record<string, string> = {};
+    const ct = c.req.header('Content-Type');
+    if (ct) fwdHeaders['Content-Type'] = ct;
+    const accept = c.req.header('Accept');
+    if (accept) fwdHeaders['Accept'] = accept;
+
+    const init: RequestInit = { method, headers: fwdHeaders };
+    if (method !== 'GET') {
+      init.body = await c.req.text();
+    }
+
+    let res: Response;
+    try {
+      res = await fetchFn(`http://127.0.0.1:${port}/mcp`, init);
+    } catch (err) {
+      return c.json({ ok: false, error: `proxy failed: ${(err as Error).message}` }, 502);
+    }
+    // Pass the child's MCP response through verbatim (status + content-type +
+    // body). Stateless `enableJsonResponse` makes this a single JSON body.
+    const body = await res.text();
+    const outHeaders: Record<string, string> = {
+      'Content-Type': res.headers.get('content-type') ?? 'application/json',
+    };
+    const sessionId = res.headers.get('mcp-session-id');
+    if (sessionId) outHeaders['mcp-session-id'] = sessionId;
+    return new Response(body, { status: res.status, headers: outHeaders });
+  });
+
+  // -----------------------------------------------------------------------
   // Ask 体验台 — reverse proxy with dry_run by default (ARCH §17.3.2 /
   // §17.3.3 / §17.8).
   // -----------------------------------------------------------------------
@@ -1117,6 +1210,35 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
 function findProject(workspacePath: string, name: string): ProjectListing | null {
   const projects = scanProjects(workspacePath);
   return projects.find((p) => p.name === name) ?? null;
+}
+
+/**
+ * Token check for the MCP proxy. Accepts the workspace token via either
+ * `Authorization: Bearer <token>` (standard MCP clients) or the raw
+ * `X-MCP-Secret: <token>` header (CAWP's default MCP auth convention). The
+ * Bearer scheme is case-insensitive (RFC 7235). Returns true on the first
+ * header that matches.
+ */
+function mcpAuthOk(
+  authHeader: string | undefined,
+  secretHeader: string | undefined,
+  expected: string,
+): boolean {
+  const bearer = authHeader ? /^bearer\s+(.+)$/i.exec(authHeader.trim())?.[1]?.trim() : undefined;
+  const secret = secretHeader?.trim() || undefined;
+  return constantTimeEquals(bearer, expected) || constantTimeEquals(secret, expected);
+}
+
+/**
+ * Constant-time string compare. `timingSafeEqual` throws on length mismatch,
+ * so guard that first — leaking only the length, acceptable for a token.
+ */
+function constantTimeEquals(presented: string | undefined, expected: string): boolean {
+  if (presented === undefined) return false;
+  const a = Buffer.from(presented, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 /** Resolve `<workspace>/state/<projectId>/` for a project listing. */

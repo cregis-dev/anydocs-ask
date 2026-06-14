@@ -11,7 +11,37 @@ import { resolve } from 'node:path';
 import { serve as nodeServe } from '@hono/node-server';
 import { createApp } from '../server/app.ts';
 import { Runtime } from '../server/runtime.ts';
-import { loadConfig, resolveTransformersCacheDir } from '../config.ts';
+import {
+  loadConfig,
+  resolveTransformersCacheDir,
+  MCP_TOOL_NAMES,
+  type ResolvedConfig,
+  type McpToolName,
+} from '../config.ts';
+
+/**
+ * Env overrides for the MCP endpoint, applied after `loadConfig`. Lets the
+ * console spawner (and any operator) force-enable `/mcp` and pin its tool set
+ * without editing each project's `anydocs.ask.json` — so a CAWP-mounted
+ * project serves `search`/`fetch_page` over MCP with zero per-project config
+ * (ADR-038 retrieval-MCP shape). Project config is the default; env wins.
+ *
+ *   ANYDOCS_MCP_ENABLED=1            → config.mcp.enabled = true
+ *   ANYDOCS_MCP_TOOLS=search,fetch_page → config.mcp.tools = [...]
+ */
+function applyMcpEnvOverrides(config: ResolvedConfig): void {
+  if (process.env.ANYDOCS_MCP_ENABLED === '1') {
+    config.mcp.enabled = true;
+  }
+  const raw = process.env.ANYDOCS_MCP_TOOLS;
+  if (raw && raw.trim().length > 0) {
+    const valid = raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter((t): t is McpToolName => (MCP_TOOL_NAMES as readonly string[]).includes(t));
+    if (valid.length > 0) config.mcp.tools = valid;
+  }
+}
 
 export type ServeOptions = {
   projectRoot: string;
@@ -30,6 +60,7 @@ export async function runServe(opts: ServeOptions): Promise<number> {
     process.stdout.write(`anydocs-ask: no anydocs.ask.json found; using defaults\n`);
   }
   for (const w of warnings) process.stderr.write(`[ask] ${w}\n`);
+  applyMcpEnvOverrides(config);
 
   const host = opts.host ?? config.server.host;
   const port = opts.port ?? config.server.port;

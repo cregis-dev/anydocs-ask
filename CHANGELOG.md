@@ -4,6 +4,19 @@
 
 ## Unreleased
 
+### 新增
+
+- **Console 级 MCP 知识库代理 `/mcp/:name`（CAWP 挂载，ADR-038）** —— 在 dev console（4100）上挂一个**稳定的 per-project MCP 反向代理**，把 RFC 0007 的 `POST /mcp`（位于动态、会被空闲回收的子进程端口上）暴露成一个固定 URL `http://<console>:4100/mcp/<project>`，供外部 agent（CAWP）按项目挂载为检索知识库。
+  - **拓扑**：复用既有「按需 `registry.start` + `touch` + 反向代理到子进程」模式（[src/console/server.ts](src/console/server.ts)）。冷项目首次连接时 warm（bge-m3 ~5–10s），使用期间保持常驻。
+  - **`health` 契约工具**（[src/mcp/tools.ts](src/mcp/tools.ts)）—— 无条件注册的只读 liveness 工具，满足 CAWP `connectMcp` 启动期强制要求；不受 `config.mcp.tools` 控制，CAWP 侧会将其从 agent 可见工具列表中过滤掉。
+  - **子进程零配置开 MCP** —— console spawner 注入 `ANYDOCS_MCP_ENABLED=1` + `ANYDOCS_MCP_TOOLS=search,fetch_page` 并清空子进程自身 `ANYDOCS_MCP_TOKEN`（[src/console/spawner.ts](src/console/spawner.ts) / [src/commands/serve.ts](src/commands/serve.ts)）；CAWP 挂载的项目默认只暴露 `search`/`fetch_page`（ADR-038 检索-MCP 形态，无嵌套 LLM）。
+  - **鉴权一处收口** —— workspace 级 token（env `ANYDOCS_CONSOLE_MCP_TOKEN`）在代理处常量时间校验，**同时接受 `Authorization: Bearer <token>`（标准 MCP 客户端）和 `X-MCP-Secret: <token>`（CAWP 默认 MCP 鉴权约定，使 CAWP agent 零 runtime 改动即可挂载，仅需 `CAWP_MCP_<NAME>_SECRET`）**；子进程走 loopback 无 token，仅经代理可达，鉴权头不下传子进程。未配 token 时代理开放（loopback / 可信内网）。
+  - **`GET /api/projects` 暴露 per-project `title` / `description`** —— 取自项目 `anydocs.config.json` 的 `name` / `description`，让 CAWP 的知识库 catalog（ADR-054）把每个库的身份与覆盖范围注入 agent 的 system prompt，多库并存时模型据此选对库。
+
+### 修复
+
+- **`search` 工具描述不再引用未暴露的 `ask`** —— CAWP 挂载形态只暴露 `search` / `fetch_page`，原描述里「use \`ask\` for that」会误导只看得到 `search` 的 agent。改为「returns passages only，自己成文并引用」。
+
 ## 0.4.0-alpha.6 — 2026-06-13
 
 小修补 alpha —— review 驱动的 **RFC 文档对齐实况** + **三处低危加固** + **拆一个既有 CI 时间炸弹**（[#113](https://github.com/cregis-dev/anydocs-ask/pull/113)）。无 breaking change；npm tarball 仅含 `dist/`，本版可装到的实质变化是三处加固（RFC 文档不进包）。

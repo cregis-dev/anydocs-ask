@@ -65,11 +65,16 @@ export async function runConsole(opts: ConsoleOptions): Promise<number> {
     workspacePath: workspace.path,
   });
 
+  // Workspace-level MCP bearer token for the `/mcp/:name` proxy (CAWP mount,
+  // ADR-038). Optional: unset = open proxy (loopback / trusted-network).
+  const mcpToken = process.env.ANYDOCS_CONSOLE_MCP_TOKEN?.trim() || null;
+
   const app = createConsoleApp({
     workspacePath: workspace.path,
     consolePort: config.port,
     idleTimeoutMin: config.idleTimeoutMin,
     registry,
+    mcpToken,
   });
 
   let httpResolve!: (code: number) => void;
@@ -77,12 +82,21 @@ export async function runConsole(opts: ConsoleOptions): Promise<number> {
     httpResolve = r;
   });
 
+  // Console binds loopback by design (ARCH §17.1) — it's a dev tool, not meant
+  // for network exposure. The one exception is a containerized deployment on an
+  // isolated network, where a sibling service (e.g. CAWP) must reach the
+  // console at the compose hostname: set ANYDOCS_CONSOLE_HOST=0.0.0.0 there.
+  // Children still bind 127.0.0.1 and are only reachable via the in-container
+  // proxy, so this widens only the console's own listen interface.
+  const consoleHost = process.env.ANYDOCS_CONSOLE_HOST?.trim() || '127.0.0.1';
+
   const server = nodeServe(
-    { fetch: app.fetch, hostname: '127.0.0.1', port: config.port },
+    { fetch: app.fetch, hostname: consoleHost, port: config.port },
     (info) => {
       process.stdout.write(
         `anydocs-ask console listening on http://${info.address}:${info.port}\n` +
           `  workspace · ${workspace.path}\n` +
+          `  bind · ${consoleHost}\n` +
           `  child range · ${config.childPortRangeStart}–${config.childPortRangeEnd}\n` +
           `  idle reap · ${config.idleTimeoutMin}min\n`,
       );
