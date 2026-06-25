@@ -521,6 +521,7 @@ function serverSection(ctx: SettingsCtx): Html {
   return fieldGroup('Server', 'HTTP server for /v1/ask. Edit cautiously — these affect how Reader clients reach the service.', [
     textField(ctx, { path: 'server.host', label: 'Host' }),
     intField(ctx, { path: 'server.port', label: 'Port', min: 1 }),
+    intField(ctx, { path: 'server.maxConcurrentAsk', label: 'Max concurrent Ask', min: 1 }),
     textareaField(ctx, { path: 'server.cors.allowedOrigins', label: 'CORS allowed origins (one per line)', rows: 3, span: 2 }),
   ]);
 }

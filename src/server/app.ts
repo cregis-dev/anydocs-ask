@@ -43,6 +43,11 @@ const SSE_HEARTBEAT_MS = 2_000;
 const SSE_DELTA_FLUSH_MS = 150;
 const SSE_INITIAL_PADDING_BYTES = 4_096;
 const SSE_FLUSH_PADDING_BYTES = 4_096;
+const ASK_CONCURRENCY_LIMITED_RESULT = {
+  type: 'error',
+  code: 'ask_concurrency_limited',
+  message: 'too many concurrent ask requests',
+} as const;
 
 export type AppDeps = {
   runtime: Runtime;
@@ -71,6 +76,7 @@ type PreparedAskCall =
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
   const { runtime } = deps;
+  let activeAskRequests = 0;
 
   app.use('*', buildCorsMiddleware(runtime.config.server, runtime.config.widget));
 
@@ -96,6 +102,18 @@ export function createApp(deps: AppDeps): Hono {
       rateLimitPerMinute: runtime.config.widget.rateLimitPerMinute,
       rateLimiter: widgetRateLimiter,
     });
+  };
+
+  const tryEnterAsk = (): (() => void) | null => {
+    const limit = Math.max(1, Math.floor(runtime.config.server.maxConcurrentAsk));
+    if (activeAskRequests >= limit) return null;
+    activeAskRequests += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      activeAskRequests = Math.max(0, activeAskRequests - 1);
+    };
   };
 
   // -----------------------------------------------------------------------
@@ -209,47 +227,55 @@ export function createApp(deps: AppDeps): Hono {
     if (gated && !gated.ok) {
       return c.json({ type: 'error', code: gated.code }, gated.status);
     }
-    const prepared = await prepareAskCall(runtime, c);
-    if (!prepared.ok) {
-      return c.json(prepared.result, prepared.status);
+    const releaseAsk = tryEnterAsk();
+    if (!releaseAsk) {
+      return c.json(ASK_CONCURRENCY_LIMITED_RESULT, 429);
     }
-    injectMultiTurnHistory(runtime, prepared.req, prepared.requestedSessionId);
-    const t0 = performance.now();
-    let ask: Awaited<ReturnType<typeof askWithTrace>>;
     try {
-      ask = await askWithTrace(
-        { db: runtime.db, embedder: runtime.embedder, llm: prepared.llm, reranker: runtime.reranker, rerankerConfig: runtime.config.reranker, promptConfig: runtime.config.prompt },
-        prepared.req,
-      );
-    } catch (err) {
-      return c.json(
-        {
-          type: 'error',
-          code: 'llm_request_failed',
-          message: (err as Error).message,
-        },
-        502,
-      );
-    }
-    const { result, trace, queryVector } = ask;
-    const bodyOut = finalizeAskCall({
-      runtime,
-      req: prepared.req,
-      result,
-      trace,
-      t0,
-      options: prepared.options,
-      requestedSessionId: prepared.requestedSessionId,
-      queryVector,
-    });
+      const prepared = await prepareAskCall(runtime, c);
+      if (!prepared.ok) {
+        return c.json(prepared.result, prepared.status);
+      }
+      injectMultiTurnHistory(runtime, prepared.req, prepared.requestedSessionId);
+      const t0 = performance.now();
+      let ask: Awaited<ReturnType<typeof askWithTrace>>;
+      try {
+        ask = await askWithTrace(
+          { db: runtime.db, embedder: runtime.embedder, llm: prepared.llm, reranker: runtime.reranker, rerankerConfig: runtime.config.reranker, promptConfig: runtime.config.prompt },
+          prepared.req,
+        );
+      } catch (err) {
+        return c.json(
+          {
+            type: 'error',
+            code: 'llm_request_failed',
+            message: (err as Error).message,
+          },
+          502,
+        );
+      }
+      const { result, trace, queryVector } = ask;
+      const bodyOut = finalizeAskCall({
+        runtime,
+        req: prepared.req,
+        result,
+        trace,
+        t0,
+        options: prepared.options,
+        requestedSessionId: prepared.requestedSessionId,
+        queryVector,
+      });
 
-    if (result.type === 'error') {
-      // llm_failed is an upstream/transient gateway problem — same family as
-      // llm_unavailable (503). Everything else is client-side validation (400).
-      const status = result.code === 'llm_failed' ? 503 : 400;
-      return c.json(bodyOut, status);
+      if (result.type === 'error') {
+        // llm_failed is an upstream/transient gateway problem — same family as
+        // llm_unavailable (503). Everything else is client-side validation (400).
+        const status = result.code === 'llm_failed' ? 503 : 400;
+        return c.json(bodyOut, status);
+      }
+      return c.json(bodyOut, 200);
+    } finally {
+      releaseAsk();
     }
-    return c.json(bodyOut, 200);
   });
 
   app.post('/v1/ask/stream', (c) => {
@@ -257,134 +283,142 @@ export function createApp(deps: AppDeps): Hono {
     if (gated && !gated.ok) {
       return c.json({ type: 'error', code: gated.code }, gated.status);
     }
+    const releaseAsk = tryEnterAsk();
+    if (!releaseAsk) {
+      return c.json(ASK_CONCURRENCY_LIMITED_RESULT, 429);
+    }
     c.header('X-Accel-Buffering', 'no');
     return streamSSE(c, async (stream) => {
-      let writeQueue = Promise.resolve();
-      const writeRaw = async (input: string) => {
-        if (stream.aborted) return;
-        writeQueue = writeQueue
-          .then(async () => {
-            if (stream.aborted) return;
-            await stream.write(input);
-          })
-          .catch(() => undefined);
-        await writeQueue;
-      };
-      const writeComment = (comment: string) => writeRaw(`:${comment}\n\n`);
-      const write = (event: string, data: unknown) =>
-        writeRaw(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-      const writeFlushPadding = () => writeComment(' '.repeat(SSE_FLUSH_PADDING_BYTES));
-      const writeFlushed = async (event: string, data: unknown) => {
-        await write(event, data);
-        await writeFlushPadding();
-      };
-      let heartbeat: ReturnType<typeof setInterval> | null = null;
-      let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
-      let lastDeltaFlushAt = 0;
-      let wroteFirstDelta = false;
-      const startHeartbeat = () => {
-        if (heartbeat) return;
-        heartbeat = setInterval(() => {
-          void writeFlushed('status', { stage: 'generating', heartbeat: true });
-        }, SSE_HEARTBEAT_MS);
-      };
-      const stopHeartbeat = () => {
-        if (!heartbeat) return;
-        clearInterval(heartbeat);
-        heartbeat = null;
-      };
-      const clearDeltaFlushTimer = () => {
-        if (!deltaFlushTimer) return;
-        clearTimeout(deltaFlushTimer);
-        deltaFlushTimer = null;
-      };
-      const flushDeltaPadding = async () => {
-        if (stream.aborted) return;
-        lastDeltaFlushAt = performance.now();
-        await writeFlushPadding();
-      };
-      const scheduleDeltaFlush = () => {
-        if (deltaFlushTimer || stream.aborted) return;
-        const elapsed = performance.now() - lastDeltaFlushAt;
-        const delay = Math.max(0, SSE_DELTA_FLUSH_MS - elapsed);
-        deltaFlushTimer = setTimeout(() => {
-          deltaFlushTimer = null;
-          void flushDeltaPadding();
-        }, delay);
-      };
-
-      await writeComment(' '.repeat(SSE_INITIAL_PADDING_BYTES));
-      await writeFlushed('status', { stage: 'received' });
-      const prepared = await prepareAskCall(runtime, c);
-      if (!prepared.ok) {
-        await write('result', prepared.result);
-        await write('done', { ok: true });
-        return;
-      }
-      injectMultiTurnHistory(runtime, prepared.req, prepared.requestedSessionId);
-
-      const abortController = new AbortController();
-      stream.onAbort(() => {
-        stopHeartbeat();
-        clearDeltaFlushTimer();
-        abortController.abort();
-      });
-      const t0 = performance.now();
-      let ask: Awaited<ReturnType<typeof askWithTraceStream>>;
       try {
-        ask = await askWithTraceStream(
-          { db: runtime.db, embedder: runtime.embedder, llm: prepared.llm, reranker: runtime.reranker, rerankerConfig: runtime.config.reranker, promptConfig: runtime.config.prompt },
-          prepared.req,
-          {
-            signal: abortController.signal,
-            onStatus: async (stage) => {
-              await writeFlushed('status', { stage });
-              if (stage === 'generating') {
-                startHeartbeat();
-              }
+        let writeQueue = Promise.resolve();
+        const writeRaw = async (input: string) => {
+          if (stream.aborted) return;
+          writeQueue = writeQueue
+            .then(async () => {
+              if (stream.aborted) return;
+              await stream.write(input);
+            })
+            .catch(() => undefined);
+          await writeQueue;
+        };
+        const writeComment = (comment: string) => writeRaw(`:${comment}\n\n`);
+        const write = (event: string, data: unknown) =>
+          writeRaw(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        const writeFlushPadding = () => writeComment(' '.repeat(SSE_FLUSH_PADDING_BYTES));
+        const writeFlushed = async (event: string, data: unknown) => {
+          await write(event, data);
+          await writeFlushPadding();
+        };
+        let heartbeat: ReturnType<typeof setInterval> | null = null;
+        let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
+        let lastDeltaFlushAt = 0;
+        let wroteFirstDelta = false;
+        const startHeartbeat = () => {
+          if (heartbeat) return;
+          heartbeat = setInterval(() => {
+            void writeFlushed('status', { stage: 'generating', heartbeat: true });
+          }, SSE_HEARTBEAT_MS);
+        };
+        const stopHeartbeat = () => {
+          if (!heartbeat) return;
+          clearInterval(heartbeat);
+          heartbeat = null;
+        };
+        const clearDeltaFlushTimer = () => {
+          if (!deltaFlushTimer) return;
+          clearTimeout(deltaFlushTimer);
+          deltaFlushTimer = null;
+        };
+        const flushDeltaPadding = async () => {
+          if (stream.aborted) return;
+          lastDeltaFlushAt = performance.now();
+          await writeFlushPadding();
+        };
+        const scheduleDeltaFlush = () => {
+          if (deltaFlushTimer || stream.aborted) return;
+          const elapsed = performance.now() - lastDeltaFlushAt;
+          const delay = Math.max(0, SSE_DELTA_FLUSH_MS - elapsed);
+          deltaFlushTimer = setTimeout(() => {
+            deltaFlushTimer = null;
+            void flushDeltaPadding();
+          }, delay);
+        };
+
+        await writeComment(' '.repeat(SSE_INITIAL_PADDING_BYTES));
+        await writeFlushed('status', { stage: 'received' });
+        const prepared = await prepareAskCall(runtime, c);
+        if (!prepared.ok) {
+          await write('result', prepared.result);
+          await write('done', { ok: true });
+          return;
+        }
+        injectMultiTurnHistory(runtime, prepared.req, prepared.requestedSessionId);
+
+        const abortController = new AbortController();
+        stream.onAbort(() => {
+          stopHeartbeat();
+          clearDeltaFlushTimer();
+          abortController.abort();
+        });
+        const t0 = performance.now();
+        let ask: Awaited<ReturnType<typeof askWithTraceStream>>;
+        try {
+          ask = await askWithTraceStream(
+            { db: runtime.db, embedder: runtime.embedder, llm: prepared.llm, reranker: runtime.reranker, rerankerConfig: runtime.config.reranker, promptConfig: runtime.config.prompt },
+            prepared.req,
+            {
+              signal: abortController.signal,
+              onStatus: async (stage) => {
+                await writeFlushed('status', { stage });
+                if (stage === 'generating') {
+                  startHeartbeat();
+                }
+              },
+              onDelta: async (text) => {
+                await write('delta', { text });
+                if (!wroteFirstDelta) {
+                  wroteFirstDelta = true;
+                  await flushDeltaPadding();
+                } else {
+                  scheduleDeltaFlush();
+                }
+              },
             },
-            onDelta: async (text) => {
-              await write('delta', { text });
-              if (!wroteFirstDelta) {
-                wroteFirstDelta = true;
-                await flushDeltaPadding();
-              } else {
-                scheduleDeltaFlush();
-              }
-            },
-          },
-        );
-      } catch (err) {
+          );
+        } catch (err) {
+          stopHeartbeat();
+          clearDeltaFlushTimer();
+          if (stream.aborted || abortController.signal.aborted) return;
+          await write('result', {
+            type: 'error',
+            code: 'llm_request_failed',
+            message: (err as Error).message,
+          });
+          await write('done', { ok: true });
+          return;
+        }
         stopHeartbeat();
         clearDeltaFlushTimer();
         if (stream.aborted || abortController.signal.aborted) return;
-        await write('result', {
-          type: 'error',
-          code: 'llm_request_failed',
-          message: (err as Error).message,
-        });
-        await write('done', { ok: true });
-        return;
-      }
-      stopHeartbeat();
-      clearDeltaFlushTimer();
-      if (stream.aborted || abortController.signal.aborted) return;
-      if (wroteFirstDelta) {
-        await flushDeltaPadding();
-      }
+        if (wroteFirstDelta) {
+          await flushDeltaPadding();
+        }
 
-      const bodyOut = finalizeAskCall({
-        runtime,
-        req: prepared.req,
-        result: ask.result,
-        trace: ask.trace,
-        t0,
-        options: prepared.options,
-        requestedSessionId: prepared.requestedSessionId,
-        queryVector: ask.queryVector,
-      });
-      await write('result', bodyOut);
-      await write('done', { ok: true });
+        const bodyOut = finalizeAskCall({
+          runtime,
+          req: prepared.req,
+          result: ask.result,
+          trace: ask.trace,
+          t0,
+          options: prepared.options,
+          requestedSessionId: prepared.requestedSessionId,
+          queryVector: ask.queryVector,
+        });
+        await write('result', bodyOut);
+        await write('done', { ok: true });
+      } finally {
+        releaseAsk();
+      }
     });
   });
 

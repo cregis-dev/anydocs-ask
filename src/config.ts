@@ -75,6 +75,12 @@ export type RerankerConfig = {
 export type ServerConfig = {
   host: string;
   port: number;
+  /**
+   * Maximum number of in-flight /v1/ask and /v1/ask/stream calls handled by
+   * one server process. Excess calls fail fast with 429 so SSE clients don't
+   * sit on half-open streams under load.
+   */
+  maxConcurrentAsk: number;
   cors: { allowedOrigins: string[] };
 };
 
@@ -318,6 +324,7 @@ const DEFAULTS: ResolvedConfig = {
   server: {
     host: '127.0.0.1',
     port: 3100,
+    maxConcurrentAsk: 12,
     cors: { allowedOrigins: [] },
   },
   indexing: {
@@ -455,6 +462,13 @@ export function applyEnvOverrides(config: ResolvedConfig): void {
   const envModel = process.env.ANTHROPIC_MODEL?.trim();
   if (envModel && envModel.length > 0 && config.llm.provider === 'anthropic') {
     config.llm.model = envModel;
+  }
+  const envMaxConcurrentAsk = process.env.ANYDOCS_ASK_MAX_CONCURRENT?.trim();
+  if (envMaxConcurrentAsk && envMaxConcurrentAsk.length > 0) {
+    const parsed = Number(envMaxConcurrentAsk);
+    if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 10_000) {
+      config.server.maxConcurrentAsk = parsed;
+    }
   }
 }
 
@@ -1001,6 +1015,16 @@ function applyServer(
   const obj = value as Record<string, unknown>;
   if (typeof obj.host === 'string') target.host = obj.host;
   if (typeof obj.port === 'number') target.port = obj.port;
+  if (obj.maxConcurrentAsk !== undefined) {
+    const v = obj.maxConcurrentAsk;
+    if (typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v) && v >= 1 && v <= 10_000) {
+      target.maxConcurrentAsk = v;
+    } else {
+      warnings.push(
+        `anydocs.ask.json: server.maxConcurrentAsk must be an integer in [1, 10000]; using default`,
+      );
+    }
+  }
   if (obj.cors !== undefined) {
     if (typeof obj.cors !== 'object' || obj.cors === null) {
       warnings.push(`anydocs.ask.json: server.cors must be an object; ignored`);

@@ -58,7 +58,7 @@ async function buildProject(): Promise<{ root: string; cleanup: () => Promise<vo
   return { root, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
 }
 
-async function setup(opts: { runsEnabled?: boolean; llm?: LLM } = {}): Promise<{
+async function setup(opts: { runsEnabled?: boolean; llm?: LLM; maxConcurrentAsk?: number } = {}): Promise<{
   runtime: Runtime;
   cleanup: () => Promise<void>;
   stateRoot: string;
@@ -67,6 +67,9 @@ async function setup(opts: { runsEnabled?: boolean; llm?: LLM } = {}): Promise<{
   const stateRoot = await fs.mkdtemp(join(tmpdir(), 'anydocs-ask-stream-state-'));
   const { config } = await loadConfig(root);
   config.runs.enabled = opts.runsEnabled ?? true;
+  if (opts.maxConcurrentAsk !== undefined) {
+    config.server.maxConcurrentAsk = opts.maxConcurrentAsk;
+  }
   const db = openDatabase({ dbPath: ':memory:' });
   const runtime = new Runtime({
     projectRoot: root,
@@ -107,6 +110,42 @@ class SlowFirstDeltaLLM implements LLM {
   ): Promise<LLMGenerateOutput> {
     const output = await this.generate(input);
     await new Promise((resolve) => setTimeout(resolve, this.delayMs));
+    if (!options.signal?.aborted) {
+      await options.onDelta(output.text);
+    }
+    return output;
+  }
+}
+
+class BlockingLLM implements LLM {
+  readonly model = 'blocking-llm';
+  private release!: () => void;
+  readonly blocked: Promise<void>;
+  private calls = 0;
+
+  constructor() {
+    this.blocked = new Promise((resolve) => {
+      this.release = resolve;
+    });
+  }
+
+  unblock(): void {
+    this.release();
+  }
+
+  async generate(_input: LLMGenerateInput): Promise<LLMGenerateOutput> {
+    this.calls += 1;
+    if (this.calls === 1) {
+      await this.blocked;
+    }
+    return { text: 'Based on the documentation: [cit_1]', modelUsed: this.model };
+  }
+
+  async streamGenerate(
+    input: LLMGenerateInput,
+    options: LLMStreamOptions,
+  ): Promise<LLMGenerateOutput> {
+    const output = await this.generate(input);
     if (!options.signal?.aborted) {
       await options.onDelta(output.text);
     }
@@ -207,6 +246,71 @@ test('POST /v1/ask/stream emits status, deltas, final result, and persists once'
     assert.equal(lines.length, 1);
     assert.equal((JSON.parse(lines[0]!) as RunRecord).answer.kind, 'answer');
   } finally {
+    await cleanup();
+  }
+});
+
+test('POST /v1/ask returns 429 when ask concurrency is exhausted', async () => {
+  const llm = new BlockingLLM();
+  const { runtime, cleanup } = await setup({ llm, maxConcurrentAsk: 1 });
+  try {
+    const app = createApp({ runtime });
+    const first = app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const limited = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    assert.equal(limited.status, 429);
+    assert.deepEqual(await limited.json(), {
+      type: 'error',
+      code: 'ask_concurrency_limited',
+      message: 'too many concurrent ask requests',
+    });
+
+    llm.unblock();
+    assert.equal((await first).status, 200);
+  } finally {
+    llm.unblock();
+    await cleanup();
+  }
+});
+
+test('POST /v1/ask/stream returns 429 JSON before opening SSE when ask concurrency is exhausted', async () => {
+  const llm = new BlockingLLM();
+  const { runtime, cleanup } = await setup({ llm, maxConcurrentAsk: 1 });
+  try {
+    const app = createApp({ runtime });
+    const first = app.request('/v1/ask/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const limited = await app.request('/v1/ask/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    assert.equal(limited.status, 429);
+    assert.match(limited.headers.get('content-type') ?? '', /application\/json/);
+    assert.deepEqual(await limited.json(), {
+      type: 'error',
+      code: 'ask_concurrency_limited',
+      message: 'too many concurrent ask requests',
+    });
+
+    llm.unblock();
+    assert.equal((await first).status, 200);
+  } finally {
+    llm.unblock();
     await cleanup();
   }
 });
