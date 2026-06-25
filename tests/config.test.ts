@@ -42,6 +42,7 @@ test('loadConfig: missing file -> defaults, source = null', async () => {
     assert.equal(r.config.embedding.model, 'bge-m3');
     assert.equal(r.config.llm.provider, 'anthropic');
     assert.equal(r.config.server.port, 3100);
+    assert.equal(r.config.server.maxConcurrentAsk, 12);
     assert.deepEqual(r.config.server.cors.allowedOrigins, []);
   } finally {
     await cleanup();
@@ -54,7 +55,7 @@ test('loadConfig: user fields merge over defaults', async () => {
       join(r, 'anydocs.ask.json'),
       JSON.stringify({
         embedding: { preferQuantized: true },
-        server: { port: 4200, cors: { allowedOrigins: ['https://reader.example.com'] } },
+        server: { port: 4200, maxConcurrentAsk: 12, cors: { allowedOrigins: ['https://reader.example.com'] } },
         llm: { model: 'claude-opus-4-7' },
       }),
     );
@@ -64,9 +65,29 @@ test('loadConfig: user fields merge over defaults', async () => {
     assert.equal(r.config.embedding.preferQuantized, true);
     assert.equal(r.config.embedding.model, 'bge-m3', 'unchanged fields fall back to default');
     assert.equal(r.config.server.port, 4200);
+    assert.equal(r.config.server.maxConcurrentAsk, 12);
     assert.deepEqual(r.config.server.cors.allowedOrigins, ['https://reader.example.com']);
     assert.equal(r.config.llm.model, 'claude-opus-4-7');
   } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: ANYDOCS_ASK_MAX_CONCURRENT env var overrides server.maxConcurrentAsk', async () => {
+  const prev = process.env.ANYDOCS_ASK_MAX_CONCURRENT;
+  process.env.ANYDOCS_ASK_MAX_CONCURRENT = '9';
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ server: { maxConcurrentAsk: 3 } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.server.maxConcurrentAsk, 9);
+  } finally {
+    if (prev === undefined) delete process.env.ANYDOCS_ASK_MAX_CONCURRENT;
+    else process.env.ANYDOCS_ASK_MAX_CONCURRENT = prev;
     await cleanup();
   }
 });
