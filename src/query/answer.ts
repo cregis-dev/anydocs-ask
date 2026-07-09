@@ -946,9 +946,9 @@ function utilityAnswerFor(
 
   const assistantName = promptConfig?.assistantName?.trim() || 'Cregis AI Assistant';
   if (lang === 'zh') {
-    return `你好！我是 ${assistantName}，可以回答 Cregis 文档里的支付引擎、WaaS 钱包和 API 接入问题。你可以直接问具体接口、参数、签名、回调、错误码或接入步骤。`;
+    return `你好！我是 ${assistantName}，可以回答 Cregis 文档里的支付引擎、WaaS项目和 API 接入问题。你可以直接问具体接口、参数、签名、回调、错误码或接入步骤。`;
   }
-  return `Hi! I'm ${assistantName}. I can help with Cregis documentation for Payment Engine, WaaS Wallet, and API integration. Ask about endpoints, parameters, signatures, callbacks, error codes, or integration steps.`;
+  return `Hi! I'm ${assistantName}. I can help with Cregis documentation for Payment Engine, WaaS project, and API integration. Ask about endpoints, parameters, signatures, callbacks, error codes, or integration steps.`;
 }
 
 function normalizeUtilityQuestion(question: string): string {

@@ -779,7 +779,7 @@ test('ask: current page context does not constrain product-specific API referenc
         {
           type: 'section',
           id: 'waas',
-          title: 'WaaS 钱包',
+          title: 'WaaS项目',
           children: [{ type: 'page', pageId: 'waas-setup' }],
         },
         {
@@ -854,7 +854,7 @@ test('ask: WaaS payout flow defaults API reference context to v1 when no v2 is r
         {
           type: 'section',
           id: 'waas',
-          title: 'WaaS 钱包',
+          title: 'WaaS项目',
           children: [{ type: 'page', pageId: 'waas-quickstart-30min' }],
         },
         {
@@ -1229,7 +1229,7 @@ test('ask: short signature questions answer from authentication without current-
         {
           type: 'section',
           id: 'waas',
-          title: 'WaaS 钱包',
+          title: 'WaaS项目',
           children: [{ type: 'page', pageId: 'waas-setup' }],
         },
         {
@@ -1639,7 +1639,7 @@ test('ask: short follow-up rewrites retrieval around prior API anchors', async (
         {
           type: 'section',
           id: 'waas',
-          title: 'WaaS 钱包',
+          title: 'WaaS项目',
           children: [{ type: 'page', pageId: 'waas-quickstart-30min' }],
         },
         {
