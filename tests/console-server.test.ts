@@ -3664,12 +3664,14 @@ test('GET /p/:name/reports/:file: renders report inside <pre>', async () => {
       workspacePath: ws,
       consolePort: 4100,
       registry: makeRegistry(),
+      publicRootPath: '/rag-console/',
     });
     const res = await app.request('/p/docs-zh/reports/2026-05-08-eval.md');
     assert.equal(res.status, 200);
     const body = await res.text();
     assert.match(body, /<pre[^>]*>[^<]*# Eval/);
     assert.match(body, /R@5=0\.78/);
+    assert.match(body, /href="\/rag-console\/">projects<\/a>/);
   } finally {
     await cleanup();
   }
@@ -3793,6 +3795,7 @@ test('GET /p/:name/runs: renders runs table with newest first', async () => {
       workspacePath: ws,
       consolePort: 4100,
       registry: makeRegistry(),
+      publicRootPath: '/rag-console/',
     });
     const res = await app.request('/p/docs-zh/runs');
     const body = await res.text();
@@ -3800,6 +3803,7 @@ test('GET /p/:name/runs: renders runs table with newest first', async () => {
     assert.match(body, /security\/jwt/);
     assert.match(body, /1234ms/);
     assert.match(body, /tag ok[^>]*>answer/);
+    assert.match(body, /href="\/rag-console\/">projects<\/a>/);
   } finally {
     await cleanup();
   }

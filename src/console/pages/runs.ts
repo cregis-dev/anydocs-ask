@@ -17,13 +17,14 @@ export function renderRuns(args: {
   limit: number;
   nav?: NavContext;
 }): Html {
+  const projectsHref = args.nav?.publicRootPath ?? '/';
   const records = args.lines.filter((l): l is RunRecord => 'answer' in l);
   const ordered = [...records].reverse(); // newest first
   const payload = raw(JSON.stringify(ordered));
   const body = html`
     <div class="page-head">
       <div class="crumbs">
-        <a href="/">projects</a><span class="sep">/</span>
+        <a href="${projectsHref}">projects</a><span class="sep">/</span>
         <a href="/p/${args.projectName}">${args.projectName}</a><span class="sep">/</span>
         <span class="here">recent runs</span>
       </div>

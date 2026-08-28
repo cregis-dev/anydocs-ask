@@ -15,6 +15,7 @@ export function renderReport(args: {
   body: string;
   nav?: NavContext;
 }): Html {
+  const projectsHref = args.nav?.publicRootPath ?? '/';
   const safeBody = raw(JSON.stringify(args.body));
   return layout({
     title: `${args.projectName} · ${args.filename}`,
@@ -23,7 +24,7 @@ export function renderReport(args: {
     body: html`
       <div class="page-head">
         <div class="crumbs">
-          <a href="/">projects</a><span class="sep">/</span>
+          <a href="${projectsHref}">projects</a><span class="sep">/</span>
           <a href="/p/${args.projectName}">${args.projectName}</a><span class="sep">/</span>
           <span style="color: var(--fg-soft);">reports</span><span class="sep">/</span>
           <span class="here mono">${args.filename}</span>
