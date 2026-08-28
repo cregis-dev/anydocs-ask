@@ -9,7 +9,11 @@
 import { serve as nodeServe } from '@hono/node-server';
 import { join } from 'node:path';
 import { loadConsoleConfig, type ConsoleConfig } from '../console/config.ts';
-import { ProcessRegistry } from '../console/registry.ts';
+import {
+  AttachedProcessRegistry,
+  ProcessRegistry,
+  type ConsoleProcessRegistry,
+} from '../console/registry.ts';
 import { createNodeSpawner, httpHealthProbe } from '../console/spawner.ts';
 import { createConsoleApp } from '../console/server.ts';
 import { ensureWorkspace, type WorkspaceResolution } from '../workspace.ts';
@@ -53,17 +57,48 @@ export async function runConsole(opts: ConsoleOptions): Promise<number> {
     return 2;
   }
 
-  const registry = new ProcessRegistry({
-    spawner: createNodeSpawner(),
-    healthProbe: httpHealthProbe,
-    config: {
-      childPortRangeStart: config.childPortRangeStart,
-      childPortRangeEnd: config.childPortRangeEnd,
-      idleTimeoutMin: config.idleTimeoutMin,
-      healthTimeoutMs: config.childHealthTimeoutMs,
-    },
-    workspacePath: workspace.path,
-  });
+  const consoleHost = process.env.ANYDOCS_CONSOLE_HOST?.trim() || '127.0.0.1';
+  const authToken = process.env.ANYDOCS_CONSOLE_AUTH_TOKEN?.trim() || null;
+  if (!isLoopbackHost(consoleHost) && authToken === null) {
+    process.stderr.write(
+      'error: ANYDOCS_CONSOLE_AUTH_TOKEN is required when Console listens outside loopback\n',
+    );
+    return 2;
+  }
+  if (authToken !== null && authToken.length < 16) {
+    process.stderr.write('error: ANYDOCS_CONSOLE_AUTH_TOKEN must contain at least 16 characters\n');
+    return 2;
+  }
+
+  let registry: ConsoleProcessRegistry;
+  const attachedName = process.env.ANYDOCS_CONSOLE_ATTACHED_PROJECT?.trim();
+  const attachedPortRaw = process.env.ANYDOCS_CONSOLE_ATTACHED_PORT?.trim();
+  if ((attachedName && !attachedPortRaw) || (!attachedName && attachedPortRaw)) {
+    process.stderr.write(
+      'error: ANYDOCS_CONSOLE_ATTACHED_PROJECT and ANYDOCS_CONSOLE_ATTACHED_PORT must be configured together\n',
+    );
+    return 2;
+  }
+  if (attachedName && attachedPortRaw) {
+    const attachedPort = Number(attachedPortRaw);
+    if (!Number.isInteger(attachedPort) || attachedPort < 1 || attachedPort > 65535) {
+      process.stderr.write('error: ANYDOCS_CONSOLE_ATTACHED_PORT must be a valid TCP port\n');
+      return 2;
+    }
+    registry = new AttachedProcessRegistry(attachedName, attachedPort);
+  } else {
+    registry = new ProcessRegistry({
+      spawner: createNodeSpawner(),
+      healthProbe: httpHealthProbe,
+      config: {
+        childPortRangeStart: config.childPortRangeStart,
+        childPortRangeEnd: config.childPortRangeEnd,
+        idleTimeoutMin: config.idleTimeoutMin,
+        healthTimeoutMs: config.childHealthTimeoutMs,
+      },
+      workspacePath: workspace.path,
+    });
+  }
 
   // Workspace-level MCP bearer token for the `/mcp/:name` proxy (CAWP mount,
   // ADR-038). Optional: unset = open proxy (loopback / trusted-network).
@@ -75,20 +110,14 @@ export async function runConsole(opts: ConsoleOptions): Promise<number> {
     idleTimeoutMin: config.idleTimeoutMin,
     registry,
     mcpToken,
+    authToken,
+    publicRootPath: process.env.ANYDOCS_CONSOLE_PUBLIC_ROOT,
   });
 
   let httpResolve!: (code: number) => void;
   const httpDone = new Promise<number>((r) => {
     httpResolve = r;
   });
-
-  // Console binds loopback by design (ARCH §17.1) — it's a dev tool, not meant
-  // for network exposure. The one exception is a containerized deployment on an
-  // isolated network, where a sibling service (e.g. CAWP) must reach the
-  // console at the compose hostname: set ANYDOCS_CONSOLE_HOST=0.0.0.0 there.
-  // Children still bind 127.0.0.1 and are only reachable via the in-container
-  // proxy, so this widens only the console's own listen interface.
-  const consoleHost = process.env.ANYDOCS_CONSOLE_HOST?.trim() || '127.0.0.1';
 
   const server = nodeServe(
     { fetch: app.fetch, hostname: consoleHost, port: config.port },
@@ -97,6 +126,8 @@ export async function runConsole(opts: ConsoleOptions): Promise<number> {
         `anydocs-ask console listening on http://${info.address}:${info.port}\n` +
           `  workspace · ${workspace.path}\n` +
           `  bind · ${consoleHost}\n` +
+          `  auth · ${authToken ? 'token' : 'loopback only'}\n` +
+          (attachedName ? `  attached · ${attachedName}:${attachedPortRaw}\n` : '') +
           `  child range · ${config.childPortRangeStart}–${config.childPortRangeEnd}\n` +
           `  idle reap · ${config.idleTimeoutMin}min\n`,
       );
@@ -130,4 +161,8 @@ export async function runConsole(opts: ConsoleOptions): Promise<number> {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
   return await httpDone;
+}
+
+function isLoopbackHost(host: string): boolean {
+  return host === '127.0.0.1' || host === '::1' || host === 'localhost';
 }

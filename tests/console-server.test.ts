@@ -62,6 +62,84 @@ function makeRegistry(): ProcessRegistry {
   });
 }
 
+const CONSOLE_AUTH_TOKEN = 'test-console-auth-token-32-characters';
+
+test('console auth protects pages and management APIs', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      authToken: CONSOLE_AUTH_TOKEN,
+    });
+    const page = await app.request('/');
+    assert.equal(page.status, 302);
+    assert.equal(page.headers.get('location'), '/login');
+
+    const api = await app.request('/api/projects');
+    assert.equal(api.status, 401);
+    assert.deepEqual(await api.json(), { ok: false, error: 'unauthorized' });
+
+    const health = await app.request('/health');
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), { ok: true, auth: true });
+  } finally {
+    await cleanup();
+  }
+});
+
+test('console auth exchanges a valid token for a secure session cookie', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      authToken: CONSOLE_AUTH_TOKEN,
+      publicRootPath: '/rag-console/',
+    });
+
+    const invalid = await app.request('/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token: 'wrong-token' }).toString(),
+    });
+    assert.equal(invalid.status, 401);
+    assert.match(await invalid.text(), /Invalid access token/);
+    assert.equal(invalid.headers.get('set-cookie'), null);
+
+    const login = await app.request('/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Forwarded-Proto': 'https',
+      },
+      body: new URLSearchParams({ token: CONSOLE_AUTH_TOKEN }).toString(),
+    });
+    assert.equal(login.status, 303);
+    assert.equal(login.headers.get('location'), '/rag-console/');
+    const setCookie = login.headers.get('set-cookie') ?? '';
+    assert.match(setCookie, /^anydocs_console_session=/);
+    assert.match(setCookie, /HttpOnly/i);
+    assert.match(setCookie, /Secure/i);
+    assert.match(setCookie, /SameSite=Strict/i);
+    assert.equal(setCookie.includes(CONSOLE_AUTH_TOKEN), false);
+
+    const cookie = setCookie.split(';', 1)[0]!;
+    const authenticated = await app.request('/', { headers: { Cookie: cookie } });
+    assert.equal(authenticated.status, 200);
+    assert.match(await authenticated.text(), /sign out/);
+
+    const logout = await app.request('/logout', { headers: { Cookie: cookie } });
+    assert.equal(logout.status, 303);
+    assert.equal(logout.headers.get('location'), '/login');
+    assert.match(logout.headers.get('set-cookie') ?? '', /Max-Age=0/i);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('GET /: empty workspace shows guidance, not crash', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {

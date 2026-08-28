@@ -23,6 +23,8 @@ export type NavContext = {
   running: Set<string>;
   consolePort: number;
   idleTimeoutMin: number;
+  authEnabled?: boolean;
+  publicRootPath?: string;
 };
 
 export function layout(args: {
@@ -59,13 +61,14 @@ function header(nav?: NavContext): Html {
   return html`
     <header class="app-hdr">
       <div class="app-hdr-inner">
-        <a class="brand" href="/">
+        <a class="brand" href="${nav?.publicRootPath ?? '/'}">
           <span class="brand-mark"></span>
           <b>anydocs-ask</b><span class="sep">/</span><span class="sub">console</span>
         </a>
         ${nav ? projectSwitcher(nav) : ''}
         <div class="hdr-spacer"></div>
         ${nav ? html`<span class="hdr-host">127.0.0.1:${nav.consolePort}</span>` : ''}
+        ${nav?.authEnabled ? html`<a class="btn" href="/logout">sign out</a>` : ''}
       </div>
     </header>
   `;

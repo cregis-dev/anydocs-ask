@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  AttachedProcessRegistry,
   ProcessRegistry,
   type Spawnable,
   type SpawnArgs,
@@ -243,4 +244,19 @@ test('shutdownAll: skips kill on already-exited entries', async () => {
   h.spawned[0]!.child.killed = false;
   h.registry.shutdownAll();
   assert.equal(h.spawned[0]!.child.killed, false);
+});
+
+test('AttachedProcessRegistry reuses an externally managed Ask service', async () => {
+  const registry = new AttachedProcessRegistry('docs', 3100);
+  assert.equal(registry.getPort('docs'), 3100);
+  assert.equal(registry.getPort('other'), null);
+  assert.deepEqual(await registry.start('docs'), { ok: true, port: 3100, reused: true });
+  assert.deepEqual(await registry.start('other'), {
+    ok: false,
+    error: "unknown attached project 'other'",
+  });
+  assert.equal(registry.stop('docs'), false);
+  assert.equal(registry.list()[0]?.name, 'docs');
+  assert.deepEqual(registry.reapIdle(), []);
+  assert.deepEqual(registry.shutdownAll(), []);
 });

@@ -118,6 +118,25 @@ curl http://127.0.0.1:4100/         # 应返回工作区首页 HTML
 
 子进程端口从 `[childPortRangeStart, childPortRangeEnd]` 顺序分配，控制台自身的端口必须落在该范围之外。
 
+### 远程访问鉴权
+
+Console 默认仍只监听 `127.0.0.1`。容器或反向代理部署需要监听非回环地址时，必须配置至少 16 位的管理员 Token，否则 Console 会拒绝启动：
+
+```bash
+export ANYDOCS_CONSOLE_HOST=0.0.0.0
+export ANYDOCS_CONSOLE_AUTH_TOKEN='<random-token-at-least-16-characters>'
+anydocs-ask console --workspace /runtime --port 4100
+```
+
+浏览器在 `/login` 输入 Token 后会获得 12 小时有效的 `HttpOnly` 签名会话 Cookie。Token 不会写入 Cookie；修改 Token 并重启 Console 会立即使旧会话失效。生产环境应始终经 HTTPS 反向代理访问。
+
+单项目容器可通过 `ANYDOCS_CONSOLE_ATTACHED_PROJECT` 与 `ANYDOCS_CONSOLE_ATTACHED_PORT` 将 Console 附着到同一网络命名空间中已经运行的 Ask 服务，避免加载第二份 embedding 模型：
+
+```bash
+export ANYDOCS_CONSOLE_ATTACHED_PROJECT=docs
+export ANYDOCS_CONSOLE_ATTACHED_PORT=3100
+```
+
 ---
 
 ## CLI 模式（纯 HTTP）

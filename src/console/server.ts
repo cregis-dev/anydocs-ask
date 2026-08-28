@@ -16,7 +16,7 @@ import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:
 import { timingSafeEqual } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { stream } from 'hono/streaming';
 import {
   addToProjectRegistry,
@@ -29,7 +29,7 @@ import {
   scanProjects,
   type ProjectListing,
 } from '../workspace.ts';
-import type { ProcessRegistry, RegisteredProcess } from './registry.ts';
+import type { ConsoleProcessRegistry, RegisteredProcess } from './registry.ts';
 import { defaultOps, isReportFilename, listReports, type ConsoleOps } from './ops.ts';
 import { tailRuns } from '../runs/writer.ts';
 import { renderHome } from './pages/home.ts';
@@ -64,13 +64,18 @@ import {
   type CandidateUpdate,
   type CreateFromRunInput,
 } from './golden-workshop-state.ts';
+import { createConsoleAuth, renderLoginPage } from './auth.ts';
 
 export type ConsoleAppDeps = {
   workspacePath: string;
   consolePort: number;
   /** Used by the layout footer/nav; default 15 keeps test surface stable. */
   idleTimeoutMin?: number;
-  registry: ProcessRegistry;
+  registry: ConsoleProcessRegistry;
+  /** Optional administrator token. Null keeps the loopback-only dev mode open. */
+  authToken?: string | null;
+  /** Public entry URL used after login (for example /rag-console/). */
+  publicRootPath?: string;
   /**
    * Workspace-level MCP bearer token for the `/mcp/:name` proxy (CAWP mount,
    * ADR-038). When set, the proxy requires `Authorization: Bearer <token>`;
@@ -104,6 +109,62 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   const ops = deps.ops ?? defaultOps;
   const idleTimeoutMin = deps.idleTimeoutMin ?? 15;
   const mcpToken = (deps.mcpToken ?? '').trim() || null;
+  const authToken = (deps.authToken ?? '').trim() || null;
+  const auth = authToken ? createConsoleAuth(authToken) : null;
+  const publicRootPath = normalizePublicRootPath(deps.publicRootPath);
+  const loginFailures = new Map<string, number[]>();
+
+  app.use('*', async (c, next) => {
+    if (!auth) return next();
+    const path = new URL(c.req.url).pathname;
+    if (path === '/health' || path === '/login' || path.startsWith('/mcp/')) {
+      return next();
+    }
+    if (auth.hasValidSession(c)) return next();
+    if (path.startsWith('/api/')) {
+      return c.json({ ok: false, error: 'unauthorized' }, 401, {
+        'Cache-Control': 'no-store',
+      });
+    }
+    return c.redirect('/login', 302);
+  });
+
+  app.get('/health', (c) => c.json({ ok: true, auth: auth !== null }));
+
+  app.get('/login', (c) => {
+    if (auth?.hasValidSession(c)) return c.redirect(publicRootPath, 302);
+    return loginResponse(c, null);
+  });
+
+  app.post('/login', async (c) => {
+    if (!auth) return c.redirect(publicRootPath, 303);
+    const clientKey = clientAddress(c);
+    const now = Date.now();
+    const recent = (loginFailures.get(clientKey) ?? []).filter((at) => now - at < 5 * 60_000);
+    if (recent.length >= 10) {
+      loginFailures.set(clientKey, recent);
+      return loginResponse(c, 'Too many failed attempts. Try again in a few minutes.', 429, {
+        'Retry-After': '300',
+      });
+    }
+
+    const form = new URLSearchParams(await c.req.text());
+    const candidate = form.get('token') ?? '';
+    if (!auth.verifyToken(candidate)) {
+      recent.push(now);
+      loginFailures.set(clientKey, recent);
+      return loginResponse(c, 'Invalid access token.', 401);
+    }
+
+    loginFailures.delete(clientKey);
+    auth.setSession(c);
+    return c.redirect(publicRootPath, 303);
+  });
+
+  app.get('/logout', (c) => {
+    auth?.clearSession(c);
+    return c.redirect('/login', 303);
+  });
 
   function buildNav(current: string | null): {
     projects: ProjectListing[];
@@ -111,6 +172,8 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     running: Set<string>;
     consolePort: number;
     idleTimeoutMin: number;
+    authEnabled: boolean;
+    publicRootPath: string;
   } {
     const projects = scanProjects(deps.workspacePath);
     const liveSet = new Set<string>();
@@ -123,6 +186,8 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       running: liveSet,
       consolePort: deps.consolePort,
       idleTimeoutMin,
+      authEnabled: auth !== null,
+      publicRootPath,
     };
   }
 
@@ -149,6 +214,8 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         running,
         projectStats,
         workspaceSummary,
+        authEnabled: auth !== null,
+        publicRootPath,
       }),
     );
   });
@@ -1205,6 +1272,36 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   });
 
   return app;
+}
+
+function normalizePublicRootPath(value: string | undefined): string {
+  const path = value?.trim() || '/';
+  if (!path.startsWith('/') || path.startsWith('//')) return '/';
+  return path.endsWith('/') ? path : `${path}/`;
+}
+
+function clientAddress(c: { req: { header(name: string): string | undefined } }): string {
+  return (
+    c.req.header('CF-Connecting-IP') ??
+    c.req.header('X-Real-IP') ??
+    c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() ??
+    'unknown'
+  );
+}
+
+function loginResponse(
+  c: Context,
+  error: string | null,
+  status: 200 | 401 | 429 = 200,
+  extraHeaders: Record<string, string> = {},
+) {
+  return c.html(renderLoginPage(error), status, {
+    'Cache-Control': 'no-store',
+    'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    ...extraHeaders,
+  });
 }
 
 function findProject(workspacePath: string, name: string): ProjectListing | null {

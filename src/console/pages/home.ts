@@ -19,6 +19,8 @@ export type HomeViewModel = {
   running: Map<string, RegisteredProcess>;
   projectStats?: Map<string, ProjectHomeStats>;
   workspaceSummary?: WorkspaceSummary;
+  authEnabled?: boolean;
+  publicRootPath?: string;
 };
 
 export function renderHome(vm: HomeViewModel): Html {
@@ -32,6 +34,8 @@ export function renderHome(vm: HomeViewModel): Html {
     running: liveSet,
     consolePort: vm.consolePort,
     idleTimeoutMin: vm.idleTimeoutMin,
+    authEnabled: vm.authEnabled,
+    publicRootPath: vm.publicRootPath,
   };
   const empty = vm.projects.length === 0;
   const body = html`
