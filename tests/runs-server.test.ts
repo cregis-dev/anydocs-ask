@@ -132,6 +132,27 @@ test('/v1/ask happy path appends one RunRecord with retrieval trace + answer fie
   }
 });
 
+test('/v1/ask redacts credentials before writing the Traffic run record', async () => {
+  const { runtime, cleanup, stateRoot } = await setup({ runsEnabled: true });
+  try {
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？ sign=run-record-secret' }),
+    });
+    assert.equal(res.status, 200);
+
+    const file = findRunsFile(stateRoot);
+    assert.ok(file);
+    const record = JSON.parse(readFileSync(file!, 'utf8').trim()) as RunRecord;
+    assert.equal(record.query, '如何鉴权？ sign=[REDACTED]');
+    assert.doesNotMatch(readFileSync(file!, 'utf8'), /run-record-secret/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('/v1/ask LLM throw: 503 + appends one RunRecord with kind=error/llm_failed + partial trace', async () => {
   // Regression for dogfood-2026-05-14 F1: a mid-call LLM throw (gateway
   // garbage response, transient timeout) used to propagate out as Hono 500

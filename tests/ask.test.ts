@@ -132,14 +132,72 @@ test('ask: empty question returns invalid_question error', async () => {
   }
 });
 
-test('ask: question over 500 chars returns invalid_question error', async () => {
+test('ask: question over 20,000 chars returns invalid_question error', async () => {
   const ctx = await bootstrap(async (root) => {
     await writePage(root, 'zh', { id: 'a', title: 'A', body: '内容' });
     await writeNav(root, 'zh', { version: 1, items: [{ type: 'page', pageId: 'a' }] });
   });
   try {
-    const r = await ask(ctx, { question: 'x'.repeat(501) });
+    const r = await ask(ctx, { question: 'x'.repeat(20_001) });
     assert.equal(r.type, 'error');
+    if (r.type === 'error') assert.equal(r.code, 'invalid_question');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: long diagnostic input is rewritten before embedding and redacted before generation', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'zh', {
+      id: 'payout-errors',
+      title: '出款错误排查',
+      body: '调用 /api/v1/payout 返回 E0008 Address is invalid 时，请检查 to_address 地址格式和首尾空格。',
+    });
+    await writeNav(root, 'zh', {
+      version: 1,
+      items: [{ type: 'page', pageId: 'payout-errors' }],
+    });
+  });
+  try {
+    const question = `${'gateway log noise '.repeat(80)} POST /api/v1/payout `
+      + 'request {"to_address":"TSabc ","sign":"private-signature"} '
+      + 'response {"code":"E0008","msg":"Address is invalid"} 这是什么问题';
+    const { result, trace } = await askWithTrace(ctx, { question });
+
+    assert.notEqual(result.type === 'error' ? result.code : null, 'invalid_question');
+    assert.ok(trace.retrieve_question.length <= 600);
+    assert.match(trace.retrieve_question, /\/api\/v1\/payout/);
+    assert.equal(trace.intent_route?.apiIntent, true);
+    assert.equal(ctx.embedder.lastEmbeddedTexts.length, 1);
+    assert.equal(ctx.embedder.lastEmbeddedTexts[0], trace.retrieve_question);
+    assert.doesNotMatch(ctx.llm.routerCalls[0]!.userPrompt, /private-signature/);
+    assert.doesNotMatch(ctx.llm.calls[0]!.userPrompt, /private-signature/);
+    assert.match(ctx.llm.calls[0]!.userPrompt, /"to_address":"TSabc "/);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ask: secrets in short questions are redacted before every external model call', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'en', {
+      id: 'authentication',
+      title: 'Authentication',
+      body: 'Authenticate API requests with the configured key and request signature.',
+    });
+    await writeNav(root, 'en', {
+      version: 1,
+      items: [{ type: 'page', pageId: 'authentication' }],
+    });
+  });
+  try {
+    const secret = 'short-private-token';
+    await askWithTrace(ctx, { question: `How do I authenticate with token=${secret}?` });
+
+    assert.ok(ctx.embedder.lastEmbeddedTexts.length > 0);
+    assert.equal(ctx.embedder.lastEmbeddedTexts.some((text) => text.includes(secret)), false);
+    assert.doesNotMatch(ctx.llm.routerCalls[0]!.userPrompt, new RegExp(secret));
+    assert.doesNotMatch(ctx.llm.calls[0]!.userPrompt, new RegExp(secret));
   } finally {
     await ctx.cleanup();
   }

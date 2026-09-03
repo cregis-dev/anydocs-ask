@@ -1,5 +1,13 @@
 import type { DocsLang } from '../anydocs/types.ts';
 import type { LLM } from '../llm/types.ts';
+import {
+  diagnosticRetrievalHints,
+  mergeLlmDiagnostic,
+  prepareDiagnosticInput,
+  redactSensitiveText,
+  type DiagnosticContext,
+  type PreparedDiagnosticInput,
+} from './diagnostic-input.ts';
 
 export type IntentRouterTurn = {
   question: string;
@@ -22,6 +30,8 @@ export type IntentProduct = 'payment_engine' | 'waas' | 'general' | 'unknown';
 
 export type IntentRoute = {
   originalQuestion: string;
+  /** Sensitive values redacted before any external LLM call. */
+  safeQuestion?: string;
   effectiveQuestion: string;
   usesHistory: boolean;
   rewritten: boolean;
@@ -34,6 +44,8 @@ export type IntentRoute = {
   supplementalContextHints: string[];
   supplementalPageIds: string[];
   apiReferenceVersionPrefs: string[];
+  /** Structured troubleshooting context for long JSON/log questions. */
+  diagnostic?: DiagnosticContext;
   reason: string | null;
 };
 
@@ -47,7 +59,7 @@ export interface IntentRouter {
   route(args: IntentRouterArgs): Promise<IntentRoute>;
 }
 
-const ROUTER_SYSTEM_PROMPT = `ANYDOCS_INTENT_ROUTER_V1
+const ROUTER_SYSTEM_PROMPT = `ANYDOCS_INTENT_ROUTER_V2
 You route documentation questions before retrieval. Return JSON only, no markdown.
 
 Decide semantically. Do not use the presence of chat history by itself as proof
@@ -67,12 +79,25 @@ Output this exact JSON shape:
     "supplemental_page_ids": ["known page ids when highly relevant"],
     "api_versions": ["v1" | "v2" | "v3"]
   },
+  "diagnostic": {
+    "summary": "short factual description of the observed failure",
+    "endpoints": ["verbatim endpoint paths present in the question"],
+    "error_codes": ["verbatim error codes or HTTP statuses"],
+    "exception_names": ["verbatim exception class names"],
+    "important_fields": ["verbatim request/response field names"],
+    "exact_clues": ["short verbatim excerpts copied from the question"]
+  },
   "reason": "short operator-facing reason"
 }
 
 Guidance:
 - API reference questions ask about endpoint paths, request/response fields,
   status fields, parameters, payloads, or exact operations.
+- When the question contains JSON, HTTP transcripts, or logs, rewrite
+  effective_question into a concise documentation retrieval query. Preserve
+  endpoint paths, error codes, exception names, and relevant field names.
+- diagnostic.summary may interpret the symptom, but every array item must be
+  copied verbatim from the question. Never invent an exact clue.
 - Signature/authentication questions should usually prefer guide context, not
   API reference, unless the user asks about a specific endpoint field.
 - For Payment Engine checkout/order creation, useful API hints include
@@ -125,45 +150,62 @@ export class LLMIntentRouter implements IntentRouter {
   async route(args: IntentRouterArgs): Promise<IntentRoute> {
     const question = args.question.trim();
     if (!question) return fallbackRoute(question);
+    const prepared = prepareDiagnosticInput(question);
 
     let raw: string;
     try {
       const out = await this.llm.generate({
         systemPrompt: ROUTER_SYSTEM_PROMPT,
         userPrompt: JSON.stringify({
-          question,
+          question: prepared.safeQuestion,
           lang: args.lang,
-          history: (args.history ?? []).slice(-3),
+          history: (args.history ?? []).slice(-3).map((turn) => ({
+            question: redactSensitiveText(turn.question),
+            answer_summary: redactSensitiveText(turn.answer_summary),
+          })),
         }),
         temperature: 0,
-        maxTokens: 700,
+        maxTokens: 900,
       });
       raw = out.text;
     } catch {
-      return fallbackRoute(question);
+      return fallbackRoute(question, prepared);
     }
 
     const parsed = parseRouterJson(raw);
-    if (!parsed) return fallbackRoute(question);
-    return normalizeRoute(question, parsed, args.history ?? []);
+    if (!parsed) return fallbackRoute(question, prepared);
+    return normalizeRoute(question, parsed, args.history ?? [], prepared);
   }
 }
 
-export function fallbackRoute(question: string): IntentRoute {
+export function fallbackRoute(
+  question: string,
+  prepared: PreparedDiagnosticInput = prepareDiagnosticInput(question),
+): IntentRoute {
+  const diagnostic = prepared.diagnostic;
   return {
     originalQuestion: question,
-    effectiveQuestion: question,
+    safeQuestion: prepared.safeQuestion,
+    effectiveQuestion: prepared.fallbackRetrievalQuestion,
     usesHistory: false,
-    rewritten: false,
-    intent: 'general_docs',
-    product: 'unknown',
-    apiIntent: false,
+    rewritten: prepared.fallbackRetrievalQuestion !== prepared.safeQuestion,
+    intent: diagnostic.structured ? 'error_troubleshooting' : 'general_docs',
+    product: inferProduct(
+      prepared.safeQuestion,
+      prepared.fallbackRetrievalQuestion,
+      diagnostic.structured ? 'error_troubleshooting' : 'general_docs',
+      'unknown',
+      diagnostic.endpoints,
+      diagnosticRetrievalHints(diagnostic),
+    ),
+    apiIntent: diagnostic.endpoints.length > 0,
     signatureAuthIntent: false,
     projectSetupIntent: false,
-    apiReferenceHints: [],
-    supplementalContextHints: [],
-    supplementalPageIds: [],
+    apiReferenceHints: diagnostic.endpoints,
+    supplementalContextHints: diagnosticRetrievalHints(diagnostic),
+    supplementalPageIds: diagnostic.structured ? ['error-codes'] : [],
     apiReferenceVersionPrefs: [],
+    ...(diagnostic.structured ? { diagnostic } : {}),
     reason: 'router_fallback',
   };
 }
@@ -180,6 +222,7 @@ type RawRoute = {
     supplemental_page_ids?: unknown;
     api_versions?: unknown;
   };
+  diagnostic?: unknown;
   reason?: unknown;
 };
 
@@ -202,16 +245,29 @@ function normalizeRoute(
   question: string,
   raw: RawRoute,
   history: IntentRouterTurn[],
+  prepared: PreparedDiagnosticInput,
 ): IntentRoute {
   const intent = normalizeIntent(raw.intent);
   const usesHistory = raw.conversation_mode === 'follow_up' && history.length > 0;
   const rawEffective = typeof raw.effective_question === 'string' ? raw.effective_question.trim() : '';
-  const effectiveQuestion = rawEffective.length > 0 ? rawEffective : question;
+  const unusableStructuredRewrite = prepared.diagnostic.structured
+    && (rawEffective === prepared.safeQuestion || rawEffective.length > 600);
+  const effectiveQuestion = rawEffective.length > 0 && !unusableStructuredRewrite
+    ? rawEffective
+    : prepared.fallbackRetrievalQuestion;
   const retrieval = raw.retrieval ?? {};
   const initialApiReferenceHints = cleanList(retrieval.api_reference_hints, 8, 96);
-  const supplementalContextHints = cleanList(retrieval.supplemental_context_hints, 6, 120);
+  const diagnostic = mergeLlmDiagnostic(prepared, raw.diagnostic);
+  const supplementalContextHints = cleanList(
+    [
+      ...cleanList(retrieval.supplemental_context_hints, 6, 120),
+      ...diagnosticRetrievalHints(diagnostic),
+    ],
+    20,
+    160,
+  );
   const product = inferProduct(
-    question,
+    prepared.safeQuestion,
     effectiveQuestion,
     intent,
     normalizeProduct(raw.product),
@@ -225,7 +281,7 @@ function normalizeRoute(
   // empty, which keeps apiIntent=false and skips reference-citation injection.
   // Promote explicit endpoints from the question text so the deterministic
   // gate doesn't depend on the LLM remembering to fill the right bucket.
-  const questionEndpointHints = extractEndpointHintsFromQuestion(question, effectiveQuestion);
+  const questionEndpointHints = extractEndpointHintsFromQuestion(prepared.safeQuestion, effectiveQuestion);
   const apiReferenceHints = normalizeApiReferenceHints(
     intent,
     product,
@@ -235,7 +291,7 @@ function normalizeRoute(
   const inferredSupplementalPageIds = inferSupplementalPageIds(
     intent,
     product,
-    question,
+    prepared.safeQuestion,
     effectiveQuestion,
     apiReferenceHints,
     supplementalContextHints,
@@ -256,17 +312,20 @@ function normalizeRoute(
   const hasApiFieldHint = apiReferenceHints.some(hasApiFieldHintForIntent);
   const apiIntent =
     intent === 'api_reference' ||
+    (diagnostic.structured && hasEndpointHint) ||
     (intent === 'signature_auth' && hasEndpointHint) ||
     (intent === 'webhook_status' && hasEndpointHint) ||
+    (intent === 'error_troubleshooting' && hasEndpointHint) ||
     (intent === 'payment_flow' && (preferApiReference || hasEndpointHint || hasApiFieldHint)) ||
     (intent === 'waas_payout' && (preferApiReference || hasEndpointHint || hasApiFieldHint)) ||
     (intent === 'tokens_currencies' && (preferApiReference || hasEndpointHint || hasApiFieldHint));
 
   return {
     originalQuestion: question,
+    safeQuestion: prepared.safeQuestion,
     effectiveQuestion,
     usesHistory,
-    rewritten: effectiveQuestion !== question,
+    rewritten: effectiveQuestion !== prepared.safeQuestion,
     intent,
     product,
     apiIntent,
@@ -276,6 +335,7 @@ function normalizeRoute(
     supplementalContextHints,
     supplementalPageIds,
     apiReferenceVersionPrefs: [...new Set(apiReferenceVersionPrefs)],
+    ...(diagnostic.structured ? { diagnostic } : {}),
     reason: typeof raw.reason === 'string' && raw.reason.trim() ? raw.reason.trim().slice(0, 160) : null,
   };
 }

@@ -31,6 +31,7 @@ import { askWithTrace, search } from '../query/answer.ts';
 import type { AskDeps, AskTrace } from '../query/answer.ts';
 import type { AskResult } from '../query/types.ts';
 import { fallbackRoute, type IntentRouter } from '../query/intent-router.ts';
+import { MAX_QUESTION_CHARS } from '../query/diagnostic-input.ts';
 
 /**
  * Dependencies the MCP tools need. The LLM is resolved lazily (and only by
@@ -133,7 +134,7 @@ export function registerMcpTools(
         description:
           'Semantic + keyword search over the indexed documentation. Returns the most relevant passages with their source page, URL, and breadcrumb so you can ground answers in the docs. Use this to find supporting material, then write and cite the answer yourself; it returns passages only and does NOT generate a written answer.',
         inputSchema: {
-          query: z.string().min(1).max(500).describe('Natural-language search query.'),
+          query: z.string().min(1).max(MAX_QUESTION_CHARS).describe('Natural-language search query or API troubleshooting payload.'),
           scope_id: z
             .string()
             .optional()
@@ -183,7 +184,7 @@ export function registerMcpTools(
         description:
           'Ask a natural-language question and get a synthesized answer grounded in the documentation, with citations to the source pages. Costs an LLM call on the server. Prefer this when you want a direct answer; use `search` when you only need raw passages to reason over yourself.',
         inputSchema: {
-          question: z.string().min(1).max(500).describe('The question to answer.'),
+          question: z.string().min(1).max(MAX_QUESTION_CHARS).describe('The question or API troubleshooting payload to answer.'),
           scope_id: z
             .string()
             .optional()

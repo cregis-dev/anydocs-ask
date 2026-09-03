@@ -395,11 +395,19 @@ HTTP 400。`scope_id` 校验是硬条件——未命中 `pages` 表中任一 `su
 
 ```
 1. 入参验证
-   ├─ question 长度 ≤ 500 字
+   ├─ question 长度 ≤ 20,000 字
    ├─ scope_id（如有）必须命中 pages 表中某个 subtree_root；
    │  否则返回 HTTP 400 invalid_scope（绝不降级为全局）
    └─ options.max_chunks → min(client_value, retrieval.maxChunksHardCap)
       默认服务端硬上限 20，防止恶意客户端拖爆 LLM token
+
+1.25 长问题与诊断输入预处理
+   ├─ 对 API key、Authorization、Token、签名、密码等敏感值做本地脱敏
+   ├─ question > 500 字或检测到 JSON / HTTP / 日志结构时：
+   │  ├─ Intent Router 生成 ≤ 600 字的语义检索问题
+   │  └─ 本地提取 endpoint、错误码、异常名、字段名和精确原文线索
+   ├─ Router 原样回显、超长、失败或返回非法 JSON → 使用本地确定性检索摘要
+   └─ 回答提示、runs 日志和反馈缓存只携带脱敏文本与经原文校验的精确线索
 
 1.5 query lang 检测（v1.0+；PRD §4.8）
    ├─ scope_id 给了 → 从 scope_id 解析 lang（覆盖检测）

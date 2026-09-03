@@ -85,7 +85,8 @@ API 协议见 [ARCHITECTURE §5](../ARCHITECTURE.md)；CORS / 段落 anchor 等�
 ### 3.2 查询管线（ARCH §6）
 
 ```
-1.  入参验证（question ≤ 500 字；scope_id 必须命中 pages.subtree_root，否则 400）
+1.  入参验证（question ≤ 20,000 字；scope_id 必须命中 pages.subtree_root，否则 400）
+1.25 长问题/诊断输入预处理：本地脱敏；LLM Router 生成紧凑检索问题；本地保留并校验 endpoint、错误码、字段与精确线索；Router 失败时使用确定性摘要
 1.5 query lang 检测：scope_id > current_page_id.lang > 文本 CJK 比例（≥0.30 → zh）
 2.  边界过滤：status='published' [AND subtree_root=scope_id]（lang 不在硬过滤里）
 3.  混合召回 K=20：vec0 余弦 top-20 ∪ FTS5 BM25 top-20 → RRF(k=60) 融合 top-20

@@ -15,6 +15,11 @@ import { aggregate } from '../src/query/aggregate.ts';
 import { postprocess } from '../src/query/postprocess.ts';
 import { buildPrompt, detectFormatHint } from '../src/query/prompt.ts';
 import { LLMIntentRouter } from '../src/query/intent-router.ts';
+import {
+  buildDiagnosticPromptQuestion,
+  prepareDiagnosticInput,
+  redactSensitiveText,
+} from '../src/query/diagnostic-input.ts';
 import type { LLM, LLMGenerateInput, LLMGenerateOutput } from '../src/llm/types.ts';
 import type { RerankedChunk } from '../src/query/rerank.ts';
 import type { RetrievedChunk } from '../src/query/retrieval.ts';
@@ -361,7 +366,7 @@ test('LLMIntentRouter: follows the LLM route for checkout follow-up rewrites', a
   assert.ok(route.apiReferenceHints.includes('POST /api/v2/checkout'));
   assert.ok(route.apiReferenceHints.includes('checkout'));
   assert.deepEqual(route.apiReferenceVersionPrefs, ['v2']);
-  assert.match(llm.calls[0]!.systemPrompt, /ANYDOCS_INTENT_ROUTER_V1/);
+  assert.match(llm.calls[0]!.systemPrompt, /ANYDOCS_INTENT_ROUTER_V2/);
   assert.match(llm.calls[0]!.userPrompt, /checkout_url/);
 });
 
@@ -760,6 +765,114 @@ test('LLMIntentRouter: malformed route falls back to standalone general docs', a
   assert.equal(route.effectiveQuestion, '怎么配置？');
   assert.equal(route.intent, 'general_docs');
   assert.equal(route.apiIntent, false);
+});
+
+test('diagnostic input redacts secrets while preserving exact troubleshooting clues', () => {
+  const question = 'POST /api/v1/payout request {"to_address":"TSabc ","sign":"secret-sign","token":"secret-token"} '
+    + 'response {"code":"E0008","msg":"Address is invalid"} 这是什么问题';
+  const prepared = prepareDiagnosticInput(question);
+
+  assert.doesNotMatch(prepared.safeQuestion, /secret-sign|secret-token/);
+  assert.match(prepared.safeQuestion, /"sign":"\[REDACTED\]"/);
+  assert.deepEqual(prepared.diagnostic.endpoints, ['/api/v1/payout']);
+  assert.deepEqual(prepared.diagnostic.errorCodes, ['E0008']);
+  assert.ok(prepared.diagnostic.importantFields.includes('to_address'));
+  assert.ok(prepared.diagnostic.exactClues.includes('"to_address":"TSabc "'));
+  assert.match(prepared.fallbackRetrievalQuestion, /\/api\/v1\/payout E0008 Address is invalid/);
+});
+
+test('diagnostic input redacts credential headers and bare assignments', () => {
+  const safe = redactSensitiveText([
+    'Authorization: Bearer top-secret',
+    'Access-Key: key-secret',
+    "--header 'Access-Signature: curl-signature'",
+    'sign=signature-secret',
+    'password: password-secret',
+  ].join('\n'));
+
+  assert.doesNotMatch(safe, /top-secret|key-secret|curl-signature|signature-secret|password-secret/);
+  assert.match(safe, /--header 'Access-Signature: \[REDACTED\]'/);
+  assert.equal((safe.match(/\[REDACTED\]/g) ?? []).length, 5);
+});
+
+test('LLMIntentRouter redacts secrets from conversation history', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'follow_up',
+    effective_question: 'Why did the previous payout fail?',
+    intent: 'error_troubleshooting',
+    product: 'waas',
+    retrieval: {},
+  }));
+
+  await new LLMIntentRouter(llm).route({
+    question: 'Why did that fail?',
+    lang: 'en',
+    history: [{
+      question: 'Request sign=history-secret failed',
+      answer_summary: 'Authorization: Bearer history-token',
+    }],
+  });
+
+  assert.doesNotMatch(llm.calls[0]!.userPrompt, /history-secret|history-token/);
+  assert.equal((llm.calls[0]!.userPrompt.match(/\[REDACTED\]/g) ?? []).length, 2);
+});
+
+test('LLMIntentRouter structures long diagnostics and rejects invented exact clues', async () => {
+  const exactAddress = '"to_address":"TSabc "';
+  const question = `${'log line '.repeat(80)} POST /api/v1/payout request {${exactAddress},"sign":"secret"} `
+    + 'response {"code":"E0008","msg":"Address is invalid"} 这是什么问题';
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: 'WaaS payout E0008 Address is invalid to_address trailing whitespace',
+    intent: 'error_troubleshooting',
+    product: 'waas',
+    retrieval: {
+      prefer_api_reference: true,
+      api_reference_hints: ['POST /api/v1/payout', 'to_address'],
+      supplemental_context_hints: ['E0008 Address is invalid'],
+      supplemental_page_ids: ['error-codes'],
+      api_versions: ['v1'],
+    },
+    diagnostic: {
+      summary: 'The destination address may contain trailing whitespace.',
+      endpoints: ['/api/v1/payout'],
+      error_codes: ['E0008'],
+      exception_names: [],
+      important_fields: ['to_address'],
+      exact_clues: [exactAddress, 'invented evidence'],
+    },
+  }));
+  const route = await new LLMIntentRouter(llm).route({ question, lang: 'zh' });
+
+  assert.equal(route.intent, 'error_troubleshooting');
+  assert.equal(route.effectiveQuestion, 'WaaS payout E0008 Address is invalid to_address trailing whitespace');
+  assert.equal(route.diagnostic?.summary, 'The destination address may contain trailing whitespace.');
+  assert.ok(route.diagnostic?.exactClues.includes(exactAddress));
+  assert.equal(route.diagnostic?.exactClues.includes('invented evidence'), false);
+  assert.doesNotMatch(llm.calls[0]!.userPrompt, /"sign":"secret"/);
+  assert.match(llm.calls[0]!.userPrompt, /\[REDACTED\]/);
+
+  const promptQuestion = buildDiagnosticPromptQuestion(
+    prepareDiagnosticInput(question),
+    route.diagnostic!,
+    route.effectiveQuestion,
+  );
+  assert.match(promptQuestion, /Resolved question: WaaS payout E0008/);
+  assert.match(promptQuestion, /"to_address":"TSabc "/);
+  assert.doesNotMatch(promptQuestion, /invented evidence|"sign":"secret"/);
+});
+
+test('LLMIntentRouter uses compact deterministic retrieval query when routing fails', async () => {
+  const question = `${'irrelevant log noise '.repeat(100)} /api/v1/payout `
+    + '{"to_address":"TSabc ","code":"E0008","msg":"Address is invalid"} 这是什么问题';
+  const route = await new LLMIntentRouter(new RouterTestLLM('not json')).route({ question, lang: 'zh' });
+
+  assert.equal(route.intent, 'error_troubleshooting');
+  assert.equal(route.rewritten, true);
+  assert.ok(route.effectiveQuestion.length <= 600);
+  assert.match(route.effectiveQuestion, /\/api\/v1\/payout/);
+  assert.match(route.effectiveQuestion, /E0008/);
+  assert.match(route.effectiveQuestion, /Address is invalid/);
 });
 
 // ---------------------------------------------------------------------------

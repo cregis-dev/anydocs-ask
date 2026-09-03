@@ -186,6 +186,24 @@ test('mcp: tools/list reflects config.mcp.tools', async () => {
   }
 });
 
+test('mcp: search and ask accept troubleshooting payloads up to 20,000 characters', async () => {
+  const { app, cleanup } = await setup({ tools: ['search', 'ask'] });
+  try {
+    const { json } = await rpc(app, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const tools = json.result.tools as Array<{
+      name: string;
+      inputSchema: { properties?: Record<string, { maxLength?: number }> };
+    }>;
+    const search = tools.find((tool) => tool.name === 'search');
+    const ask = tools.find((tool) => tool.name === 'ask');
+
+    assert.equal(search?.inputSchema.properties?.query?.maxLength, 20_000);
+    assert.equal(ask?.inputSchema.properties?.question?.maxLength, 20_000);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('mcp: tools/list omits disabled tools (search-only)', async () => {
   const { app, cleanup } = await setup({ tools: ['search'] });
   try {

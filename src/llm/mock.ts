@@ -32,7 +32,7 @@ export class MockLLM implements LLM {
   }
 
   async generate(input: LLMGenerateInput): Promise<LLMGenerateOutput> {
-    if (input.systemPrompt.includes('ANYDOCS_INTENT_ROUTER_V1')) {
+    if (/ANYDOCS_INTENT_ROUTER_V\d+/.test(input.systemPrompt)) {
       this.routerCalls.push(input);
       return { text: mockIntentRoute(input.userPrompt), modelUsed: this.model };
     }

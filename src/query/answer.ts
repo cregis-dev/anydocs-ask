@@ -40,8 +40,14 @@ import { buildPrompt, detectFormatHint } from './prompt.ts';
 import { LLMIntentRouter, type IntentProduct, type IntentRoute, type IntentRouter } from './intent-router.ts';
 import { postprocess, searchHitFromChunk } from './postprocess.ts';
 import type { AskRequest, AskResult, SearchResult } from './types.ts';
+import {
+  buildDiagnosticPromptQuestion,
+  MAX_QUESTION_CHARS,
+  prepareDiagnosticInput,
+  QUESTION_REWRITE_THRESHOLD_CHARS,
+  redactSensitiveText,
+} from './diagnostic-input.ts';
 
-const MAX_QUESTION_CHARS = 500;
 const HARD_MAX_CHUNKS = 20;
 const DEFAULT_MAX_CHUNKS = 8;
 /**
@@ -274,6 +280,7 @@ function emptyTrace(): AskTrace {
 
 type RetrievalPipelineOutput = {
   activeHistory: NonNullable<AskRequest['context']>['history'];
+  safeHistory: NonNullable<AskRequest['context']>['history'];
   apiIntent: boolean;
   apiReferenceHintTerms: string[];
   apiReferenceVersionPrefs: string[];
@@ -312,20 +319,29 @@ async function runRetrievalPipeline(
   const intentRouter = deps.intentRouter ?? new LLMIntentRouter(deps.llm);
   const intentRoute = await intentRouter.route({ question, history, lang: queryLang });
   const activeHistory = intentRoute.usesHistory ? history : [];
+  const safeHistory = activeHistory.map((turn) => ({
+    question: redactSensitiveText(turn.question),
+    answer_summary: redactSensitiveText(turn.answer_summary),
+  }));
   const historyWindow = activeHistory.length;
-  const searchQuestion = intentRoute.effectiveQuestion || question;
+  const safeQuestion = intentRoute.safeQuestion ?? redactSensitiveText(question);
+  const searchQuestion = intentRoute.effectiveQuestion || safeQuestion;
   const apiIntent = intentRoute.apiIntent;
   const signatureAuthIntent = intentRoute.signatureAuthIntent;
   const retrieveQuestion = intentRoute.usesHistory
     ? intentRoute.rewritten
       ? intentRoute.effectiveQuestion
-      : `${activeHistory.map((h) => h.question).join('\n')}\n${question}`
+      : `${safeHistory.map((h) => h.question).join('\n')}\n${redactSensitiveText(question)}`
     : searchQuestion;
 
-  const embedInputs = retrieveQuestion === question ? [question] : [question, retrieveQuestion];
+  const compactLongInput = question.length > QUESTION_REWRITE_THRESHOLD_CHARS
+    || intentRoute.diagnostic?.structured === true;
+  const embedInputs = compactLongInput
+    ? [retrieveQuestion]
+    : retrieveQuestion === safeQuestion ? [safeQuestion] : [safeQuestion, retrieveQuestion];
   const embedded = await deps.embedder.embed(embedInputs);
   const queryVector = embedded[0]!.vector;
-  const retrieveVector = embedded[1]?.vector ?? queryVector;
+  const retrieveVector = compactLongInput ? queryVector : embedded[1]?.vector ?? queryVector;
   throwIfAborted(signal);
 
   const ftsQuery = sanitizeFtsQuery(searchQuestion);
@@ -393,6 +409,7 @@ async function runRetrievalPipeline(
 
   return {
     activeHistory,
+    safeHistory,
     apiIntent,
     apiReferenceHintTerms,
     apiReferenceVersionPrefs,
@@ -486,6 +503,7 @@ async function askWithTraceInternal(
   throwIfAborted(hooks.signal);
   const {
     activeHistory,
+    safeHistory,
     apiIntent,
     apiReferenceHintTerms,
     apiReferenceVersionPrefs,
@@ -537,16 +555,24 @@ async function askWithTraceInternal(
   });
   const selectedContextTrace = buildSelectedContextTrace(pickedChunks, retrievalTrace);
   const formatHint = detectFormatHint(question);
+  const preparedPromptInput = prepareDiagnosticInput(question);
+  const promptQuestion = buildDiagnosticPromptQuestion(
+    preparedPromptInput,
+    intentRoute.diagnostic ?? preparedPromptInput.diagnostic,
+    intentRoute.effectiveQuestion,
+  );
   const prompt = buildPrompt({
-    question,
-    ...(intentRoute.rewritten ? { resolvedQuestion: intentRoute.effectiveQuestion } : {}),
+    question: promptQuestion,
+    ...(intentRoute.rewritten && !intentRoute.diagnostic
+      ? { resolvedQuestion: intentRoute.effectiveQuestion }
+      : {}),
     chunks: pickedChunks,
     answerLang: queryLang,
     isCrossLang,
     formatHint,
     ...(deps.promptConfig ? { promptConfig: deps.promptConfig } : {}),
     ...(entityTerms ? { entityTerms } : {}),
-    ...(historyWindow > 0 ? { history: activeHistory } : {}),
+    ...(historyWindow > 0 ? { history: safeHistory } : {}),
   });
 
   let llmOutput;

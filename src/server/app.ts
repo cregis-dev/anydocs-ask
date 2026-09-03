@@ -28,6 +28,7 @@ import { observeAsk } from '../feedback/gamma.ts';
 import { renderAskPage, getMarkedScript } from './web-ask.ts';
 import { extractClaimChunkPairs } from '../query/claim-extractor.ts';
 import { validateCitations } from '../query/citation-validator.ts';
+import { redactSensitiveText } from '../query/diagnostic-input.ts';
 import { renderWidgetHostScript } from '../widget/host-sdk.ts';
 import { renderWidgetChatPage } from '../widget/chat-page.ts';
 import {
@@ -794,7 +795,7 @@ function finalizeAskCall(args: {
   // Persist for feedback join (v1 doesn't dedupe; every call is its own row).
   // Skipped for dry_run — answer has no persistent identity in the cache.
   if (!options.dryRun && result.type !== 'error') {
-    persistAnswer(runtime.db, result, req.question);
+    persistAnswer(runtime.db, result, redactSensitiveText(req.question));
   }
 
   // γ session observation (ARCH §15.2.2 / RFC 0001 §4.2). Gated internally
@@ -810,7 +811,7 @@ function finalizeAskCall(args: {
     sessionTable: runtime.sessions,
     requestedSessionId,
     preResolvedSessionId: sessionId,
-    question: (req.question ?? '').trim(),
+    question: redactSensitiveText((req.question ?? '').trim()),
     queryVector: options.dryRun ? null : queryVector,
     result,
     now: Date.now(),
@@ -898,7 +899,7 @@ function appendRun(
     ts: new Date().toISOString(),
     request_id: args.requestId,
     session_id: args.sessionId,
-    query: args.query,
+    query: redactSensitiveText(args.query),
     filters: args.filters,
     context_pageId: args.contextPageId,
     source: args.source,

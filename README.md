@@ -188,7 +188,7 @@ pnpm dev serve /Users/me/work/product-docs
 ```jsonc
 // 请求
 {
-  "question": "如何鉴权？",          // 必填，≤ 500 字
+  "question": "如何鉴权？",          // 必填，≤ 20,000 字
   "lang": "zh",                      // 必填，"zh" | "en"
   "context": {                       // 可选
     "current_page_id": "auth",       // 用户当前所在页面
@@ -257,6 +257,11 @@ pnpm dev serve /Users/me/work/product-docs
   }
 }
 ```
+
+超过 500 字或包含 JSON、HTTP 请求/响应、异常日志的问题会先脱敏并结构化：
+LLM Router 生成紧凑检索问题，本地提取器保留接口路径、错误码、字段名和首尾空格等
+原始线索；如果 Router 输出不可用，则自动使用本地确定性摘要。密钥、Token、签名和
+密码不会发送给 Router、Embedding 或回答模型，也不会以明文写入 Traffic 日志或反馈缓存。
 
 鉴权用 bearer token，走环境变量 `ANYDOCS_MCP_TOKEN`（密钥不入配置文件）；设置后调用须带 `Authorization: Bearer <token>`，否则 401。未设置则端点开放——仅适合 loopback / 可信内网（此时端口无关的 DNS-rebinding Host 守卫生效）。在 MCP 客户端里注册（以 Claude Code 为例）：
 
