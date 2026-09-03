@@ -916,6 +916,38 @@ function makeCitationCheckUpdate(args: {
   };
 }
 
+test('GET /p/:name: Traffic filters all records before paginating', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const stateRoot = join(ws, 'state', 'docs-zh');
+    await seedRunsFile(
+      stateRoot,
+      Array.from({ length: 60 }, (_, index) => makeRunRecord({
+        answer_id: `traffic-${index}`,
+        kind: index % 2 === 0 ? 'error' : 'answer',
+      })),
+    );
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request(
+      '/p/docs-zh?traffic_range=all&traffic_kind=error&traffic_page=2&traffic_page_size=25',
+    );
+    const body = await res.text();
+
+    assert.equal(res.status, 200);
+    assert.match(body, /value="error" selected/);
+    assert.match(body, /Showing 26-30 of 30 runs/);
+    assert.match(body, /page 2 \/ 2/);
+    assert.match(body, /traffic_range=all/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('GET /p/:name: Feedback tab — breadcrumb chain rendered when pages row exists (RFC 0002 T1-c)', async () => {
   // T1-c replaces the raw current_page_id cell with the title chain
   // resolved via the pages.breadcrumb JOIN. Missing page rows

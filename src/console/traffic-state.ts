@@ -1,7 +1,7 @@
 /**
  * Console-side Traffic tab state helpers — ARCH §17.3.6.
  *
- * Reads a rolling window of runs jsonl (default 7 days) and computes
+ * Reads a selected window of runs jsonl (default 7 days) and computes
  * aggregate health metrics + per-day buckets for sparkline rendering.
  *
  * All work is read-only against existing jsonl on disk; no child
@@ -14,11 +14,36 @@
 import { iterateRunsSince } from '../runs/writer.ts';
 import { isRunRecord, runSource, type RunRecord, type RunsLine } from '../runs/types.ts';
 
+export type TrafficRange = 7 | 30 | 90 | 'all';
+
+export type TrafficViewOptions = {
+  range: TrafficRange;
+  query: string;
+  source: '' | 'reader' | 'console' | 'mcp';
+  kind: '' | 'answer' | 'clarify' | 'error';
+  minConfidence: null | 0.4 | 0.6 | 0.8;
+  page: number;
+  pageSize: 25 | 50 | 100;
+};
+
+export type TrafficPage = {
+  /** Current page records, newest first. */
+  records: RunRecord[];
+  page: number;
+  pageSize: TrafficViewOptions['pageSize'];
+  totalRecords: number;
+  totalPages: number;
+  firstRecord: number;
+  lastRecord: number;
+};
+
 export type TrafficWindow = {
   /** ISO start of the window (sinceMs as ISO date). */
   sinceISO: string;
   /** Window length in days. */
   days: number;
+  /** Selected range. `days` is the observed span when this is `all`. */
+  range: TrafficRange;
   /** All records in window, oldest → newest. */
   records: RunRecord[];
   totals: TrafficTotals;
@@ -49,21 +74,101 @@ export type PerDayBucket = {
 
 const DAY_MS = 86_400_000;
 
-export function loadTrafficWindow(stateRoot: string, days = 7): TrafficWindow {
+export function parseTrafficViewOptions(input: {
+  range?: string;
+  query?: string;
+  source?: string;
+  kind?: string;
+  minConfidence?: string;
+  page?: string;
+  pageSize?: string;
+}): TrafficViewOptions {
+  const range: TrafficRange =
+    input.range === '30' || input.range === '90' || input.range === 'all'
+      ? input.range === 'all' ? 'all' : Number(input.range) as 30 | 90
+      : 7;
+  const source =
+    input.source === 'reader' || input.source === 'console' || input.source === 'mcp'
+      ? input.source
+      : '';
+  const kind =
+    input.kind === 'answer' || input.kind === 'clarify' || input.kind === 'error'
+      ? input.kind
+      : '';
+  const confidence = Number(input.minConfidence);
+  const minConfidence = confidence === 0.4 || confidence === 0.6 || confidence === 0.8
+    ? confidence
+    : null;
+  const rawPage = Number.parseInt(input.page ?? '', 10);
+  const page = Number.isFinite(rawPage) && rawPage > 0 ? rawPage : 1;
+  const rawPageSize = Number(input.pageSize);
+  const pageSize = rawPageSize === 25 || rawPageSize === 100 ? rawPageSize : 50;
+  return {
+    range,
+    query: (input.query ?? '').trim().slice(0, 200),
+    source,
+    kind,
+    minConfidence,
+    page,
+    pageSize,
+  };
+}
+
+export function loadTrafficWindow(stateRoot: string, range: TrafficRange = 7): TrafficWindow {
   const nowMs = Date.now();
-  const sinceMs = nowMs - days * DAY_MS;
+  const sinceMs = range === 'all' ? 0 : nowMs - range * DAY_MS;
   const records: RunRecord[] = [];
   for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
     if (!isRunRecord(line)) continue;
     records.push(line);
   }
+  const firstRecordMs = records.length > 0 ? Date.parse(records[0]!.ts) : nowMs;
+  const days = range === 'all'
+    ? Math.max(1, Math.ceil((nowMs - firstRecordMs) / DAY_MS))
+    : range;
   return {
-    sinceISO: new Date(sinceMs).toISOString().slice(0, 10),
+    sinceISO: new Date(range === 'all' ? firstRecordMs : sinceMs).toISOString().slice(0, 10),
     days,
+    range,
     records,
     totals: computeTotals(records),
-    perDay: bucketByDay(records, sinceMs, days),
+    perDay: range === 'all' ? bucketObservedDays(records) : bucketByDay(records, sinceMs, days),
   };
+}
+
+export function paginateTrafficRecords(
+  records: RunRecord[],
+  options: TrafficViewOptions,
+): TrafficPage {
+  const query = options.query.toLowerCase();
+  const filtered = records.filter((record) => {
+    if (query && !record.query.toLowerCase().includes(query)) return false;
+    if (options.source && runSource(record) !== options.source) return false;
+    if (options.kind && record.answer.kind !== options.kind) return false;
+    if (
+      options.minConfidence !== null
+      && record.answer.confidence < options.minConfidence
+    ) return false;
+    return true;
+  });
+  const totalRecords = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(totalRecords / options.pageSize));
+  const page = Math.min(options.page, totalPages);
+  const start = (page - 1) * options.pageSize;
+  const pageRecords = filtered.reverse().slice(start, start + options.pageSize);
+  return {
+    records: pageRecords,
+    page,
+    pageSize: options.pageSize,
+    totalRecords,
+    totalPages,
+    firstRecord: totalRecords === 0 ? 0 : start + 1,
+    lastRecord: Math.min(start + options.pageSize, totalRecords),
+  };
+}
+
+export function trafficRangeLabel(range: TrafficRange): string {
+  return range === 'all' ? 'all time' : `last ${range}d`;
 }
 
 function computeTotals(records: RunRecord[]): TrafficTotals {
@@ -125,6 +230,28 @@ function bucketByDay(records: RunRecord[], sinceMs: number, days: number): PerDa
     });
   }
   return out;
+}
+
+function bucketObservedDays(records: RunRecord[]): PerDayBucket[] {
+  const buckets = new Map<string, RunRecord[]>();
+  for (const record of records) {
+    const date = record.ts.slice(0, 10);
+    const existing = buckets.get(date);
+    if (existing) existing.push(record);
+    else buckets.set(date, [record]);
+  }
+  return [...buckets.entries()].map(([date, dayRecords]) => {
+    const confs = dayRecords
+      .map((record) => record.answer.confidence)
+      .filter((confidence): confidence is number => confidence !== null);
+    const latencies = dayRecords.map((record) => record.answer.latency_ms);
+    return {
+      date,
+      count: dayRecords.length,
+      meanConfidence: confs.length > 0 ? mean(confs) : null,
+      p95LatencyMs: latencies.length > 0 ? percentile(latencies, 95) : null,
+    };
+  });
 }
 
 function mean(xs: number[]): number {

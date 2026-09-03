@@ -1597,14 +1597,14 @@ tab "Index" 渲染：
 
 | 区块 | 内容 |
 |---|---|
-| 健康度 strip | 4 KPI 卡 + 按日分桶 sparkline：queries · 7d / mean confidence / P95 latency (P50 副) / non-answer rate (error + clarify) |
-| 筛选条 | query / source(reader\|console) / kind / minConf |
-| runs 表 | SSR 行；每行 ts/kind+src-pill/conf/latency/query/cit |
+| 健康度 strip | 4 KPI 卡 + 按日分桶 sparkline：queries · 7d/30d/90d/all / mean confidence / P95 latency (P50 副) / non-answer rate (error + clarify) |
+| 筛选条 | 服务端 query / source(reader\|console\|mcp) / kind / minConf |
+| runs 表 | 筛选后按 25/50/100 条服务端分页；SSR 行；每行 ts/kind+src-pill/conf/latency/query/cit |
 | 行展开 | 左：fused top-8 表 + meta(model/answer_id/request_id/tokens) + ↩ Re-ask 按钮；右：answer markdown + citations |
 | Re-ask | 写回 Ask tab textarea + 切到 Ask tab + 滑哈希到 `#ask`；当前 cfg 重跑对比 |
 | **Analyze 区**（2026-05-12 加入） | runs 表下方：▶ run analyze · 7d 按钮 + "include console traffic" 复选框（→ body `include_console:true`）+ `<details>` 折叠区 inline marked 渲染最新 analyze 报告 + 历史报告 |
 
-`src/console/traffic-state.ts` 装载 7d 窗口；console-origin runs 与 reader 一同纳入（与 analyze 默认排除不同——Traffic 视图需要可见对照）。analyze 报告解析与列举见 `eval-state.ts:listAnalyzeReports / readAnalyzeReportBody`。
+`src/console/traffic-state.ts` 默认装载 7d 窗口，也支持 30d、90d 和全部历史；console-origin runs 与 reader 一同纳入（与 analyze 默认排除不同——Traffic 视图需要可见对照）。Analyze 区仍固定汇总最近 7d，报告解析与列举见 `eval-state.ts:listAnalyzeReports / readAnalyzeReportBody`。
 
 #### 17.3.7 Next-action 横幅（2026-05-11 加入）
 

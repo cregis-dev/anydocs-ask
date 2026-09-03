@@ -95,7 +95,7 @@ curl http://127.0.0.1:4100/         # 应返回工作区首页 HTML
 项目页加 **Feedback** / **Traffic** tab + **Index** tab 反向标注，把反馈数据消费成可行动信号（RFC 0002 T1–T4）：
 
 - **Feedback tab** — 4 状态视图（disabled / enabled-empty / onboarding / healthy）+ 6 KPI tile（feedback·7d / explicit% / mean confidence / non-answer rate / A+ candidates / cit-check failed）+ 5 filter chip（all / 👍 / 👎 / implicit / no_citations / ⚠ cit-check）+ 行级 breadcrumb + Drawer META/ANSWER/CORRECTION/CITATIONS（含 verdict 徽章）/RETRIEVAL/ACTIONS。
-- **Traffic tab** — 最近 7 天 query 列表 + Re-ask + jump-to-Ask；Console 写入 runs 默认排除分析。
+- **Traffic tab** — 7/30/90 天或全部历史 query 列表，支持服务端筛选、分页、Re-ask 与 jump-to-Ask；Console 写入 runs 默认排除分析。
 - **Index tab** — 每行末尾显示"近 7 天命中 N 次 + 中位 confidence"，可跳到对应 Traffic 过滤。
 
 打开方式：在 anydocs.ask.json 设 `feedback.enabled=true`（写库 + 反馈先验上线）。详见 [ARCHITECTURE.md §15](./ARCHITECTURE.md)。

@@ -51,7 +51,7 @@ import {
   parseFeedbackFilter,
 } from './feedback-state.ts';
 import { loadIndexSnapshot, type ChildIndexStatus } from './index-state.ts';
-import { loadTrafficWindow } from './traffic-state.ts';
+import { loadTrafficWindow, parseTrafficViewOptions } from './traffic-state.ts';
 import { loadProjectHomeStats, summarizeWorkspace } from './home-state.ts';
 import { loadAskConfigForView } from './ask-config-state.ts';
 import { parseAndValidateAskConfig } from '../config.ts';
@@ -421,7 +421,16 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         }
       }
     }
-    const trafficWindow = stateRoot ? loadTrafficWindow(stateRoot, 7) : undefined;
+    const trafficView = parseTrafficViewOptions({
+      range: c.req.query('traffic_range'),
+      query: c.req.query('traffic_q'),
+      source: c.req.query('traffic_source'),
+      kind: c.req.query('traffic_kind'),
+      minConfidence: c.req.query('traffic_conf'),
+      page: c.req.query('traffic_page'),
+      pageSize: c.req.query('traffic_page_size'),
+    });
+    const trafficWindow = stateRoot ? loadTrafficWindow(stateRoot, trafficView.range) : undefined;
     const candidates = stateRoot ? loadCandidates(stateRoot) : undefined;
     const analyzeHistory = stateRoot ? listAnalyzeReports(stateRoot) : [];
     const latestAnalyzeBody =
@@ -445,6 +454,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         latestEvalReportBody,
         ...(indexSnapshot ? { indexSnapshot } : {}),
         ...(trafficWindow ? { trafficWindow } : {}),
+        trafficView,
         ...(feedbackSnapshot ? { feedbackSnapshot } : {}),
         ...(candidates ? { candidates } : {}),
         analyzeHistory,

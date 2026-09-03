@@ -212,6 +212,7 @@ test('traffic with high error rate → err banner pointing to traffic tab', () =
   const tr: TrafficWindow = {
     sinceISO: '2026-05-01',
     days: 7,
+    range: 7,
     records: [],
     totals: {
       count: 100,

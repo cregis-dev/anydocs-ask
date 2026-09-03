@@ -1,15 +1,23 @@
 /**
  * Traffic tab — ARCH §17.3.6.
  *
- * Health KPI strip + filterable runs table + analyze section.
- * Rolls up the rolling 7-day window from `loadTrafficWindow`. The runs
+ * Health KPI strip + filterable, paginated runs table + analyze section.
+ * Rolls up the selected window from `loadTrafficWindow`. The runs
  * table supports expandable rows (full fused retrieval + answer markdown +
  * re-ask) — expansion JS lives in the inline TRAFFIC_SCRIPT below.
  */
 
 import { html, raw } from 'hono/html';
 import type { Html } from './layout.ts';
-import type { TrafficWindow } from '../traffic-state.ts';
+import {
+  paginateTrafficRecords,
+  parseTrafficViewOptions,
+  trafficRangeLabel,
+  type TrafficPage,
+  type TrafficRange,
+  type TrafficViewOptions,
+  type TrafficWindow,
+} from '../traffic-state.ts';
 import { runSource } from '../../runs/types.ts';
 import type { RunRecord } from '../../runs/types.ts';
 import type { AnalyzeReportSummary } from '../eval-state.ts';
@@ -17,20 +25,24 @@ import type { AnalyzeReportSummary } from '../eval-state.ts';
 export type TrafficTabViewModel = {
   projectName: string;
   window: TrafficWindow;
+  options?: TrafficViewOptions;
   analyzeHistory: AnalyzeReportSummary[];
   latestAnalyzeBody: string | null;
 };
 
 export function renderTrafficTab(vm: TrafficTabViewModel): Html {
   const { window: w } = vm;
+  const options = vm.options ?? parseTrafficViewOptions({});
+  const page = paginateTrafficRecords(w.records, options);
   const noRuns = w.records.length === 0;
   const showAnalyze = !noRuns || vm.analyzeHistory.length > 0;
   return html`
     <div class="traffic-tab" style="display: flex; flex-direction: column; gap: var(--s-5);">
+      ${trafficScope(vm.projectName, options)}
       ${noRuns ? '' : trafficHealthBanner(w)}
-      ${noRuns ? emptyCard() : html`
+      ${noRuns ? emptyCard(w.range) : html`
         ${healthStrip(w)}
-        ${runsCard(w)}
+        ${runsCard(vm.projectName, options, page)}
       `}
       ${showAnalyze ? analyzeCard(vm.projectName, vm.analyzeHistory, vm.latestAnalyzeBody) : ''}
     </div>
@@ -39,8 +51,26 @@ export function renderTrafficTab(vm: TrafficTabViewModel): Html {
       <div class="drawer-hd" id="tf-drawer-hd"></div>
       <div class="drawer-bd" id="tf-drawer-bd"></div>
     </aside>
-    <script>${raw(`window.__TRAFFIC__ = ${JSON.stringify([...w.records].reverse())};`)}</script>
+    <script>${raw(`window.__TRAFFIC__ = ${JSON.stringify(page.records)};`)}</script>
     <script type="module">${raw(TRAFFIC_SCRIPT)}</script>
+  `;
+}
+
+function trafficScope(projectName: string, options: TrafficViewOptions): Html {
+  const ranges: TrafficRange[] = [7, 30, 90, 'all'];
+  return html`
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:var(--s-3); flex-wrap:wrap;">
+      <div style="display:inline-flex; gap:var(--s-1); align-items:center;" aria-label="Traffic history range">
+        ${ranges.map((range) => html`
+          <a
+            class="btn sm ${range === options.range ? 'primary' : ''}"
+            href="${trafficHref(projectName, options, { range, page: 1 })}"
+            aria-current="${range === options.range ? 'true' : 'false'}"
+          >${range === 'all' ? 'All' : `${range}d`}</a>
+        `)}
+      </div>
+      <span class="muted" style="font-size:var(--t-12);">Metrics cover ${trafficRangeLabel(options.range)}.</span>
+    </div>
   `;
 }
 
@@ -52,7 +82,7 @@ function trafficHealthBanner(w: TrafficWindow): Html {
       <div class="banner err">
         <span class="b-ico"><svg><use href="#i-err"/></svg></span>
         <div class="b-bd">
-          <div class="b-ti">Last ${w.days}d error rate ${(t.errorRate * 100).toFixed(1)}%</div>
+          <div class="b-ti">${capitalize(trafficRangeLabel(w.range))} error rate ${(t.errorRate * 100).toFixed(1)}%</div>
           <div class="b-de">Filter kind=error in the table below to see the failing requests.</div>
         </div>
       </div>
@@ -72,15 +102,15 @@ function trafficHealthBanner(w: TrafficWindow): Html {
   return html``;
 }
 
-function emptyCard(): Html {
+function emptyCard(range: TrafficRange): Html {
   return html`
     <section class="card">
       <div class="card-bd">
         <div class="empty">
           <div class="e-ico"><svg><use href="#i-chart"/></svg></div>
           <h3>No traffic yet</h3>
-          <p>Once a Reader client or this console hits <code class="inline">/v1/ask</code>, you'll see
-            request volume, confidence, latency, and error trends here over a rolling 7-day window.</p>
+          <p>No runs were recorded during ${trafficRangeLabel(range)}. Choose a wider range above or
+            use the Ask tab to generate a run.</p>
           <div class="e-cta">
             <a href="#ask" class="btn primary">
               <svg><use href="#i-chat"/></svg> dogfood from the Ask tab
@@ -105,7 +135,7 @@ function healthStrip(w: TrafficWindow): Html {
   return html`
     <div class="kpis" style="grid-template-columns: repeat(4, 1fr);">
       <div class="kpi">
-        <div class="k-lab">queries · ${w.days}d</div>
+        <div class="k-lab">queries · ${trafficRangeLabel(w.range)}</div>
         <div class="k-val">${t.count}</div>
         <div class="k-foot">reader ${t.countReader} · console ${t.countConsole} · mcp ${t.countMcp}</div>
         ${raw(`<div style="margin-top:6px;">${sparkCount}</div>`)}
@@ -148,42 +178,64 @@ function svgPolyline(values: Array<number | null>, cls: 'accent' | 'ok' | 'warn'
   return `<svg class="spark ${cls}" viewBox="0 0 80 22" style="width:100%;"><polyline points="${pts}"/></svg>`;
 }
 
-function runsCard(w: TrafficWindow): Html {
-  const ordered = [...w.records].reverse();
+function runsCard(
+  projectName: string,
+  options: TrafficViewOptions,
+  page: TrafficPage,
+): Html {
+  const hasFilters = Boolean(
+    options.query || options.source || options.kind || options.minConfidence !== null,
+  );
   return html`
     <section class="card flush">
-      <div class="card-hd">
+      <div class="card-hd" style="flex-wrap:wrap;">
         <h2>Recent runs</h2>
-        <div class="actions" style="display: flex; gap: var(--s-2); align-items: center;">
+        <form
+          id="tf-filter-form"
+          class="actions"
+          method="get"
+          action="/p/${encodeURIComponent(projectName)}#traffic"
+          style="display:flex; gap:var(--s-2); align-items:center; flex-wrap:wrap;"
+        >
+          <input type="hidden" name="traffic_range" value="${options.range}" />
           <div style="position: relative;">
             <svg style="position: absolute; left: 8px; top: 50%; transform: translateY(-50%); width: 13px; height: 13px; color: var(--fg-mute);"><use href="#i-search"/></svg>
-            <input id="tf-q" class="input" type="search" placeholder="filter query, source, kind…" style="padding-left: 28px; height: 30px; width: 280px; font-size: var(--t-13);" autocomplete="off" />
+            <input id="tf-q" name="traffic_q" value="${options.query}" class="input" type="search" placeholder="filter questions…" style="padding-left:28px; height:30px; width:230px; font-size:var(--t-13);" autocomplete="off" />
           </div>
-          <select id="tf-source" class="select" style="height: 30px; padding: 0 24px 0 10px; font-size: var(--t-12); width: auto;">
+          <select id="tf-source" name="traffic_source" class="select" aria-label="Filter by source" style="height:30px; padding:0 24px 0 10px; font-size:var(--t-12); width:auto;">
             <option value="">all sources</option>
-            <option value="reader">reader</option>
-            <option value="console">console</option>
-            <option value="mcp">mcp</option>
+            <option value="reader" ${options.source === 'reader' ? 'selected' : ''}>reader</option>
+            <option value="console" ${options.source === 'console' ? 'selected' : ''}>console</option>
+            <option value="mcp" ${options.source === 'mcp' ? 'selected' : ''}>mcp</option>
           </select>
-          <select id="tf-kind" class="select" style="height: 30px; padding: 0 24px 0 10px; font-size: var(--t-12); width: auto;">
+          <select id="tf-kind" name="traffic_kind" class="select" aria-label="Filter by result kind" style="height:30px; padding:0 24px 0 10px; font-size:var(--t-12); width:auto;">
             <option value="">all kinds</option>
-            <option value="answer">answer</option>
-            <option value="clarify">clarify</option>
-            <option value="error">error</option>
+            <option value="answer" ${options.kind === 'answer' ? 'selected' : ''}>answer</option>
+            <option value="clarify" ${options.kind === 'clarify' ? 'selected' : ''}>clarify</option>
+            <option value="error" ${options.kind === 'error' ? 'selected' : ''}>error</option>
           </select>
-          <select id="tf-conf" class="select" style="height: 30px; padding: 0 24px 0 10px; font-size: var(--t-12); width: auto;">
+          <select id="tf-conf" name="traffic_conf" class="select" aria-label="Filter by minimum confidence" style="height:30px; padding:0 24px 0 10px; font-size:var(--t-12); width:auto;">
             <option value="">conf any</option>
-            <option value="0.8">conf ≥ 0.8</option>
-            <option value="0.6">conf ≥ 0.6</option>
-            <option value="0.4">conf ≥ 0.4</option>
+            <option value="0.8" ${options.minConfidence === 0.8 ? 'selected' : ''}>conf ≥ 0.8</option>
+            <option value="0.6" ${options.minConfidence === 0.6 ? 'selected' : ''}>conf ≥ 0.6</option>
+            <option value="0.4" ${options.minConfidence === 0.4 ? 'selected' : ''}>conf ≥ 0.4</option>
           </select>
-        </div>
+          <select id="tf-page-size" name="traffic_page_size" class="select" aria-label="Rows per page" style="height:30px; padding:0 24px 0 10px; font-size:var(--t-12); width:auto;">
+            <option value="25" ${options.pageSize === 25 ? 'selected' : ''}>25 rows</option>
+            <option value="50" ${options.pageSize === 50 ? 'selected' : ''}>50 rows</option>
+            <option value="100" ${options.pageSize === 100 ? 'selected' : ''}>100 rows</option>
+          </select>
+          <button class="btn sm" type="submit" title="Apply filters" aria-label="Apply filters"><svg><use href="#i-search"/></svg></button>
+          ${hasFilters ? html`<a class="btn sm ghost" href="${trafficHref(projectName, options, {
+            query: '', source: '', kind: '', minConfidence: null, page: 1,
+          })}">clear</a>` : ''}
+        </form>
       </div>
       <div class="card-bd flush">
         <table class="tbl" id="traffic-tbl">
           <thead>
             <tr>
-              <th style="width: 80px;">time</th>
+              <th style="width: 150px;">time</th>
               <th style="width: 90px;">source</th>
               <th>question</th>
               <th class="num" style="width: 70px;">kind</th>
@@ -191,11 +243,58 @@ function runsCard(w: TrafficWindow): Html {
               <th class="num" style="width: 70px;">latency</th>
             </tr>
           </thead>
-          <tbody id="tf-body">${ordered.map((r, i) => trafficRow(r, i))}</tbody>
+          <tbody id="tf-body">
+            ${page.records.length > 0
+              ? page.records.map((r, i) => trafficRow(r, i))
+              : html`<tr><td colspan="6"><div class="empty" style="padding:var(--s-6);">No runs match these filters.</div></td></tr>`}
+          </tbody>
         </table>
       </div>
+      ${trafficPager(projectName, options, page)}
     </section>
   `;
+}
+
+function trafficPager(
+  projectName: string,
+  options: TrafficViewOptions,
+  page: TrafficPage,
+): Html {
+  return html`
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:var(--s-3); padding:var(--s-3) var(--s-5); border-top:1px solid var(--bd-soft); font-size:var(--t-12); flex-wrap:wrap;">
+      <span class="muted">Showing ${page.firstRecord}-${page.lastRecord} of ${page.totalRecords} runs</span>
+      <div style="display:flex; align-items:center; gap:var(--s-2);">
+        ${page.page > 1
+          ? html`<a class="btn sm" href="${trafficHref(projectName, options, { page: page.page - 1 })}" aria-label="Previous page">‹ prev</a>`
+          : html`<span class="btn sm disabled" aria-disabled="true">‹ prev</span>`}
+        <span class="mono muted" style="min-width:86px; text-align:center;">page ${page.page} / ${page.totalPages}</span>
+        ${page.page < page.totalPages
+          ? html`<a class="btn sm" href="${trafficHref(projectName, options, { page: page.page + 1 })}" aria-label="Next page">next ›</a>`
+          : html`<span class="btn sm disabled" aria-disabled="true">next ›</span>`}
+      </div>
+    </div>
+  `;
+}
+
+function trafficHref(
+  projectName: string,
+  options: TrafficViewOptions,
+  overrides: Partial<TrafficViewOptions>,
+): string {
+  const next = { ...options, ...overrides };
+  const params = new URLSearchParams();
+  params.set('traffic_range', String(next.range));
+  if (next.query) params.set('traffic_q', next.query);
+  if (next.source) params.set('traffic_source', next.source);
+  if (next.kind) params.set('traffic_kind', next.kind);
+  if (next.minConfidence !== null) params.set('traffic_conf', String(next.minConfidence));
+  params.set('traffic_page', String(next.page));
+  params.set('traffic_page_size', String(next.pageSize));
+  return `/p/${encodeURIComponent(projectName)}?${params.toString()}#traffic`;
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 function trafficRow(r: RunRecord, idx: number): Html {
@@ -210,7 +309,7 @@ function trafficRow(r: RunRecord, idx: number): Html {
         data-conf="${a.confidence ?? -1}"
         data-source="${src}"
         data-q="${(r.query ?? '').toLowerCase()}">
-      <td class="mono">${r.ts.slice(11, 19)}</td>
+      <td class="mono">${r.ts.replace('T', ' ').slice(0, 19)}</td>
       <td><span class="tag">${src}</span></td>
       <td>${r.query}</td>
       <td class="num"><span class="tag ${kindCls}">${a.kind}</span></td>
@@ -302,30 +401,12 @@ function escapeHtml(s) {
   );
 }
 
-function applyFilter() {
-  const tbody = $('tf-body');
-  if (!tbody) return;
-  const q = ($('tf-q').value || '').toLowerCase();
-  const k = $('tf-kind').value;
-  const s = $('tf-source').value;
-  const minC = parseFloat($('tf-conf').value);
-  for (const tr of tbody.querySelectorAll('tr.clickable')) {
-    const trQ = tr.dataset.q || '';
-    const trK = tr.dataset.kind || '';
-    const trS = tr.dataset.source || '';
-    const trC = parseFloat(tr.dataset.conf || '-1');
-    let show = true;
-    if (q && !trQ.includes(q)) show = false;
-    if (k && trK !== k) show = false;
-    if (s && trS !== s) show = false;
-    if (!isNaN(minC) && trC < minC) show = false;
-    tr.style.display = show ? '' : 'none';
-  }
-}
-['tf-q', 'tf-kind', 'tf-source', 'tf-conf'].forEach((id) => {
+['tf-kind', 'tf-source', 'tf-conf', 'tf-page-size'].forEach((id) => {
   const el = $(id);
-  if (el) el.addEventListener('input', applyFilter);
-  if (el) el.addEventListener('change', applyFilter);
+  if (el) el.addEventListener('change', () => {
+    const form = $('tf-filter-form');
+    if (form) form.requestSubmit();
+  });
 });
 
 function fmtLatency(ms) {

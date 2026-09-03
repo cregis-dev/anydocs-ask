@@ -272,7 +272,7 @@ For each page, deliver **all listed states**. Each "state" is a separate mockup.
 **Role**: 7-day rolling traffic dashboard + analyze tool.
 
 **Sections**:
-1. **Health strip** (KPI cards, hidden when 0 runs): `queries·7d (split reader/console)` · `mean confidence` · `p95 latency / p50` · `non-answer rate (split error / clarify)`. Each card has a 7-day sparkline.
+1. **Health strip** (KPI cards, hidden when 0 runs): selectable `queries·7d/30d/90d/all (split reader/console/mcp)` · `mean confidence` · `p95 latency / p50` · `non-answer rate (split error / clarify)`. Query rows are filtered server-side and paginated at 25/50/100 per page.
 2. **Runs table** (when ≥1 run): filterable by query text / source / kind. Row expand on click to show fused retrieval table + answer markdown + re-ask shortcut.
 3. **Empty state** (no runs): friendly card explaining dogfood vs real-traffic ways to produce data.
 4. **ANALYZE RUNS** card (hidden until ≥1 run or ≥1 prior analyze report): `▶ run analyze · 7d` button + `include console traffic` checkbox. Inline latest report markdown when present, history details below.

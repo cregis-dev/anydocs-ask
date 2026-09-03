@@ -782,11 +782,11 @@ Golden case schema（jsonl，每行）：
 - 首次设置引导：totalPages=0 时显大字 + 文件树骨架 + 路径
 - 内容探索器：按 lang 切换 → 导航树（按 breadcrumb 自动分块）→ 每页 id/slug/status；missing file 红字；orphan（pages/ 有但 navigation/ 没引用）红色分组
 
-#### 13.4.6 Traffic tab（7d 健康度 + runs 详情 + Re-ask）
+#### 13.4.6 Traffic tab（可选时间范围健康度 + runs 详情 + Re-ask）
 
-- 4 KPI 卡 + 按日分桶 sparkline：queries · 7d / mean confidence / P95 latency (含 P50) / non-answer rate (error + clarify)
-- 筛选条：query / source(reader|console) / kind / minConf
-- runs 表（SSR）：行展开看完整 fused top-8 + answer markdown 渲染 + citations + meta(model/answer_id/request_id/tokens)
+- 4 KPI 卡 + 按日分桶 sparkline：queries · 7d/30d/90d/all / mean confidence / P95 latency (含 P50) / non-answer rate (error + clarify)
+- 服务端筛选条：query / source(reader|console|mcp) / kind / minConf
+- runs 表（SSR）：筛选后按 25/50/100 条分页；行展开看完整 fused top-8 + answer markdown 渲染 + citations + meta(model/answer_id/request_id/tokens)
 - **Re-ask 按钮**：行展开里点 ↩ 把 query 写回 Ask tab textarea + 切到 Ask tab；用当前 cfg 重跑该问题做对比
 - console 与 reader 流量在 Traffic 视图里都纳入并以 src-pill 区分（与 analyze 默认排除 console 不同——这里需要可见对照）
 

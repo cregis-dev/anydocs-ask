@@ -28,7 +28,7 @@ import { renderTrafficTab } from './project-traffic-tab.ts';
 import type { EvalTabSnapshot } from '../eval-state.ts';
 import type { FeedbackTabSnapshot } from '../feedback-state.ts';
 import type { IndexSnapshot } from '../index-state.ts';
-import type { TrafficWindow } from '../traffic-state.ts';
+import type { TrafficViewOptions, TrafficWindow } from '../traffic-state.ts';
 import type { CandidateSnapshot } from '../golden-workshop-state.ts';
 import type { AnalyzeReportSummary } from '../eval-state.ts';
 import { computeNextAction, type NextAction } from '../next-action.ts';
@@ -45,6 +45,7 @@ export type ProjectViewModel = {
   latestEvalReportBody?: string | null;
   indexSnapshot?: IndexSnapshot;
   trafficWindow?: TrafficWindow;
+  trafficView?: TrafficViewOptions;
   feedbackSnapshot?: FeedbackTabSnapshot;
   candidates?: CandidateSnapshot;
   analyzeHistory?: AnalyzeReportSummary[];
@@ -316,6 +317,7 @@ function tabPanels(
         ? renderTrafficTab({
             projectName: project.name,
             window: vm.trafficWindow,
+            options: vm.trafficView,
             analyzeHistory: vm.analyzeHistory ?? [],
             latestAnalyzeBody: vm.latestAnalyzeBody ?? null,
           })

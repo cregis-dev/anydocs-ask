@@ -12,7 +12,7 @@
 
 import type { EvalTabSnapshot } from './eval-state.ts';
 import type { IndexSnapshot } from './index-state.ts';
-import type { TrafficWindow } from './traffic-state.ts';
+import { trafficRangeLabel, type TrafficWindow } from './traffic-state.ts';
 
 function countUnpublished(idx: IndexSnapshot): number {
   let n = 0;
@@ -145,7 +145,7 @@ export function computeNextAction(inputs: NextActionInputs): NextAction | null {
   if (tr && tr.totals.countReader >= 50 && tr.totals.errorRate > 0.05) {
     return {
       level: 'err',
-      title: `Last ${tr.days}d error rate ${(tr.totals.errorRate * 100).toFixed(1)}%`,
+      title: `${trafficRangeLabel(tr.range)} error rate ${(tr.totals.errorRate * 100).toFixed(1)}%`,
       detail: 'Filter kind=error on Traffic to see the failing requests.',
       cta: { label: 'Open Traffic', targetTab: 'traffic' },
     };
@@ -154,7 +154,7 @@ export function computeNextAction(inputs: NextActionInputs): NextAction | null {
   if (tr && tr.totals.countReader >= 20 && tr.totals.meanConfidence !== null && tr.totals.meanConfidence < 0.5) {
     return {
       level: 'warn',
-      title: `Last ${tr.days}d mean confidence ${tr.totals.meanConfidence.toFixed(2)}`,
+      title: `${trafficRangeLabel(tr.range)} mean confidence ${tr.totals.meanConfidence.toFixed(2)}`,
       detail: 'Retrieval quality looks low — review low-confidence requests on Traffic and run Analyze.',
       cta: { label: 'Open Traffic', targetTab: 'traffic' },
     };
