@@ -39,7 +39,7 @@ export function renderAnalyzeReport(input: RenderInput): string {
   } else {
     lines.push('');
     lines.push(
-      'Trigger keys: `lc` = confidence below floor, `nc` = no citations, `ra` = re-asked within 30s.',
+      'Trigger keys: `nc` = no citations, `ra` = re-asked within 30s.',
     );
     lines.push('');
     for (const c of findings.recall.clusters) {
@@ -137,6 +137,6 @@ function renderBuckets(buckets: LatencyBucket[], lines: string[]): void {
   }
 }
 
-function triggerCode(t: 'low-confidence' | 'no-citations' | 'reask-30s'): string {
-  return t === 'low-confidence' ? 'lc' : t === 'no-citations' ? 'nc' : 'ra';
+function triggerCode(t: 'no-citations' | 'reask-30s'): string {
+  return t === 'no-citations' ? 'nc' : 'ra';
 }

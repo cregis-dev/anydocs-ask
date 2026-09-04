@@ -16,7 +16,6 @@ function run(args: {
   ts?: string;
   source?: RunSource;
   kind?: 'answer' | 'clarify' | 'error';
-  confidence?: number;
 }): RunRecord {
   return {
     ts: args.ts ?? new Date().toISOString(),
@@ -32,7 +31,6 @@ function run(args: {
       answer_id: `answer-${args.index}`,
       md: 'answer',
       citations: [],
-      confidence: args.confidence ?? 0.7,
       latency_ms: 100,
       tokens_in: null,
       tokens_out: null,
@@ -50,7 +48,6 @@ test('traffic view options parse supported filters and fall back safely', () => 
       query: '  signature error  ',
       source: 'mcp',
       kind: 'error',
-      minConfidence: '0.6',
       page: '3',
       pageSize: '100',
     }),
@@ -59,7 +56,6 @@ test('traffic view options parse supported filters and fall back safely', () => 
       query: 'signature error',
       source: 'mcp',
       kind: 'error',
-      minConfidence: 0.6,
       page: 3,
       pageSize: 100,
     },
@@ -70,7 +66,6 @@ test('traffic view options parse supported filters and fall back safely', () => 
     query: '',
     source: '',
     kind: '',
-    minConfidence: null,
     page: 1,
     pageSize: 50,
   });

@@ -293,9 +293,7 @@ function PageRail(props: {
                   className="ix-page-row"
                   data-selected={pageKey(page) === props.selectedPageKey}
                   data-page-id={page.id}
-                  data-ask-mark={page.askStats
-                    ? (page.askStats.medianConfidence !== null && page.askStats.medianConfidence < .5 ? 'warn' : 'ok')
-                    : undefined}
+                  data-ask-mark={page.askStats ? 'active' : undefined}
                   data-ask-count={page.askStats?.count}
                   disabled={missing}
                   key={pageKey(page)}
@@ -305,7 +303,7 @@ function PageRail(props: {
                   <span className="ix-page-copy"><strong>{page.title}</strong><small>{page.id}</small></span>
                   <span className="ix-page-tail">
                     {page.askStats && (
-                      <span className="ix-ask-mark" data-warn={page.askStats.medianConfidence !== null && page.askStats.medianConfidence < .5}>
+                      <span className="ix-ask-mark">
                         {page.askStats.count}
                       </span>
                     )}

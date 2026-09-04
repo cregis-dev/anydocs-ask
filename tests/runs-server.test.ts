@@ -52,6 +52,7 @@ async function setup(opts: {
   runsEnabled: boolean;
   llm?: MockLLM;
   citationCheckEnabled?: boolean;
+  retrieval?: { topK: number; rrfK: number; maxChunksHardCap: number };
 }): Promise<{
   runtime: Runtime;
   llm: MockLLM;
@@ -63,6 +64,7 @@ async function setup(opts: {
   const stateRoot = await fs.mkdtemp(join(tmpdir(), 'anydocs-ask-state-'));
   const { config } = await loadConfig(root);
   config.runs.enabled = opts.runsEnabled;
+  if (opts.retrieval) config.retrieval = opts.retrieval;
   if (opts.citationCheckEnabled) {
     config.citationSemanticCheck.enabled = true;
   }
@@ -98,8 +100,34 @@ function findRunsFile(stateRoot: string): string | null {
   return files[0] ? join(dir, files[0]) : null;
 }
 
+test('Runtime builds a separately configured router model lazily', async () => {
+  const { root, cleanup: cleanupProject } = await buildProject();
+  const stateRoot = await fs.mkdtemp(join(tmpdir(), 'anydocs-ask-router-model-'));
+  const { config } = await loadConfig(root);
+  config.llm.provider = 'mock';
+  config.llm.model = 'answer-model';
+  config.router.model = 'fast-router-model';
+  const runtime = new Runtime({
+    projectRoot: root,
+    stateRoot,
+    config,
+    db: openDatabase({ dbPath: ':memory:' }),
+    embedder: new MockEmbedder(),
+    skipWatcher: true,
+  });
+  try {
+    assert.equal(runtime.llm.model, 'answer-model');
+    assert.equal(runtime.routerLlm.model, 'fast-router-model');
+    assert.notEqual(runtime.routerLlm, runtime.llm);
+  } finally {
+    await runtime.stop();
+    await cleanupProject();
+    await fs.rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
 test('/v1/ask happy path appends one RunRecord with retrieval trace + answer fields', async () => {
-  const { runtime, cleanup, stateRoot } = await setup({ runsEnabled: true });
+  const { runtime, llm, cleanup, stateRoot } = await setup({ runsEnabled: true });
   try {
     const app = createApp({ runtime });
     const res = await app.request('/v1/ask', {
@@ -119,14 +147,62 @@ test('/v1/ask happy path appends one RunRecord with retrieval trace + answer fie
     assert.equal(r.query, '如何鉴权？');
     assert.equal(r.answer.model, 'mock-llm');
     assert.ok(r.answer.latency_ms >= 0);
-    assert.equal(typeof r.answer.confidence, 'number');
+    assert.equal('confidence' in r.answer, false);
     assert.equal(r.answer.tokens_in, null);
     assert.equal(r.answer.tokens_out, null);
     assert.equal(r.feedback.beta, null);
     assert.equal(r.retrieval.subtree_ask_triggered, false);
     assert.ok(Array.isArray(r.retrieval.fused));
+    assert.ok(r.retrieval.fused.length > 0);
+    assert.match(r.retrieval.fused[0]?.content_hash ?? '', /^[0-9a-f]{64}$/);
+    assert.ok(r.retrieval.fused[0]?.text_preview);
+    assert.ok((r.retrieval.fused[0]?.token_count ?? 0) > 0);
+    assert.ok((r.retrieval.selected_context?.length ?? 0) > 0);
+    assert.equal(r.retrieval.selected_context?.[0]?.context_rank, 1);
+    assert.ok((r.retrieval.selected_context?.[0]?.context_token_count ?? 0) > 0);
+    assert.equal(r.retrieval.router_strategy, 'fast_path');
+    assert.deepEqual(Object.keys(r.retrieval.timings ?? {}).sort(), [
+      'embedding_ms',
+      'generation_ms',
+      'rerank_ms',
+      'retrieval_ms',
+      'router_ms',
+    ]);
+    for (const duration of Object.values(r.retrieval.timings ?? {})) {
+      assert.equal(typeof duration, 'number');
+      assert.ok(duration >= 0);
+    }
+    assert.equal(llm.routerCalls.length, 0, 'short standalone asks skip router generation');
+    assert.equal(llm.calls.length, 1, 'only answer generation should use the main LLM');
     // request_id is uuid-shaped
     assert.match(r.request_id, /^[0-9a-f-]{36}$/i);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('/v1/ask uses runtime retrieval configuration', async () => {
+  const { runtime, cleanup, stateRoot } = await setup({
+    runsEnabled: true,
+    retrieval: { topK: 1, rrfK: 5, maxChunksHardCap: 1 },
+  });
+  try {
+    const res = await createApp({ runtime }).request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    assert.equal(res.status, 200);
+
+    const file = findRunsFile(stateRoot);
+    assert.ok(file);
+    const record = JSON.parse(readFileSync(file!, 'utf8').trim()) as RunRecord;
+    assert.equal(record.retrieval.fused.length, 1);
+    const top = record.retrieval.fused[0]!;
+    const ranks = [top.vec_rank, top.bm25_rank, top.exact_rank]
+      .filter((rank): rank is number => typeof rank === 'number');
+    const expected = ranks.reduce((score, rank) => score + 1 / (5 + rank), 0);
+    assert.ok(Math.abs(top.rrf_score - expected) < 1e-12);
   } finally {
     await cleanup();
   }

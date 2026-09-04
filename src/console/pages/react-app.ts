@@ -1,7 +1,7 @@
 import { html, raw } from 'hono/html';
 
 export type ConsoleBootstrap = Record<string, unknown> & {
-  kind: 'home' | 'project' | 'runs' | 'report';
+  kind: 'home' | 'project' | 'runs' | 'run-detail' | 'report';
 };
 
 export function renderReactApp(title: string, bootstrap: ConsoleBootstrap) {

@@ -53,6 +53,23 @@ export type IndexedPageChunks = {
   chunks: IndexedChunkMeta[];
 };
 
+export type IndexedChunkReference = {
+  chunk_id: number;
+  content_hash?: string | null;
+  page_id?: string | null;
+};
+
+export type ResolvedIndexedChunk = {
+  requested_chunk_id: number;
+  requested_content_hash: string | null;
+  /** Legacy IDs cannot be verified after a full reindex without a hash. */
+  match: 'id' | 'id_unverified' | 'content_hash' | 'missing';
+  stale_id: boolean;
+  page: IndexedPageMeta | null;
+  parent: IndexedParentMeta | null;
+  chunk: IndexedChunkMeta | null;
+};
+
 type PageDbRow = Omit<IndexedPageMeta, 'breadcrumb'> & { breadcrumb: string };
 type ChunkDbRow = Omit<
   IndexedChunkMeta,
@@ -131,6 +148,83 @@ export function inspectIndexedPage(
       identifiers: parseIdentifiers(row.identifiers_json),
     })),
   };
+}
+
+/** Resolve persisted run references against the current index in one call. */
+export function resolveIndexedChunks(
+  db: DbHandle,
+  refs: IndexedChunkReference[],
+  embeddingModel: string,
+): ResolvedIndexedChunk[] {
+  const byId = db.prepare(
+    `SELECT chunk_id, page_id, lang, content_hash FROM chunks WHERE chunk_id = ?`,
+  );
+  const byHashAndPage = db.prepare(
+    `SELECT chunk_id, page_id, lang, content_hash
+       FROM chunks
+      WHERE content_hash = ? AND (? IS NULL OR page_id = ?)
+      ORDER BY CASE WHEN page_id = ? THEN 0 ELSE 1 END, chunk_id
+      LIMIT 1`,
+  );
+  const pageCache = new Map<string, IndexedPageChunks | null>();
+
+  return refs.map((ref) => {
+    const requestedHash = ref.content_hash?.trim() || null;
+    const requestedPage = ref.page_id?.trim() || null;
+    type IdentityRow = { chunk_id: number; page_id: string; lang: string; content_hash: string };
+    const idRow = byId.get(ref.chunk_id) as IdentityRow | undefined;
+    const idMatches = Boolean(
+      idRow
+      && (!requestedHash || idRow.content_hash === requestedHash)
+      && (!requestedPage || idRow.page_id === requestedPage),
+    );
+    let row = idMatches ? idRow : undefined;
+    let match: ResolvedIndexedChunk['match'] = requestedHash ? 'id' : 'id_unverified';
+
+    if (!row && requestedHash) {
+      row = byHashAndPage.get(
+        requestedHash,
+        requestedPage,
+        requestedPage,
+        requestedPage,
+      ) as IdentityRow | undefined;
+      match = row ? 'content_hash' : 'missing';
+    } else if (!row) {
+      match = 'missing';
+    }
+
+    if (!row) {
+      return {
+        requested_chunk_id: ref.chunk_id,
+        requested_content_hash: requestedHash,
+        match,
+        stale_id: false,
+        page: null,
+        parent: null,
+        chunk: null,
+      };
+    }
+
+    const cacheKey = `${row.lang}:${row.page_id}`;
+    let pageData = pageCache.get(cacheKey);
+    if (pageData === undefined) {
+      pageData = inspectIndexedPage(db, row.page_id, row.lang, embeddingModel);
+      pageCache.set(cacheKey, pageData);
+    }
+    const chunk = pageData?.chunks.find((item) => item.chunk_id === row!.chunk_id) ?? null;
+    const parent = chunk?.parent_id === null || chunk?.parent_id === undefined
+      ? null
+      : pageData?.parents.find((item) => item.parent_id === chunk.parent_id) ?? null;
+    return {
+      requested_chunk_id: ref.chunk_id,
+      requested_content_hash: requestedHash,
+      match,
+      stale_id: row.chunk_id !== ref.chunk_id,
+      page: pageData?.page ?? null,
+      parent,
+      chunk,
+    };
+  });
 }
 
 function parseStringArray(raw: string | null): string[] {

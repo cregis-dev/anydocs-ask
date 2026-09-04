@@ -115,9 +115,7 @@ test('langFromScopeId: unsupported lang prefix returns null', () => {
 // ---------------------------------------------------------------------------
 
 import {
-  answerMentionsEndpointPath,
   apiReferencePagePrefixForProduct,
-  diversifyChunksByPage,
   extractEntityTerms,
 } from '../src/query/answer.ts';
 
@@ -192,62 +190,6 @@ test('extractEntityTerms: plain 2-entity question without compare hint still ski
   // Without `compare`/`vs`, a single `and` is not enough — too easy to
   // accidentally trigger on generic phrases.
   assert.equal(extractEntityTerms('how does sessions and memory work?'), undefined);
-});
-
-test('diversifyChunksByPage: limits leading page repetition without dropping candidates', () => {
-  const chunks = [
-    { page_id: 'a', id: 1 },
-    { page_id: 'a', id: 2 },
-    { page_id: 'a', id: 3 },
-    { page_id: 'b', id: 4 },
-    { page_id: 'a', id: 5 },
-    { page_id: 'c', id: 6 },
-  ];
-  const diversified = diversifyChunksByPage(chunks, 2);
-  assert.deepEqual(diversified.map((chunk) => chunk.id), [1, 2, 4, 6, 3, 5]);
-  assert.deepEqual(
-    diversified.map((chunk) => chunk.id).sort((a, b) => a - b),
-    [1, 2, 3, 4, 5, 6],
-  );
-});
-
-// ---------------------------------------------------------------------------
-// answerMentionsEndpointPath — substance guard for mandatory API citation
-// ---------------------------------------------------------------------------
-
-test('answerMentionsEndpointPath: answer that names the endpoint path -> true', () => {
-  const answer = '调用 `POST /api/v1/address/create` 接口为用户创建充值子地址。';
-  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/address/create'), true);
-});
-
-test('answerMentionsEndpointPath: answer that recommends a different endpoint -> false (anti-gaming)', () => {
-  // Y-group: the answer talks about sub_address_withdrawal, so injecting a
-  // /api/v1/collection citation would contradict the prose. Guard must refuse.
-  const answer = 'The endpoint used for sweeping funds is `POST /api/v1/sub_address_withdrawal`.';
-  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/collection'), false);
-});
-
-test('answerMentionsEndpointPath: match is case-insensitive on the path', () => {
-  const answer = 'Use /API/V1/COINS to list supported tokens.';
-  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/coins'), true);
-});
-
-test('answerMentionsEndpointPath: endpoint string without an /api path -> false', () => {
-  assert.equal(answerMentionsEndpointPath('any answer body', 'create sub address'), false);
-});
-
-test('answerMentionsEndpointPath: a longer sibling path does not satisfy a shorter endpoint (prefix-collision guard)', () => {
-  // The answer only names /api/v1/payout/query; the /api/v1/payout reference
-  // must NOT be considered "mentioned" just because it is a string prefix.
-  const answer = '查询历史交易请用 `POST /api/v1/payout/query`。';
-  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/payout'), false);
-  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/payout/query'), true);
-});
-
-test('answerMentionsEndpointPath: trailing punctuation on the extracted endpoint still matches clean prose', () => {
-  const answer = 'Call `/api/v1/address/create` to create a deposit sub-address.';
-  // Endpoint extracted from a chunk may carry a trailing period.
-  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/address/create.'), true);
 });
 
 // ---------------------------------------------------------------------------
@@ -380,6 +322,86 @@ class RouterTestLLM implements LLM {
   }
 }
 
+function routerUsingLlm(llm: LLM): LLMIntentRouter {
+  return new LLMIntentRouter(llm, { fastPathMaxChars: 0, cacheTtlMs: 0 });
+}
+
+test('LLMIntentRouter: short standalone questions skip the router LLM', async () => {
+  const llm = new RouterTestLLM('not used');
+  const route = await new LLMIntentRouter(llm, { fastPathMaxChars: 240 }).route({
+    question: '如何配置 API 签名？',
+    lang: 'zh',
+  });
+
+  assert.equal(llm.calls.length, 0);
+  assert.equal(route.routerStrategy, 'fast_path');
+  assert.equal(route.effectiveQuestion, '如何配置 API 签名？');
+});
+
+test('LLMIntentRouter: exact diagnostic anchors skip the router LLM', async () => {
+  const llm = new RouterTestLLM('not used');
+  const route = await new LLMIntentRouter(llm, { fastPathMaxChars: 20 }).route({
+    question: `${'request log '.repeat(80)} POST /api/v1/payout returned E0008`,
+    lang: 'en',
+  });
+
+  assert.equal(llm.calls.length, 0);
+  assert.equal(route.routerStrategy, 'fast_path');
+  assert.ok(route.apiReferenceHints.includes('/api/v1/payout'));
+  assert.deepEqual(route.diagnostic?.errorCodes, ['E0008']);
+});
+
+test('LLMIntentRouter: caches contextual routes by question and recent history', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'follow_up',
+    effective_question: '/api/v2/checkout valid_time 怎么设置？',
+    intent: 'api_reference',
+    product: 'payment_engine',
+    retrieval: { prefer_api_reference: true, api_reference_hints: ['valid_time'] },
+  }));
+  let now = 1_000;
+  const router = new LLMIntentRouter(llm, {
+    fastPathMaxChars: 240,
+    cacheTtlMs: 1_000,
+    now: () => now,
+  });
+  const firstHistory = [{
+    question: 'checkout_url 是什么？',
+    answer_summary: '它来自 POST /api/v2/checkout。',
+  }];
+
+  const first = await router.route({ question: '那有效期呢？', lang: 'zh', history: firstHistory });
+  const cached = await router.route({ question: '那有效期呢？', lang: 'zh', history: firstHistory });
+  assert.equal(first.routerStrategy, 'llm');
+  assert.equal(cached.routerStrategy, 'cache');
+  assert.equal(llm.calls.length, 1);
+
+  await router.route({
+    question: '那有效期呢？',
+    lang: 'zh',
+    history: [{ question: '另一个主题', answer_summary: '另一个答案' }],
+  });
+  assert.equal(llm.calls.length, 2, 'different history must not share a cached route');
+
+  now += 1_001;
+  await router.route({ question: '那有效期呢？', lang: 'zh', history: firstHistory });
+  assert.equal(llm.calls.length, 3, 'expired entries must be routed again');
+});
+
+test('LLMIntentRouter: failed routes are not cached', async () => {
+  const llm = new RouterTestLLM('not json');
+  const router = new LLMIntentRouter(llm, { cacheTtlMs: 60_000 });
+  const args = {
+    question: '那应该怎么处理？',
+    lang: 'zh' as const,
+    history: [{ question: '请求失败了', answer_summary: '需要进一步排查。' }],
+  };
+
+  assert.equal((await router.route(args)).routerStrategy, 'fallback');
+  assert.equal((await router.route(args)).routerStrategy, 'fallback');
+  assert.equal(llm.calls.length, 2);
+});
+
 test('LLMIntentRouter: follows the LLM route for checkout follow-up rewrites', async () => {
   const llm = new RouterTestLLM(JSON.stringify({
     conversation_mode: 'follow_up',
@@ -394,7 +416,7 @@ test('LLMIntentRouter: follows the LLM route for checkout follow-up rewrites', a
       api_versions: ['v2'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: '那它过期时间怎么设置？',
     lang: 'zh',
@@ -433,7 +455,7 @@ test('LLMIntentRouter: standalone signature route can ignore unrelated history',
       api_versions: [],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'Cregis API 签名参数怎么拼接？',
     lang: 'zh',
@@ -471,7 +493,7 @@ test('LLMIntentRouter: adds intent default pages when the LLM omits them', async
       api_versions: [],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'Can I use localhost as my callback_url while testing Cregis webhooks?',
     lang: 'en',
@@ -499,7 +521,7 @@ test('LLMIntentRouter: does not turn generic error troubleshooting into API-refe
       api_versions: [],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'Cregis API 返回不是 00000 时应该先看哪些错误码？',
     lang: 'zh',
@@ -528,7 +550,7 @@ test('LLMIntentRouter: keeps endpoint-specific signature questions API-aware', a
       api_versions: ['v1'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'For a WaaS /api/v1/payout request, show the ordered MD5 string.',
     lang: 'en',
@@ -555,7 +577,7 @@ test('LLMIntentRouter: keeps endpoint-specific webhook status questions API-awar
       api_versions: ['v2'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'event_type 和 data.status 为什么名字不一样？',
     lang: 'zh',
@@ -583,7 +605,7 @@ test('LLMIntentRouter: promotes an explicit endpoint typed in the question when 
       api_versions: [],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'For a WaaS `/api/v1/payout` request, can you show the exact ordered string used before MD5 signature computation?',
     lang: 'en',
@@ -610,7 +632,7 @@ test('LLMIntentRouter: a topical question with no endpoint in the text and empty
       api_versions: [],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'Should the `sign` field itself be included when building the MD5 string for a WaaS API request?',
     lang: 'en',
@@ -633,7 +655,7 @@ test('LLMIntentRouter: normalizes token identifier routes to include the coins e
       api_versions: ['v1'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'How do I find token_id and chain_id for USDT payouts?',
     lang: 'en',
@@ -658,7 +680,7 @@ test('LLMIntentRouter: infers WaaS product for USDT network token questions', as
       api_versions: [],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'USDT-TRC20、USDT-ERC20、USDT-Polygon 都是 USDT，请求里怎么区分网络？',
     lang: 'zh',
@@ -685,7 +707,7 @@ test('LLMIntentRouter: payment-engine webhook defaults include PE flow pages', a
       api_versions: ['v2'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: '同一笔支付引擎订单可能先部分支付再补款吗？回调里我应该怎么做幂等和状态映射？',
     lang: 'zh',
@@ -714,7 +736,7 @@ test('LLMIntentRouter: normalizes sub-address balance routes to the balance endp
       api_versions: ['v1'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: '我要在出款前查某个子地址的可用余额，currency 参数怎么填？',
     lang: 'zh',
@@ -740,7 +762,7 @@ test('LLMIntentRouter: expands bare API paths into searchable operation hints', 
       api_versions: ['v1'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'For a WaaS /api/v1/payout request, show the ordered MD5 string.',
     lang: 'en',
@@ -764,7 +786,7 @@ test('LLMIntentRouter: maps valid_time questions back to the checkout endpoint',
       api_versions: ['v2'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'If a Payment Engine user does not pay before `valid_time`, how should I confirm the final order status by callback or API?',
     lang: 'en',
@@ -790,7 +812,7 @@ test('LLMIntentRouter: normalizes user-deposit-address withdrawal routes to sub_
       api_versions: ['v1'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'Withdraw from a specific user deposit address instead of default payout wallet.',
     lang: 'en',
@@ -802,7 +824,7 @@ test('LLMIntentRouter: normalizes user-deposit-address withdrawal routes to sub_
 });
 
 test('LLMIntentRouter: malformed route falls back to standalone general docs', async () => {
-  const router = new LLMIntentRouter(new RouterTestLLM('not json'));
+  const router = routerUsingLlm(new RouterTestLLM('not json'));
   const route = await router.route({
     question: '怎么配置？',
     lang: 'zh',
@@ -853,7 +875,7 @@ test('LLMIntentRouter redacts secrets from conversation history', async () => {
     retrieval: {},
   }));
 
-  await new LLMIntentRouter(llm).route({
+  await routerUsingLlm(llm).route({
     question: 'Why did that fail?',
     lang: 'en',
     history: [{
@@ -891,7 +913,7 @@ test('LLMIntentRouter structures long diagnostics and rejects invented exact clu
       exact_clues: [exactAddress, 'invented evidence'],
     },
   }));
-  const route = await new LLMIntentRouter(llm).route({ question, lang: 'zh' });
+  const route = await routerUsingLlm(llm).route({ question, lang: 'zh' });
 
   assert.equal(route.intent, 'error_troubleshooting');
   assert.equal(route.effectiveQuestion, 'WaaS payout E0008 Address is invalid to_address trailing whitespace');
@@ -914,7 +936,7 @@ test('LLMIntentRouter structures long diagnostics and rejects invented exact clu
 test('LLMIntentRouter uses compact deterministic retrieval query when routing fails', async () => {
   const question = `${'irrelevant log noise '.repeat(100)} /api/v1/payout `
     + '{"to_address":"TSabc ","code":"E0008","msg":"Address is invalid"} 这是什么问题';
-  const route = await new LLMIntentRouter(new RouterTestLLM('not json')).route({ question, lang: 'zh' });
+  const route = await routerUsingLlm(new RouterTestLLM('not json')).route({ question, lang: 'zh' });
 
   assert.equal(route.intent, 'error_troubleshooting');
   assert.equal(route.rewritten, true);

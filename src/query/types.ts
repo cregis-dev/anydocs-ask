@@ -24,7 +24,8 @@ export type AskRequest = {
      *   1. History-aware retrieve (M1, RFC §4.2). Only `question` strings
      *      are spliced into the embedding query — vector retrieval inherits
      *      dialogue context so pronoun-only follow-ups land near the right
-     *      subtree. BM25 / entity injection stay on the current question.
+     *      subtree. Lexical and exact-identifier queries remain explicit and
+     *      independently traceable.
      *   2. Multi-turn prompt (M2, RFC §4.1). Both `question` and
      *      `answer_summary` (≤ 200 chars per RFC §4.3) feed into the prompt
      *      so Claude can resolve pronouns against the actual prior turn.
@@ -41,7 +42,7 @@ export type AskRequest = {
     }>;
   };
   options?: {
-    /** Cap chunks injected into the prompt. Server applies a hard ceiling. */
+    /** Cap chunks included in the prompt. Server applies a hard ceiling. */
     max_chunks?: number;
     /** Override LLM model; null/undefined means "use server default". */
     model?: string | null;

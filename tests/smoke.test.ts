@@ -648,6 +648,49 @@ test('GET /v1/index/chunks returns page metadata and inspectable chunks', async 
   }
 });
 
+test('POST /v1/index/chunks/resolve uses content hash after numeric ids change', async () => {
+  const { runtime, cleanup } = await makeRuntime();
+  try {
+    await runtime.start();
+    const app = createApp({ runtime });
+    const before = (await (await app.request('/v1/index/chunks?page_id=auth&lang=zh')).json()) as {
+      chunks: Array<{ chunk_id: number; content_hash: string; text: string }>;
+    };
+    const original = before.chunks[0]!;
+
+    const exact = await app.request('/v1/index/chunks/resolve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chunks: [{ chunk_id: original.chunk_id, content_hash: original.content_hash, page_id: 'auth' }] }),
+    });
+    assert.equal(exact.status, 200);
+    const exactBody = (await exact.json()) as { chunks: Array<{ match: string; stale_id: boolean; chunk: { text: string } }> };
+    assert.equal(exactBody.chunks[0]?.match, 'id');
+    assert.equal(exactBody.chunks[0]?.stale_id, false);
+    assert.match(exactBody.chunks[0]?.chunk.text ?? '', /JWT bearer token/);
+
+    await runtime.forceReindex();
+    const after = await app.request('/v1/index/chunks/resolve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chunks: [{ chunk_id: original.chunk_id, content_hash: original.content_hash, page_id: 'auth' }] }),
+    });
+    const afterBody = (await after.json()) as { chunks: Array<{ match: string; stale_id: boolean; chunk: { chunk_id: number } }> };
+    assert.equal(afterBody.chunks[0]?.match, 'content_hash');
+    assert.equal(afterBody.chunks[0]?.stale_id, true);
+    assert.notEqual(afterBody.chunks[0]?.chunk.chunk_id, original.chunk_id);
+
+    const invalid = await app.request('/v1/index/chunks/resolve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chunks: [{ chunk_id: 0 }] }),
+    });
+    assert.equal(invalid.status, 400);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('POST /v1/index/rebuild reruns fullReindex with cache hits', async () => {
   const { runtime, cleanup } = await makeRuntime();
   try {

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { DocsLang } from '../anydocs/types.ts';
 import type { LLM } from '../llm/types.ts';
 import {
@@ -46,6 +47,8 @@ export type IntentRoute = {
   apiReferenceVersionPrefs: string[];
   /** Structured troubleshooting context for long JSON/log questions. */
   diagnostic?: DiagnosticContext;
+  /** How this route was resolved. Useful for latency and cache diagnostics. */
+  routerStrategy?: 'fast_path' | 'cache' | 'llm' | 'fallback' | 'disabled';
   reason: string | null;
 };
 
@@ -58,6 +61,14 @@ export type IntentRouterArgs = {
 export interface IntentRouter {
   route(args: IntentRouterArgs): Promise<IntentRoute>;
 }
+
+export type LLMIntentRouterOptions = {
+  enabled?: boolean;
+  fastPathMaxChars?: number;
+  cacheTtlMs?: number;
+  cacheMaxEntries?: number;
+  now?: () => number;
+};
 
 const ROUTER_SYSTEM_PROMPT = `ANYDOCS_INTENT_ROUTER_V2
 You route documentation questions before retrieval. Return JSON only, no markdown.
@@ -141,20 +152,41 @@ const DEFAULT_SUPPLEMENTAL_PAGE_IDS: Record<IntentName, string[]> = {
 };
 
 export class LLMIntentRouter implements IntentRouter {
-  private readonly llm: LLM;
+  private readonly resolveLlm: () => LLM;
+  private readonly enabled: boolean;
+  private readonly fastPathMaxChars: number;
+  private readonly cacheTtlMs: number;
+  private readonly cacheMaxEntries: number;
+  private readonly now: () => number;
+  private readonly cache = new Map<string, { expiresAt: number; route: IntentRoute }>();
 
-  constructor(llm: LLM) {
-    this.llm = llm;
+  constructor(llm: LLM | (() => LLM), opts: LLMIntentRouterOptions = {}) {
+    this.resolveLlm = typeof llm === 'function' ? llm : () => llm;
+    this.enabled = opts.enabled ?? true;
+    this.fastPathMaxChars = opts.fastPathMaxChars ?? 240;
+    this.cacheTtlMs = opts.cacheTtlMs ?? 300_000;
+    this.cacheMaxEntries = opts.cacheMaxEntries ?? 512;
+    this.now = opts.now ?? Date.now;
   }
 
   async route(args: IntentRouterArgs): Promise<IntentRoute> {
     const question = args.question.trim();
-    if (!question) return fallbackRoute(question);
+    if (!question) return fallbackRoute(question, undefined, 'router_empty', 'fallback');
     const prepared = prepareDiagnosticInput(question);
+    if (!this.enabled) {
+      return fallbackRoute(question, prepared, 'router_disabled', 'disabled');
+    }
+    if (shouldUseRouterFastPath(args, prepared, this.fastPathMaxChars)) {
+      return fallbackRoute(question, prepared, 'router_fast_path', 'fast_path');
+    }
+
+    const cacheKey = this.cacheKey(args, prepared.safeQuestion);
+    const cached = this.readCache(cacheKey);
+    if (cached) return cached;
 
     let raw: string;
     try {
-      const out = await this.llm.generate({
+      const out = await this.resolveLlm().generate({
         systemPrompt: ROUTER_SYSTEM_PROMPT,
         userPrompt: JSON.stringify({
           question: prepared.safeQuestion,
@@ -165,22 +197,64 @@ export class LLMIntentRouter implements IntentRouter {
           })),
         }),
         temperature: 0,
-        maxTokens: 900,
+        maxTokens: 500,
       });
       raw = out.text;
     } catch {
-      return fallbackRoute(question, prepared);
+      return fallbackRoute(question, prepared, 'router_fallback', 'fallback');
     }
 
     const parsed = parseRouterJson(raw);
-    if (!parsed) return fallbackRoute(question, prepared);
-    return normalizeRoute(question, parsed, args.history ?? [], prepared);
+    if (!parsed) {
+      return fallbackRoute(question, prepared, 'router_fallback', 'fallback');
+    }
+    return this.remember(
+      cacheKey,
+      { ...normalizeRoute(question, parsed, args.history ?? [], prepared), routerStrategy: 'llm' },
+    );
+  }
+
+  private cacheKey(args: IntentRouterArgs, safeQuestion: string): string {
+    const history = (args.history ?? []).slice(-3).map((turn) => ({
+      question: redactSensitiveText(turn.question),
+      answer_summary: redactSensitiveText(turn.answer_summary),
+    }));
+    return createHash('sha256')
+      .update(JSON.stringify({ lang: args.lang, question: safeQuestion, history }))
+      .digest('hex');
+  }
+
+  private readCache(key: string): IntentRoute | null {
+    if (this.cacheTtlMs === 0) return null;
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+    if (entry.expiresAt <= this.now()) {
+      this.cache.delete(key);
+      return null;
+    }
+    this.cache.delete(key);
+    this.cache.set(key, entry);
+    return { ...entry.route, routerStrategy: 'cache', reason: 'router_cache_hit' };
+  }
+
+  private remember(key: string, route: IntentRoute): IntentRoute {
+    if (this.cacheTtlMs === 0) return route;
+    this.cache.delete(key);
+    this.cache.set(key, { expiresAt: this.now() + this.cacheTtlMs, route });
+    while (this.cache.size > this.cacheMaxEntries) {
+      const oldest = this.cache.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.cache.delete(oldest);
+    }
+    return route;
   }
 }
 
 export function fallbackRoute(
   question: string,
   prepared: PreparedDiagnosticInput = prepareDiagnosticInput(question),
+  reason = 'router_fallback',
+  routerStrategy: IntentRoute['routerStrategy'] = 'fallback',
 ): IntentRoute {
   const diagnostic = prepared.diagnostic;
   return {
@@ -206,8 +280,24 @@ export function fallbackRoute(
     supplementalPageIds: diagnostic.structured ? ['error-codes'] : [],
     apiReferenceVersionPrefs: [],
     ...(diagnostic.structured ? { diagnostic } : {}),
-    reason: 'router_fallback',
+    routerStrategy,
+    reason,
   };
+}
+
+function shouldUseRouterFastPath(
+  args: IntentRouterArgs,
+  prepared: PreparedDiagnosticInput,
+  fastPathMaxChars: number,
+): boolean {
+  if (fastPathMaxChars <= 0) return false;
+  const diagnostic = prepared.diagnostic;
+  const hasExactDiagnosticAnchor = diagnostic.endpoints.length > 0
+    || diagnostic.errorCodes.length > 0
+    || diagnostic.exceptionNames.length > 0;
+  if (hasExactDiagnosticAnchor) return true;
+  if ((args.history?.length ?? 0) > 0) return false;
+  return prepared.safeQuestion.length <= fastPathMaxChars && !diagnostic.structured;
 }
 
 type RawRoute = {
@@ -276,11 +366,9 @@ function normalizeRoute(
   );
   // When the user literally types an API endpoint path in the question
   // (e.g. "for a WaaS `/api/v1/payout` request …"), that is an unambiguous
-  // API-reference signal. The LLM router sometimes buckets such queries'
-  // hints into supplemental_context_hints and leaves api_reference_hints
-  // empty, which keeps apiIntent=false and skips reference-citation injection.
-  // Promote explicit endpoints from the question text so the deterministic
-  // gate doesn't depend on the LLM remembering to fill the right bucket.
+  // API-reference signal. Preserve explicit endpoints in route diagnostics
+  // even when the LLM places them under supplemental_context_hints. Ranking
+  // does not consume these hints; exact endpoint extraction happens locally.
   const questionEndpointHints = extractEndpointHintsFromQuestion(prepared.safeQuestion, effectiveQuestion);
   const apiReferenceHints = normalizeApiReferenceHints(
     intent,

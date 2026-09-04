@@ -21,7 +21,6 @@ export type TrafficViewOptions = {
   query: string;
   source: '' | 'reader' | 'console' | 'mcp';
   kind: '' | 'answer' | 'clarify' | 'error';
-  minConfidence: null | 0.4 | 0.6 | 0.8;
   page: number;
   pageSize: 25 | 50 | 100;
 };
@@ -55,7 +54,6 @@ export type TrafficTotals = {
   countReader: number;
   countConsole: number;
   countMcp: number;
-  meanConfidence: number | null;
   p50LatencyMs: number | null;
   p95LatencyMs: number | null;
   /** Fraction of records where answer.kind === 'error'. */
@@ -68,7 +66,6 @@ export type PerDayBucket = {
   /** "YYYY-MM-DD" — UTC date. */
   date: string;
   count: number;
-  meanConfidence: number | null;
   p95LatencyMs: number | null;
 };
 
@@ -79,7 +76,6 @@ export function parseTrafficViewOptions(input: {
   query?: string;
   source?: string;
   kind?: string;
-  minConfidence?: string;
   page?: string;
   pageSize?: string;
 }): TrafficViewOptions {
@@ -95,10 +91,6 @@ export function parseTrafficViewOptions(input: {
     input.kind === 'answer' || input.kind === 'clarify' || input.kind === 'error'
       ? input.kind
       : '';
-  const confidence = Number(input.minConfidence);
-  const minConfidence = confidence === 0.4 || confidence === 0.6 || confidence === 0.8
-    ? confidence
-    : null;
   const rawPage = Number.parseInt(input.page ?? '', 10);
   const page = Number.isFinite(rawPage) && rawPage > 0 ? rawPage : 1;
   const rawPageSize = Number(input.pageSize);
@@ -108,7 +100,6 @@ export function parseTrafficViewOptions(input: {
     query: (input.query ?? '').trim().slice(0, 200),
     source,
     kind,
-    minConfidence,
     page,
     pageSize,
   };
@@ -145,10 +136,6 @@ export function paginateTrafficRecords(
     if (query && !record.query.toLowerCase().includes(query)) return false;
     if (options.source && runSource(record) !== options.source) return false;
     if (options.kind && record.answer.kind !== options.kind) return false;
-    if (
-      options.minConfidence !== null
-      && record.answer.confidence < options.minConfidence
-    ) return false;
     return true;
   });
   const totalRecords = filtered.length;
@@ -177,14 +164,12 @@ function computeTotals(records: RunRecord[]): TrafficTotals {
     countReader: 0,
     countConsole: 0,
     countMcp: 0,
-    meanConfidence: null,
     p50LatencyMs: null,
     p95LatencyMs: null,
     errorRate: 0,
     clarifyRate: 0,
   };
   if (records.length === 0) return totals;
-  const confs: number[] = [];
   const lats: number[] = [];
   let errs = 0;
   let clarifies = 0;
@@ -193,12 +178,10 @@ function computeTotals(records: RunRecord[]): TrafficTotals {
     if (src === 'console') totals.countConsole++;
     else if (src === 'mcp') totals.countMcp++;
     else totals.countReader++;
-    if (r.answer.confidence !== null) confs.push(r.answer.confidence);
     lats.push(r.answer.latency_ms);
     if (r.answer.kind === 'error') errs++;
     else if (r.answer.kind === 'clarify') clarifies++;
   }
-  totals.meanConfidence = confs.length > 0 ? mean(confs) : null;
   totals.p50LatencyMs = percentile(lats, 50);
   totals.p95LatencyMs = percentile(lats, 95);
   totals.errorRate = errs / records.length;
@@ -220,12 +203,10 @@ function bucketByDay(records: RunRecord[], sinceMs: number, days: number): PerDa
   }
   const out: PerDayBucket[] = [];
   for (const [date, rs] of buckets) {
-    const confs = rs.map((r) => r.answer.confidence).filter((c): c is number => c !== null);
     const lats = rs.map((r) => r.answer.latency_ms);
     out.push({
       date,
       count: rs.length,
-      meanConfidence: confs.length > 0 ? mean(confs) : null,
       p95LatencyMs: lats.length > 0 ? percentile(lats, 95) : null,
     });
   }
@@ -241,23 +222,13 @@ function bucketObservedDays(records: RunRecord[]): PerDayBucket[] {
     else buckets.set(date, [record]);
   }
   return [...buckets.entries()].map(([date, dayRecords]) => {
-    const confs = dayRecords
-      .map((record) => record.answer.confidence)
-      .filter((confidence): confidence is number => confidence !== null);
     const latencies = dayRecords.map((record) => record.answer.latency_ms);
     return {
       date,
       count: dayRecords.length,
-      meanConfidence: confs.length > 0 ? mean(confs) : null,
       p95LatencyMs: latencies.length > 0 ? percentile(latencies, 95) : null,
     };
   });
-}
-
-function mean(xs: number[]): number {
-  let s = 0;
-  for (const x of xs) s += x;
-  return s / xs.length;
 }
 
 function percentile(xs: number[], p: number): number | null {

@@ -1,4 +1,4 @@
-import type { IndexedPageChunks } from './types';
+import type { IndexedPageChunks, ResolvedIndexedChunk } from './types';
 
 export async function readJson<T>(response: Response): Promise<T> {
   const body = await response.json() as T & { error?: string; message?: string };
@@ -43,4 +43,19 @@ export async function rebuildIndex(projectName: string): Promise<void> {
     headers: { Accept: 'application/json' },
   });
   await readJson<{ ok: boolean }>(response);
+}
+
+export async function resolveRunChunks(
+  projectName: string,
+  chunks: Array<{ chunk_id: number; content_hash?: string; page_id?: string }>,
+): Promise<ResolvedIndexedChunk[]> {
+  const response = await fetch(
+    `/api/projects/${encodeURIComponent(projectName)}/index/chunks/resolve`,
+    {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chunks }),
+    },
+  );
+  return (await readJson<{ chunks: ResolvedIndexedChunk[] }>(response)).chunks;
 }

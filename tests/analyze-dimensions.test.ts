@@ -8,7 +8,6 @@ function fakeRun(over: {
   ts?: string;
   session_id?: string | null;
   query?: string;
-  confidence?: number;
   citations?: number;
   latency_ms?: number;
   fused?: { page: string }[];
@@ -43,7 +42,6 @@ function fakeRun(over: {
         page: 'home',
         quote: 'q',
       })),
-      confidence: over.confidence ?? 0.6,
       latency_ms: over.latency_ms ?? 1000,
       tokens_in: null,
       tokens_out: null,
@@ -58,20 +56,17 @@ function fakeRun(over: {
 // D1: recall failures
 // ---------------------------------------------------------------------------
 
-test('D1: low confidence trips recall', () => {
+test('D1: cited answer does not trip recall', () => {
   const out = analyzeDimensions({
-    runs: [fakeRun({ request_id: 'r1', confidence: 0.2 })],
-    confidenceFloor: 0.4,
+    runs: [fakeRun({ request_id: 'r1' })],
     latencyP95Threshold: 3000,
   });
-  assert.equal(out.recall.count, 1);
-  assert.deepEqual(out.recall.clusters[0]!.triggers, ['low-confidence']);
+  assert.equal(out.recall.count, 0);
 });
 
 test('D1: zero citations on answer kind trips recall', () => {
   const out = analyzeDimensions({
-    runs: [fakeRun({ request_id: 'r1', confidence: 0.9, citations: 0, kind: 'answer' })],
-    confidenceFloor: 0.4,
+    runs: [fakeRun({ request_id: 'r1', citations: 0, kind: 'answer' })],
     latencyP95Threshold: 3000,
   });
   assert.equal(out.recall.count, 1);
@@ -81,19 +76,17 @@ test('D1: zero citations on answer kind trips recall', () => {
 test('D1: error kind with empty citations does NOT trip no-citations', () => {
   // Error responses already accounted for; analyze should not double-count.
   const out = analyzeDimensions({
-    runs: [fakeRun({ request_id: 'r1', confidence: 0.9, citations: 0, kind: 'error' })],
-    confidenceFloor: 0.4,
+    runs: [fakeRun({ request_id: 'r1', citations: 0, kind: 'error' })],
     latencyP95Threshold: 3000,
   });
   assert.equal(out.recall.count, 0);
 });
 
-test('D1: error kind with low confidence does NOT trip recall', () => {
-  // Validation / client errors have confidence=0 by definition; they are not
-  // retrieval failures and must not pollute the recall-failure report.
+test('D1: error kind does NOT trip recall', () => {
+  // Validation and client errors are not retrieval failures and must not
+  // pollute the recall-failure report.
   const out = analyzeDimensions({
-    runs: [fakeRun({ request_id: 'r1', confidence: 0, citations: 0, kind: 'error' })],
-    confidenceFloor: 0.4,
+    runs: [fakeRun({ request_id: 'r1', citations: 0, kind: 'error' })],
     latencyP95Threshold: 3000,
   });
   assert.equal(out.recall.count, 0);
@@ -107,7 +100,6 @@ test('D1: re-ask within 30s with small edit distance flags earlier query', () =>
         session_id: 's1',
         ts: '2026-05-09T12:00:00.000Z',
         query: 'how do I install hermes',
-        confidence: 0.9,
         citations: 1,
       }),
       fakeRun({
@@ -115,11 +107,9 @@ test('D1: re-ask within 30s with small edit distance flags earlier query', () =>
         session_id: 's1',
         ts: '2026-05-09T12:00:15.000Z', // +15s
         query: 'how do i instal hermes', // edit dist 2
-        confidence: 0.9,
         citations: 1,
       }),
     ],
-    confidenceFloor: 0.4,
     latencyP95Threshold: 3000,
   });
   assert.equal(out.recall.count, 1);
@@ -136,7 +126,6 @@ test('D1: re-ask outside 30s does not flag', () => {
         session_id: 's1',
         ts: '2026-05-09T12:00:00.000Z',
         query: 'install',
-        confidence: 0.9,
         citations: 1,
       }),
       fakeRun({
@@ -144,24 +133,21 @@ test('D1: re-ask outside 30s does not flag', () => {
         session_id: 's1',
         ts: '2026-05-09T12:01:00.000Z', // +60s
         query: 'install',
-        confidence: 0.9,
         citations: 1,
       }),
     ],
-    confidenceFloor: 0.4,
     latencyP95Threshold: 3000,
   });
   assert.equal(out.recall.count, 0);
 });
 
-test('D1: clusters bucket low-confidence runs with similar queries', () => {
+test('D1: clusters bucket uncited runs with similar queries', () => {
   const out = analyzeDimensions({
     runs: [
-      fakeRun({ request_id: 'a', confidence: 0.1, query: 'how do I install' }),
-      fakeRun({ request_id: 'b', confidence: 0.1, query: 'how do i install?' }),
-      fakeRun({ request_id: 'c', confidence: 0.1, query: 'completely different question entirely' }),
+      fakeRun({ request_id: 'a', citations: 0, query: 'how do I install' }),
+      fakeRun({ request_id: 'b', citations: 0, query: 'how do i install?' }),
+      fakeRun({ request_id: 'c', citations: 0, query: 'completely different question entirely' }),
     ],
-    confidenceFloor: 0.4,
     latencyP95Threshold: 3000,
   });
   assert.equal(out.recall.count, 3);

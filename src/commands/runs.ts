@@ -59,10 +59,9 @@ function formatTailLine(line: RunsLine): string {
   }
   const r = line;
   const kind = r.answer.kind.padEnd(7);
-  const conf = r.answer.confidence.toFixed(3);
   const lat = `${r.answer.latency_ms}ms`.padStart(7);
   const q = r.query.length > 60 ? `${r.query.slice(0, 57)}...` : r.query;
-  return `${r.ts} ${kind} conf=${conf} ${lat} ${JSON.stringify(q)}`;
+  return `${r.ts} ${kind} ${lat} ${JSON.stringify(q)}`;
 }
 
 export type RunsExportOptions = {
@@ -89,7 +88,7 @@ export function runRunsExport(opts: RunsExportOptions): number {
 
   if (opts.format === 'csv') {
     process.stdout.write(
-      ['ts', 'request_id', 'kind', 'confidence', 'latency_ms', 'model', 'query'].join(',') + '\n',
+      ['ts', 'request_id', 'kind', 'latency_ms', 'model', 'query'].join(',') + '\n',
     );
   }
   let count = 0;
@@ -120,7 +119,6 @@ function toCsvRow(r: RunRecord): string {
     escape(r.ts),
     escape(r.request_id),
     escape(r.answer.kind),
-    escape(r.answer.confidence.toFixed(4)),
     escape(r.answer.latency_ms),
     escape(r.answer.model),
     escape(r.query),

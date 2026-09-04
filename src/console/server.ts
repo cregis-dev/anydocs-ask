@@ -62,6 +62,7 @@ import {
   type CreateFromRunInput,
 } from './golden-workshop-state.ts';
 import { createConsoleAuth, renderLoginPage } from './auth.ts';
+import { loadRunDetail } from './run-detail-state.ts';
 
 export type ConsoleAppDeps = {
   workspacePath: string;
@@ -422,7 +423,6 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       query: c.req.query('traffic_q'),
       source: c.req.query('traffic_source'),
       kind: c.req.query('traffic_kind'),
-      minConfidence: c.req.query('traffic_conf'),
       page: c.req.query('traffic_page'),
       pageSize: c.req.query('traffic_page_size'),
     });
@@ -623,6 +623,33 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     }));
   });
 
+  app.get('/p/:name/runs/:requestId', (c) => {
+    const name = c.req.param('name');
+    const project = findProject(deps.workspacePath, name);
+    if (!project) return c.text(`unknown project: ${name}`, 404);
+    const stateRoot = projectStateRoot(deps.workspacePath, project);
+    if (!stateRoot) return c.text(`project '${name}' has no projectId`, 400);
+    const requestId = c.req.param('requestId');
+    const run = loadRunDetail(stateRoot, requestId);
+    if (!run) return c.text(`run not found: ${requestId}`, 404);
+    const nav = buildNav(name);
+    const returnTo = safeRunReturnTarget(c.req.query('return'), name);
+    return c.html(renderReactApp(`${name} · run`, {
+      kind: 'run-detail',
+      projectName: name,
+      run,
+      childLive: deps.registry.getPort(name) !== null,
+      returnTo,
+      navigation: {
+        projects: nav.projects,
+        running: [...nav.running],
+        consolePort: nav.consolePort,
+        authEnabled: nav.authEnabled,
+        publicRootPath: nav.publicRootPath,
+      },
+    }));
+  });
+
   app.get('/api/projects/:name/runs', (c) => {
     const name = c.req.param('name');
     const project = findProject(deps.workspacePath, name);
@@ -809,6 +836,35 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const query = new URLSearchParams({ page_id: pageId, lang });
     try {
       const res = await fetchFn(`http://127.0.0.1:${port}/v1/index/chunks?${query}`, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      const body = await res.text();
+      return new Response(body, {
+        status: res.status,
+        headers: {
+          'Content-Type': res.headers.get('content-type') ?? 'application/json',
+          'Cache-Control': 'no-store',
+        },
+      });
+    } catch (err) {
+      return c.json({ ok: false, error: `proxy failed: ${(err as Error).message}` }, 502);
+    }
+  });
+
+  app.post('/api/projects/:name/index/chunks/resolve', async (c) => {
+    const name = c.req.param('name');
+    const project = findProject(deps.workspacePath, name);
+    if (!project) return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
+    const port = deps.registry.getPort(name);
+    if (port === null) {
+      return c.json({ ok: false, error: 'child not running — start the project first' }, 502);
+    }
+    deps.registry.touch(name);
+    try {
+      const res = await fetchFn(`http://127.0.0.1:${port}/v1/index/chunks/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: await c.req.text(),
         signal: AbortSignal.timeout(2_000),
       });
       const body = await res.text();
@@ -1349,6 +1405,18 @@ function normalizePublicRootPath(value: string | undefined): string {
   const path = value?.trim() || '/';
   if (!path.startsWith('/') || path.startsWith('//')) return '/';
   return path.endsWith('/') ? path : `${path}/`;
+}
+
+function safeRunReturnTarget(value: string | undefined, projectName: string): string {
+  const fallback = `/p/${encodeURIComponent(projectName)}?traffic_range=all#traffic`;
+  const target = value?.trim();
+  if (!target || !target.startsWith('/') || target.startsWith('//')) return fallback;
+  const projectPrefix = `/p/${encodeURIComponent(projectName)}`;
+  return target === projectPrefix
+    || target.startsWith(`${projectPrefix}?`)
+    || target.startsWith(`${projectPrefix}#`)
+    ? target
+    : fallback;
 }
 
 function clientAddress(c: { req: { header(name: string): string | undefined } }): string {

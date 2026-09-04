@@ -10,8 +10,8 @@
  * Data sources:
  *   • feedback table        — row count, signal_source split, list rows
  *                             (read-only via shared openDatabase helper)
- *   • runs.jsonl (7d window)— JOIN on answer_id to recover confidence +
- *                             non-answer rate per rated run
+ *   • runs.jsonl (7d window)— JOIN on answer_id to recover answer outcome,
+ *                             citations, and session metadata
  *
  * The runs JOIN is read-on-render — the console is a local dev tool and
  * the 7-day jsonl scan is the same cost Traffic already pays. We do NOT
@@ -75,8 +75,6 @@ export type FeedbackKpi = {
   implicitCount: number;
   /** explicit / (explicit + implicit). null when both are 0. */
   explicitShare: number | null;
-  /** Mean answer.confidence across runs that have ≥1 feedback row. */
-  meanConfidence: number | null;
   /** (error + clarify) / runs-with-feedback. 0 when no runs-with-feedback. */
   nonAnswerRate: number;
   /** RFC 0006 A7 — A+ cluster count surfaced by [[loadSuggestions]] from
@@ -105,10 +103,6 @@ export type FeedbackRowVM = {
    *  null when `currentPageId` is null, OR when no page row matches (page
    *  unpublished / deleted since the feedback row was written). */
   breadcrumb: BreadcrumbNode[] | null;
-  /** From runs.jsonl JOIN on answer_id. null if no matching run line in
-   *  the window (rare — rows can pre-date runs.enabled or the runs file
-   *  rolled out of the window). */
-  confidence: number | null;
   /** From runs.jsonl JOIN on answer_id. true when the linked run produced
    *  an answer with zero citations (or kind='error'). null when no
    *  matching run line. Drives the `no_citations` chip badge + per-row
@@ -257,7 +251,7 @@ function computeSnapshot(
   // Build the runs.jsonl JOIN once for the full window, restricted to the
   // answer_ids that have feedback (signal_source IN explicit/implicit) in
   // the window. The result drives chip counts, KPI math, AND per-row
-  // confidence/no_citations — keeping a single scan instead of two like
+  // outcome/no_citations — keeping a single scan instead of two like
   // T1-b had.
   const inWindowFeedbackIds = new Set<string>();
   for (const r of inWindow) {
@@ -407,7 +401,6 @@ function computeSnapshot(
       answerId: r.answer_id,
       currentPageId: r.current_page_id,
       breadcrumb: r.current_page_id ? breadcrumbs.get(r.current_page_id) ?? null : null,
-      confidence: runMeta?.confidence ?? null,
       hadNoCitations: runMeta?.citationsEmpty ?? null,
       sessionId,
       historyWindow: runMeta?.historyWindow ?? null,
@@ -421,11 +414,9 @@ function computeSnapshot(
     };
   });
 
-  // KPI mean confidence + non-answer rate use the same runIndex —
+  // KPI non-answer rate uses the same runIndex —
   // semantics: "across rated runs" = runs in the window that have ≥1
   // feedback row (curated included since they're rated post-hoc).
-  let confSum = 0;
-  let confN = 0;
   let nonAnswer = 0;
   let ratedN = 0;
   const allFeedbackAnswerIds = db
@@ -446,10 +437,6 @@ function computeSnapshot(
         );
   for (const v of ratedRunIndex.values()) {
     ratedN++;
-    if (typeof v.confidence === 'number') {
-      confSum += v.confidence;
-      confN++;
-    }
     if (v.kind === 'error' || v.kind === 'clarify') nonAnswer++;
   }
 
@@ -470,7 +457,6 @@ function computeSnapshot(
       explicitCount,
       implicitCount,
       explicitShare,
-      meanConfidence: confN > 0 ? confSum / confN : null,
       nonAnswerRate: ratedN > 0 ? nonAnswer / ratedN : 0,
       aplusCandidates:
         suggestions.entries.length > 0
@@ -631,7 +617,6 @@ function loadBreadcrumbs(
 // ---------------------------------------------------------------------------
 
 type RunIndexEntry = {
-  confidence: number | null;
   kind: 'answer' | 'clarify' | 'error';
   /** True when the run produced zero citations (error or empty list).
    *  Drives the no_citations chip + per-row warn affordance. */
@@ -692,7 +677,6 @@ function buildRunIndex(
       // start fresh and rely on a later tail to repopulate them.
       const citations = rec.answer.citations ?? [];
       out.set(aid, {
-        confidence: rec.answer.confidence ?? null,
         kind: rec.answer.kind,
         citationsEmpty: citations.length === 0,
         sessionId: rec.session_id ?? null,
@@ -815,7 +799,6 @@ function emptySnapshot(
       explicitCount: 0,
       implicitCount: 0,
       explicitShare: null,
-      meanConfidence: null,
       nonAnswerRate: 0,
       aplusCandidates: null,
       semanticCheckFailed: null,
@@ -865,6 +848,7 @@ export type FeedbackFusedChunkVM = {
   rrfScore: number | null;
   vecRank: number | null;
   bm25Rank: number | null;
+  exactRank: number | null;
   navIndex: number | null;
 };
 
@@ -879,7 +863,6 @@ export type FeedbackRowDetail = {
   answerId: string;
   currentPageId: string | null;
   breadcrumb: BreadcrumbNode[] | null;
-  confidence: number | null;
   hadNoCitations: boolean | null;
   /** Markdown body — pulled from feedback.generated. Empty string when the
    *  ask never made it through generation (error kind). */
@@ -1009,7 +992,6 @@ export function loadFeedbackRowDetail(
       answerId: row.answer_id,
       currentPageId: row.current_page_id,
       breadcrumb: row.current_page_id ? breadcrumbs.get(row.current_page_id) ?? null : null,
-      confidence: runMeta?.confidence ?? null,
       hadNoCitations: runMeta?.citationsEmpty ?? null,
       answerMd: row.generated ?? '',
       citations,
@@ -1024,6 +1006,7 @@ export function loadFeedbackRowDetail(
               rrfScore: f.rrf_score ?? null,
               vecRank: f.vec_rank,
               bm25Rank: f.bm25_rank,
+              exactRank: f.exact_rank ?? null,
               navIndex: f.nav_index,
             })),
             subtreeAskTriggered: runRecord.retrieval.subtree_ask_triggered,

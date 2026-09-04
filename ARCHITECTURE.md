@@ -671,6 +671,13 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
     "model": "claude-sonnet-4-6",
     "apiKeyEnv": "ANTHROPIC_API_KEY"
   },
+  "router": {
+    "enabled": true,
+    "model": null,
+    "fastPathMaxChars": 240,
+    "cacheTtlMs": 300000,
+    "cacheMaxEntries": 512
+  },
   "retrieval": {
     "topK": 20,
     "rrfK": 60,
@@ -696,6 +703,12 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
 ```
 
 LLM API key **仅从环境变量读取**，不写配置文件。配置里只写 `apiKeyEnv` 字段名。
+
+`router.model = null` 时复用 `llm.model`；也可通过 `router.model` 或环境变量
+`ANYDOCS_ROUTER_MODEL` 指定网关支持的轻量模型。无历史且不超过
+`fastPathMaxChars` 的问题，以及带明确 endpoint / 错误码 / 异常名的问题跳过 Router LLM。
+其余路由结果按脱敏后的问题、语言和最近三轮历史的 SHA-256 键做进程内 TTL/LRU 缓存。
+设 `fastPathMaxChars = 0` 可关闭快路径，设 `cacheTtlMs = 0` 可关闭缓存。
 
 `prompt` 是项目级追加说明：`assistantName` 只替换助手身份文案，`systemInstructions` 按行追加到 system prompt 末尾。它不能覆盖核心规则：答案仍必须只基于检索片段、必须内联 `[cit_N]` 引用、不能编造代码/API/路径。为控制 token 体积，加载和 Console 保存都会规范化空白字符，并限制 `assistantName` 最多 80 字符、`systemInstructions` 最多 20 条、每条最多 500 字符；被截断或忽略的内容会进入 warning。
 
@@ -1247,17 +1260,25 @@ Baseline: 2026-04-25 (R@5=0.74, Cit=0.68, Ans=0.62)
         "rrf_score": 0.83,
         "vec_rank": 2,
         "bm25_rank": 5,
+        "exact_rank": null,
         "nav_index": 3
       }
     ],
-    "subtree_ask_triggered": false
+    "subtree_ask_triggered": false,
+    "router_strategy": "fast_path",
+    "timings": {
+      "router_ms": 0.2,
+      "embedding_ms": 31.4,
+      "retrieval_ms": 4.8,
+      "rerank_ms": 0,
+      "generation_ms": 1197.6
+    }
   },
   "answer": {
     "kind": "answer",
     "answer_id": "ans_xxx",
     "md": "...",
     "citations": [{ "chunk_id": 42, "page": "security/jwt", "quote": "..." }],
-    "confidence": 0.78,
     "latency_ms": 1234,
     "tokens_in": null,
     "tokens_out": null,
@@ -1271,7 +1292,9 @@ Baseline: 2026-04-25 (R@5=0.74, Cit=0.68, Ans=0.62)
 **字段说明**（v1 实施细节）：
 
 - `answer.kind`：`'answer' | 'clarify' | 'error'`——所有出口都落 runs（错误 / 反问 / 答案），analyze 维度 1 / 3 依赖此区分。
-- `answer.confidence`：归一化代理 `top1.final_score / sum(top-5.final_score)`，∈ [0, 1]；只有一个候选时为 1，无候选为 0。与 `top_final_score`（原始 RRF×boost 分，仅 trace 内部用）刻意区分——归一版本对项目规模不敏感，是 analyze D1 `confidenceFloor` 的判定依据。v1.5 引入 reranker model 后会替换为模型分。
+- `retrieval.fused[*].vec_rank / bm25_rank / exact_rank`：三条召回路径的原始名次；`rrf_score` 仅由这些名次和配置的 `retrieval.rrfK` 计算。`final_score` 默认等于 `rrf_score`，仅在明确启用 cross-encoder 时改为模型分。
+- `retrieval.router_strategy`：`fast_path | cache | llm | fallback | disabled`；旧日志没有此字段。
+- `retrieval.timings`：Router、Embedding、检索、可选 Reranker 与答案生成的 wall-clock 毫秒数；旧日志没有此字段。各阶段之和可能略小于 `answer.latency_ms`，差值为校验、上下文组装、后处理和日志外壳开销。
 - `answer.tokens_in / tokens_out`：v1 LLM 接口未暴露，写 `null`；后续 LLM 接口扩展时填充。schema 不变。
 - `answer.error_code`：仅 `kind='error'` 时非 null（如 `invalid_scope` / `invalid_question`）。
 - `source`：`"reader" | "console"`（2026-05-11 加入）。Reader 直调 `/v1/ask` 时填 `"reader"`；dev console persist 切换开启时填 `"console"`。**旧 jsonl 行缺此字段 → 读取时视为 `"reader"`**（`runs/types.ts:runSource()` 兜底）。`analyze` / `golden generate --from runs` 默认排除 `"console"`，`--include-console` 显式纳入。详 §17.3.3 / §17.8。
@@ -1323,10 +1346,11 @@ user:   page = {slug, title, headings}
 
 ```
 SELECT runs WHERE
-  confidence >= 0.7
+  kind = 'answer'
+  AND len(citations) > 0
   AND no_re_ask_within_30s   (基于同 session_id 时间窗)
   AND length(answer.md) <= 600
-ORDER BY confidence DESC
+ORDER BY citation_count DESC, ts ASC
 LIMIT --limit (默认 50)
 ```
 
@@ -1338,7 +1362,7 @@ CLI `analyze runs <project> --since 7d` 读 `<workspace>/state/<projectId>/runs/
 
 | # | 维度 | 触发判据 | 聚合粒度 | 输出 |
 |---|---|---|---|---|
-| 1 | 召回失败 | `confidence<0.4` ∨ `len(citations)==0` ∨ 同 session 30s 内重问且 query 编辑距离 < 5 | 按 query MinHash 聚类 | `reports/.../analyze.md` 章节 + 高频缺失 page 列入 `feedback/.../suggestions/<YYYY-Www>.md` |
+| 1 | 召回失败 | `len(citations)==0` ∨ 同 session 30s 内重问且 query 编辑距离 < 5 | 按 query MinHash 聚类 | `reports/.../analyze.md` 章节 + 高频缺失 page 列入 `feedback/.../suggestions/<YYYY-Www>.md` |
 | 2 | 延迟异常 | `latency_ms` 落入 p95 上界外 | 按 query 长度 bucket / chunk 数 bucket | 报告章节 |
 | 3 | 歧义高发 | `subtree_ask_triggered=true` 且后续无 follow-up（下个 ask 不在同 session 5min 内） | 按反问的 navigation 子树 | 报告章节 + 提示 navigation 调整 |
 | 4 | 引用错配 (v1.5) | `feedback.beta=='negative'` 且 `feedback.target=='citation'` | 按 chunk_id | 报告章节 + chunk 拆分建议进 inbox |
@@ -1395,8 +1419,7 @@ subtree_ask_triggered rate: 18% (74 / 412), of which 31 未跟进 →
   "analyze": {
     "schedule": "weekly",
     "lookbackDays": 7,
-    "latencyP95Threshold": 3000,
-    "confidenceFloor": 0.4
+    "latencyP95Threshold": 3000
   }
 }
 ```
@@ -1497,7 +1520,7 @@ ProcessRegistry {
 | `GET /` | 项目选择器（卡片网格） |
 | `GET /p/:name` | 项目详情：左 sidebar（status / lifecycle / Golden / Analyze / reports）+ 顶部 next-action 横幅（§17.3.7）+ 右主区 **4 tab** （Ask / Index / Eval / Traffic）+ 右侧 Config drawer（§17.3.9）。tab 由 hash `#tab` 持久化、刷新保留 |
 | `GET /p/:name/reports/:file` | 渲染 `state/<projectId>/reports/<file>.md` |
-| `GET /p/:name/runs` | 分页 jsonl 查看（最近 50，可过滤 query/confidence/latency） |
+| `GET /p/:name/runs` | 分页 jsonl 查看（最近 50，可过滤 query/kind/source） |
 
 #### 17.3.2 JSON API（console 自身）
 
@@ -1583,14 +1606,17 @@ tab "Index" 渲染：
 
 | 区块 | 内容 |
 |---|---|
-| 健康度 strip | 4 KPI 卡 + 按日分桶 sparkline：queries · 7d/30d/90d/all / mean confidence / P95 latency (P50 副) / non-answer rate (error + clarify) |
-| 筛选条 | 服务端 query / source(reader\|console\|mcp) / kind / minConf |
-| runs 表 | 筛选后按 25/50/100 条服务端分页；SSR 行；每行 ts/kind+src-pill/conf/latency/query/cit |
-| 行展开 | 左：fused top-8 表 + meta(model/answer_id/request_id/tokens) + ↩ Re-ask 按钮；右：answer markdown + citations |
+| 健康度 strip | 4 KPI 卡 + 按日分桶 sparkline：queries · 7d/30d/90d/all / error rate / P95 latency (P50 副) / non-answer rate (error + clarify) |
+| 筛选条 | 服务端 query / source(reader\|console\|mcp) / kind |
+| runs 表 | 筛选后按 25/50/100 条服务端分页；每行 ts/kind+src-pill/latency/query/cit；点击整行进入专用 Run Detail 页面 |
+| Run Detail | `/p/:name/runs/:requestId` 全页诊断工作区；返回链接保留 range/query/source/kind/page 筛选状态；展示输入、答案、阶段耗时、配置和完整 retrieval inspector |
+| retrieval inspector | 分为 generation context / candidates / citations 三个视图；每条记录可展开查看实际送入生成模型的 parent context、命中的 child、标识符、对象路径、rank、score、token、content hash 与引用校验结果 |
 | Re-ask | 写回 Ask tab textarea + 切到 Ask tab + 滑哈希到 `#ask`；当前 cfg 重跑对比 |
 | **Analyze 区**（2026-05-12 加入） | runs 表下方：▶ run analyze · 7d 按钮 + "include console traffic" 复选框（→ body `include_console:true`）+ `<details>` 折叠区 inline marked 渲染最新 analyze 报告 + 历史报告 |
 
 `src/console/traffic-state.ts` 默认装载 7d 窗口，也支持 30d、90d 和全部历史；console-origin runs 与 reader 一同纳入（与 analyze 默认排除不同——Traffic 视图需要可见对照）。Analyze 区仍固定汇总最近 7d，报告解析与列举见 `eval-state.ts:listAnalyzeReports / readAnalyzeReportBody`。
+
+Run Detail 从 append-only JSONL 中按 `request_id` 定位基础 run，再折叠后续的 feedback 与 citation semantic-check 更新。新 run 会持久化 fused child 快照和 `selected_context`，从而区分“被召回”与“真正送入生成模型”。页面通过 child 的 `POST /v1/index/chunks/resolve` 补充当前索引中的完整内容；解析优先校验 numeric `chunk_id`，索引重建导致 ID 漂移时回退到 `content_hash + page_id`。服务离线或旧 run 缺少快照时，页面仍以已持久化数据降级显示。
 
 #### 17.3.7 Next-action 横幅（2026-05-11 加入）
 
@@ -1627,6 +1653,8 @@ CTA 是 `<a href="#tab">`，layout 加 `hashchange` listener 触发 `setProjectT
 ESC / 点外侧 / 点 × 关闭。Phase 1 仅只读；inline edit 涉及 \"console 自身零状态\" 锁，Phase 2 评估。
 
 ### 17.4 前端形态
+
+> 2026-09 更新：Console 已迁移到 React + Vite + TanStack Query，并使用 Lucide 图标。下述 SSR 说明仅保留为旧架构记录；新页面由 `src/console-ui/` 构建，Hono 只负责 HTML bootstrap、认证和 API 代理。
 
 **SSR + Hono `html` 模板**，零前端构建链：
 

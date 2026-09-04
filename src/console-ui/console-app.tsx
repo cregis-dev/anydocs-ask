@@ -57,8 +57,10 @@ import type {
   ReportBootstrap,
   RunRecord,
   RunsBootstrap,
+  TrafficViewState,
   TrafficWindow,
 } from './app-types';
+import { RunDetailScreen } from './run-detail';
 
 const PROJECT_TABS = ['ask', 'index', 'eval', 'traffic', 'feedback', 'settings'] as const;
 type ProjectTab = typeof PROJECT_TABS[number];
@@ -67,6 +69,9 @@ export function ConsoleApp({ bootstrap }: { bootstrap: ConsoleBootstrap }) {
   if (bootstrap.kind === 'home') return <HomeScreen data={bootstrap} />;
   if (bootstrap.kind === 'project') return <ProjectScreen data={bootstrap} />;
   if (bootstrap.kind === 'report') return <ReportScreen data={bootstrap} />;
+  if (bootstrap.kind === 'run-detail') {
+    return <RunDetailScreen data={bootstrap} header={<AppHeader navigation={bootstrap.navigation} current={bootstrap.projectName} />} />;
+  }
   return <RunsScreen data={bootstrap} />;
 }
 
@@ -308,7 +313,7 @@ function ProjectScreen({ data }: { data: ProjectBootstrap }) {
               {tab === 'ask' && <AskTab projectName={data.project.name} live={Boolean(running)} onStart={() => lifecycle('start')} />}
               {tab === 'index' && data.indexSnapshot && <IndexExplorer initial={{ ...data.indexSnapshot, childLive: Boolean(running) }} />}
               {tab === 'eval' && <EvalTab projectName={data.project.name} snapshot={data.evalSnapshot} candidates={data.candidates} />}
-              {tab === 'traffic' && <TrafficTab projectName={data.project.name} window={data.trafficWindow} />}
+              {tab === 'traffic' && <TrafficTab projectName={data.project.name} window={data.trafficWindow} view={data.trafficView} />}
               {tab === 'feedback' && <FeedbackTab projectName={data.project.name} snapshot={data.feedbackSnapshot} />}
               {tab === 'settings' && <SettingsTab projectName={data.project.name} config={data.askConfig} />}
             </div>
@@ -411,26 +416,24 @@ function ChatTurnView({ turn, onScope, onRate }: { turn: ChatTurn; onScope: (sco
   return <div className="ca-chat-turn"><div className="ca-question">{turn.question}</div>{response.type === 'answer' ? <div className="ca-answer"><Markdown body={response.answer_md} /><div className="ca-answer-meta"><span>{response.citations.length} citations</span><span>{formatDuration(response.latency_ms)}</span><span>{response.model}</span>{response._persisted && <span>saved</span>}</div>{response.citations.length > 0 && <div className="ca-citations">{response.citations.map((citation) => <article key={citation.citation_id}><span>{citation.citation_id}</span><div><strong>{citation.title}</strong><code>{citation.page_id}{citation.in_page_path ? ` · ${citation.in_page_path}` : ''}</code><p>{citation.snippet}</p></div></article>)}</div>}<div className="ca-rating"><button className="ca-icon-button" onClick={() => onRate(response.answer_id, 1)} aria-label="Helpful"><ThumbsUp size={15} /></button><button className="ca-icon-button" onClick={() => onRate(response.answer_id, -1)} aria-label="Not helpful"><ThumbsDown size={15} /></button></div></div> : response.type === 'clarify' ? <div className="ca-answer"><Notice tone="warning">{response.message}</Notice><div className="ca-scope-list">{response.options.map((option) => <button className="ca-button" key={option.scope_id} onClick={() => onScope(option.scope_id)}><ChevronRight size={14} />{option.label}</button>)}</div></div> : <div className="ca-answer"><Notice tone="error"><strong>{response.code}</strong> {response.message}</Notice></div>}</div>;
 }
 
-function TrafficTab({ projectName, window: traffic }: { projectName: string; window?: TrafficWindow }) {
-  const [range, setRange] = useState<string>(String(traffic?.range ?? 7));
-  const [query, setQuery] = useState('');
-  const [source, setSource] = useState('');
-  const [kind, setKind] = useState('');
-  const [minConf, setMinConf] = useState('');
-  const [page, setPage] = useState(1);
-  const [selected, setSelected] = useState<RunRecord | null>(null);
+function TrafficTab({ projectName, window: traffic, view }: { projectName: string; window?: TrafficWindow; view?: TrafficViewState }) {
+  const [range, setRange] = useState<string>(String(view?.range ?? traffic?.range ?? 7));
+  const [query, setQuery] = useState(view?.query ?? '');
+  const [source, setSource] = useState(view?.source ?? '');
+  const [kind, setKind] = useState(view?.kind ?? '');
+  const [page, setPage] = useState(view?.page ?? 1);
   const [analyzing, setAnalyzing] = useState(false);
   const records = traffic?.records ?? [];
   const filtered = useMemo(() => [...records].reverse().filter((record) => {
     if (query && !record.query.toLowerCase().includes(query.toLowerCase())) return false;
     if (source && (record.source ?? 'reader') !== source) return false;
     if (kind && record.answer.kind !== kind) return false;
-    if (minConf && record.answer.confidence < Number(minConf)) return false;
     return true;
-  }), [records, query, source, kind, minConf]);
+  }), [records, query, source, kind]);
   const pageSize = 25;
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const visible = filtered.slice((Math.min(page, pages) - 1) * pageSize, Math.min(page, pages) * pageSize);
+  const returnTo = trafficHref(projectName, { range, query, source, kind, page: Math.min(page, pages) });
   const totals = traffic?.totals;
   const analyze = async () => {
     setAnalyzing(true);
@@ -439,26 +442,16 @@ function TrafficTab({ projectName, window: traffic }: { projectName: string; win
   };
   if (!traffic) return <WorkspaceEmpty icon={<BarChart3 />} title="No traffic data" detail="Persist Ask runs or connect the reader to populate operational metrics." />;
   return <section className="ca-workspace"><WorkspaceHeader eyebrow="Observability" title="Traffic" description="Inspect live questions, answer quality, and latency." actions={<button className="ca-button" disabled={analyzing} onClick={analyze}>{analyzing ? <LoaderCircle className="ca-spin" size={15} /> : <Sparkles size={15} />}Analyze</button>} />
-    <div className="ca-metric-strip ca-four"><Metric label={`Queries · ${range === 'all' ? 'all' : `${range}d`}`} value={totals?.count ?? 0} icon={<MessageSquareText />} /><Metric label="Mean confidence" value={formatDecimal(totals?.meanConfidence)} icon={<Gauge />} /><Metric label="p50 latency" value={formatDuration(totals?.p50LatencyMs)} icon={<Activity />} /><Metric label="p95 latency" value={formatDuration(totals?.p95LatencyMs)} icon={<Activity />} /></div>
-    <div className="ca-toolbar"><label className="ca-search"><Search size={15} /><input value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} placeholder="Filter question…" /></label><select value={range} onChange={(e) => { setRange(e.target.value); window.location.href = `#traffic`; const url = new URL(window.location.href); url.searchParams.set('traffic_range', e.target.value); window.location.href = url.toString(); }}><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="all">All time</option></select><select value={source} onChange={(e) => setSource(e.target.value)}><option value="">All sources</option><option>reader</option><option>console</option><option>mcp</option></select><select value={kind} onChange={(e) => setKind(e.target.value)}><option value="">All outcomes</option><option>answer</option><option>clarify</option><option>error</option></select><select value={minConf} onChange={(e) => setMinConf(e.target.value)}><option value="">Any confidence</option><option value="0.4">≥ 0.4</option><option value="0.6">≥ 0.6</option><option value="0.8">≥ 0.8</option></select></div>
-    <RunTable records={visible} onSelect={setSelected} />
+    <div className="ca-metric-strip ca-four"><Metric label={`Queries · ${range === 'all' ? 'all' : `${range}d`}`} value={totals?.count ?? 0} icon={<MessageSquareText />} /><Metric label="Error rate" value={formatPercent(totals?.errorRate)} icon={<CircleAlert />} /><Metric label="p50 latency" value={formatDuration(totals?.p50LatencyMs)} icon={<Activity />} /><Metric label="p95 latency" value={formatDuration(totals?.p95LatencyMs)} icon={<Activity />} /></div>
+    <div className="ca-toolbar"><label className="ca-search"><Search size={15} /><input value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} placeholder="Filter question…" /></label><select value={range} onChange={(e) => { const next = e.target.value; setRange(next); window.location.href = trafficHref(projectName, { range: next, query, source, kind, page: 1 }); }}><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="all">All time</option></select><select value={source} onChange={(e) => { setSource(e.target.value as TrafficViewState['source']); setPage(1); }}><option value="">All sources</option><option>reader</option><option>console</option><option>mcp</option></select><select value={kind} onChange={(e) => { setKind(e.target.value as TrafficViewState['kind']); setPage(1); }}><option value="">All outcomes</option><option>answer</option><option>clarify</option><option>error</option></select></div>
+    <RunTable projectName={projectName} records={visible} returnTo={returnTo} />
     <Pagination page={Math.min(page, pages)} pages={pages} total={filtered.length} onChange={setPage} />
-    <RunDrawer projectName={projectName} run={selected} onClose={() => setSelected(null)} />
   </section>;
 }
 
-function RunTable({ records, onSelect }: { records: RunRecord[]; onSelect: (run: RunRecord) => void }) {
+function RunTable({ projectName, records, returnTo }: { projectName: string; records: RunRecord[]; returnTo: string }) {
   if (records.length === 0) return <EmptyState icon={<Search />} title="No matching runs" detail="Adjust the filters to broaden the result set." />;
-  return <div className="ca-table-wrap"><table className="ca-table"><thead><tr><th>Time</th><th>Source</th><th>Question</th><th>Outcome</th><th>Confidence</th><th>Latency</th></tr></thead><tbody>{records.map((run) => <tr key={run.request_id} tabIndex={0} aria-label={`Inspect run: ${run.query}`} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(run); } }} onClick={() => onSelect(run)}><td><time>{formatTimestamp(run.ts)}</time></td><td><StatusBadge>{run.source ?? 'reader'}</StatusBadge></td><td className="ca-question-cell">{run.query}</td><td><StatusBadge tone={run.answer.kind === 'answer' ? 'live' : run.answer.kind === 'error' ? 'error' : 'warning'}>{run.answer.kind}</StatusBadge></td><td>{formatDecimal(run.answer.confidence)}</td><td>{formatDuration(run.answer.latency_ms)}</td></tr>)}</tbody></table></div>;
-}
-
-function RunDrawer({ projectName, run, onClose }: { projectName: string; run: RunRecord | null; onClose: () => void }) {
-  const addGolden = async () => {
-    if (!run) return;
-    try { const result = await apiJson<{ isNew: boolean }>(projectApi(projectName, '/golden/candidate/create-from-run'), { method: 'POST', body: JSON.stringify({ query: run.query, context_pageId: run.context_pageId, answer: run.answer.md, request_id: run.request_id }) }); window.alert(result.isNew ? 'Added to Golden review queue.' : 'This question is already in the queue.'); }
-    catch (err) { window.alert(errorMessage(err)); }
-  };
-  return <Dialog.Root open={Boolean(run)} onOpenChange={(open) => !open && onClose()}><Dialog.Portal><Dialog.Overlay className="ca-dialog-overlay" /><Dialog.Content className="ca-drawer"><Dialog.Description className="ca-sr-only">Inspect the selected question, answer, retrieval trace, and runtime configuration.</Dialog.Description><div className="ca-drawer-head"><div><StatusBadge tone={run?.answer.kind === 'error' ? 'error' : 'live'}>{run?.answer.kind ?? ''}</StatusBadge><Dialog.Title>Run detail</Dialog.Title></div><Dialog.Close className="ca-icon-button" aria-label="Close run detail"><X size={18} /></Dialog.Close></div>{run && <div className="ca-drawer-body"><Section title="Question"><p className="ca-long-copy">{run.query}</p></Section><div className="ca-metric-strip ca-two"><Metric label="Confidence" value={formatDecimal(run.answer.confidence)} icon={<Gauge />} /><Metric label="Latency" value={formatDuration(run.answer.latency_ms)} icon={<Activity />} /></div><Section title="Answer">{run.answer.md ? <Markdown body={run.answer.md} /> : <p className="ca-muted">No generated answer.</p>}</Section><Section title={`Retrieval · ${run.retrieval.fused.length} fused`}><div className="ca-retrieval-list">{run.retrieval.fused.slice(0, 12).map((hit) => <div key={hit.chunk_id}><code>{hit.page} #{hit.chunk_id}</code><span>{hit.final_score.toFixed(3)}</span></div>)}</div></Section><Section title="Configuration"><dl className="ca-kv"><div><dt>request_id</dt><dd><code>{run.request_id}</code></dd></div><div><dt>session_id</dt><dd><code>{run.session_id ?? '—'}</code></dd></div><div><dt>model</dt><dd>{run.answer.model ?? '—'}</dd></div></dl></Section></div>}<div className="ca-drawer-actions"><button className="ca-button" onClick={addGolden}><Plus size={15} />Add as golden case</button></div></Dialog.Content></Dialog.Portal></Dialog.Root>;
+  return <div className="ca-table-wrap"><table className="ca-table"><thead><tr><th>Time</th><th>Source</th><th>Question</th><th>Outcome</th><th>Latency</th><th><span className="ca-sr-only">Open</span></th></tr></thead><tbody>{records.map((run) => { const href = `/p/${encodeURIComponent(projectName)}/runs/${encodeURIComponent(run.request_id)}?return=${encodeURIComponent(returnTo)}`; return <tr key={run.request_id} tabIndex={0} aria-label={`Inspect run: ${run.query}`} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); window.location.href = href; } }} onClick={() => { window.location.href = href; }}><td><time>{formatTimestamp(run.ts)}</time></td><td><StatusBadge>{run.source ?? 'reader'}</StatusBadge></td><td className="ca-question-cell"><a href={href} onClick={(event) => event.stopPropagation()}>{run.query}</a></td><td><StatusBadge tone={run.answer.kind === 'answer' ? 'live' : run.answer.kind === 'error' ? 'error' : 'warning'}>{run.answer.kind}</StatusBadge></td><td>{formatDuration(run.answer.latency_ms)}</td><td><ChevronRight size={15} /></td></tr>; })}</tbody></table></div>;
 }
 
 function FeedbackTab({ projectName, snapshot }: { projectName: string; snapshot?: FeedbackSnapshot }) {
@@ -482,7 +475,7 @@ function FeedbackTab({ projectName, snapshot }: { projectName: string; snapshot?
   if (!snapshot?.enabled) return <WorkspaceEmpty icon={<ThumbsUp />} title="Feedback collection is disabled" detail="Enable feedback.enabled in Settings to collect explicit and implicit signals." />;
   const kpi = current?.kpi;
   return <section className="ca-workspace"><WorkspaceHeader eyebrow="Quality signals" title="Feedback" description="Review explicit ratings, implicit signals, and citation quality." />
-    <div className="ca-metric-strip ca-four"><Metric label="Signals · 7d" value={kpi?.count ?? 0} icon={<ThumbsUp />} /><Metric label="Explicit share" value={formatPercent(kpi?.explicitShare)} icon={<Gauge />} /><Metric label="Mean confidence" value={formatDecimal(kpi?.meanConfidence)} icon={<Activity />} /><Metric label="Non-answer rate" value={formatPercent(kpi?.nonAnswerRate)} icon={<CircleAlert />} /></div>
+    <div className="ca-metric-strip ca-four"><Metric label="Signals · 7d" value={kpi?.count ?? 0} icon={<ThumbsUp />} /><Metric label="Explicit share" value={formatPercent(kpi?.explicitShare)} icon={<Gauge />} /><Metric label="Citation issues" value={kpi?.semanticCheckFailed ?? '—'} icon={<CircleAlert />} /><Metric label="Non-answer rate" value={formatPercent(kpi?.nonAnswerRate)} icon={<Activity />} /></div>
     <div className="ca-chip-row">{filters.map((item) => <button key={item} data-active={filter === item} onClick={() => load(item)}>{labelFilter(item)}<span>{current?.filterCounts[item] ?? 0}</span></button>)}</div>
     {loading ? <LoadingBlock /> : current && current.rows.length > 0 ? <div className="ca-feedback-list">{current.rows.map((row) => <button key={row.feedback_id} onClick={() => openDetail(row)}><span className="ca-feedback-signal">{row.rating === 1 ? <ThumbsUp size={15} /> : row.rating === -1 ? <ThumbsDown size={15} /> : <Activity size={15} />}</span><span><strong>{row.question}</strong><small>{formatTimestamp(row.ts)} · {row.signal_source}{row.sessionTurnCount > 1 ? ` · turn ${row.turnIndex}/${row.sessionTurnCount}` : ''}</small></span><span className="ca-feedback-tags">{row.semanticCheckFailed && <StatusBadge tone="warning">citation</StatusBadge>}{row.aplusCluster && <StatusBadge>A+</StatusBadge>}<ChevronRight size={15} /></span></button>)}</div> : <EmptyState icon={<ThumbsUp />} title="No signals in this filter" detail="New reader feedback will appear here." />}
     <Dialog.Root open={Boolean(selected)} onOpenChange={(open) => !open && setSelected(null)}><Dialog.Portal><Dialog.Overlay className="ca-dialog-overlay" /><Dialog.Content className="ca-drawer"><Dialog.Description className="ca-sr-only">Inspect the selected feedback signal and its linked run details.</Dialog.Description><div className="ca-drawer-head"><Dialog.Title>Feedback detail</Dialog.Title><Dialog.Close className="ca-icon-button" aria-label="Close feedback detail"><X size={18} /></Dialog.Close></div><div className="ca-drawer-body">{selected && <Section title="Question"><p>{selected.question}</p></Section>}{detail ? <pre className="ca-json-view">{JSON.stringify(detail, null, 2)}</pre> : <LoadingBlock />}</div></Dialog.Content></Dialog.Portal></Dialog.Root>
@@ -587,5 +580,14 @@ function formatDecimal(value: number | null | undefined): string { return value 
 function formatPercent(value: number | null | undefined): string { return value === null || value === undefined ? '—' : `${Math.round(value * 100)}%`; }
 function formatDuration(value: number | null | undefined): string { if (value === null || value === undefined) return '—'; return value >= 1000 ? `${(value / 1000).toFixed(1)}s` : `${Math.round(value)}ms`; }
 function formatTimestamp(value: string): string { const date = new Date(value); return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date); }
+function trafficHref(projectName: string, state: { range: string; query: string; source: string; kind: string; page: number }): string {
+  const query = new URLSearchParams();
+  query.set('traffic_range', state.range);
+  if (state.query) query.set('traffic_q', state.query);
+  if (state.source) query.set('traffic_source', state.source);
+  if (state.kind) query.set('traffic_kind', state.kind);
+  if (state.page > 1) query.set('traffic_page', String(state.page));
+  return `/p/${encodeURIComponent(projectName)}?${query}#traffic`;
+}
 function labelFilter(value: string): string { return value.replaceAll('_', ' ').replace('thumbs up', 'positive').replace('thumbs down', 'negative'); }
-function computeRunTotals(records: RunRecord[]): TrafficWindow['totals'] { const conf = records.map((r) => r.answer.confidence); const lat = records.map((r) => r.answer.latency_ms).sort((a, b) => a - b); const pick = (p: number) => lat.length ? lat[Math.min(lat.length - 1, Math.floor(lat.length * p))]! : null; return { count: records.length, countReader: records.filter((r) => !r.source || r.source === 'reader').length, countConsole: records.filter((r) => r.source === 'console').length, countMcp: records.filter((r) => r.source === 'mcp').length, meanConfidence: conf.length ? conf.reduce((a, b) => a + b, 0) / conf.length : null, p50LatencyMs: pick(.5), p95LatencyMs: pick(.95), errorRate: records.length ? records.filter((r) => r.answer.kind === 'error').length / records.length : 0, clarifyRate: records.length ? records.filter((r) => r.answer.kind === 'clarify').length / records.length : 0 }; }
+function computeRunTotals(records: RunRecord[]): TrafficWindow['totals'] { const lat = records.map((r) => r.answer.latency_ms).sort((a, b) => a - b); const pick = (p: number) => lat.length ? lat[Math.min(lat.length - 1, Math.floor(lat.length * p))]! : null; return { count: records.length, countReader: records.filter((r) => !r.source || r.source === 'reader').length, countConsole: records.filter((r) => r.source === 'console').length, countMcp: records.filter((r) => r.source === 'mcp').length, p50LatencyMs: pick(.5), p95LatencyMs: pick(.95), errorRate: records.length ? records.filter((r) => r.answer.kind === 'error').length / records.length : 0, clarifyRate: records.length ? records.filter((r) => r.answer.kind === 'clarify').length / records.length : 0 }; }

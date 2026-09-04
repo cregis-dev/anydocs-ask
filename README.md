@@ -94,9 +94,9 @@ curl http://127.0.0.1:4100/         # 应返回工作区首页 HTML
 
 项目页加 **Feedback** / **Traffic** tab + **Index** tab 反向标注，把反馈数据消费成可行动信号（RFC 0002 T1–T4）：
 
-- **Feedback tab** — 4 状态视图（disabled / enabled-empty / onboarding / healthy）+ 6 KPI tile（feedback·7d / explicit% / mean confidence / non-answer rate / A+ candidates / cit-check failed）+ 5 filter chip（all / 👍 / 👎 / implicit / no_citations / ⚠ cit-check）+ 行级 breadcrumb + Drawer META/ANSWER/CORRECTION/CITATIONS（含 verdict 徽章）/RETRIEVAL/ACTIONS。
+- **Feedback tab** — 4 状态视图（disabled / enabled-empty / onboarding / healthy）+ KPI tile（feedback·7d / explicit% / citation issues / non-answer rate / A+ candidates / cit-check failed）+ filter chip（all / 👍 / 👎 / implicit / no_citations / ⚠ cit-check）+ 行级 breadcrumb + Drawer META/ANSWER/CORRECTION/CITATIONS（含 verdict 徽章）/RETRIEVAL/ACTIONS。
 - **Traffic tab** — 7/30/90 天或全部历史 query 列表，支持服务端筛选、分页、Re-ask 与 jump-to-Ask；Console 写入 runs 默认排除分析。
-- **Index tab** — 每行末尾显示"近 7 天命中 N 次 + 中位 confidence"，可跳到对应 Traffic 过滤。
+- **Index tab** — 每行末尾显示“近 7 天命中 N 次”，可跳到对应 Traffic 过滤。
 
 打开方式：在 anydocs.ask.json 设 `feedback.enabled=true`（写库 + 反馈先验上线）。详见 [ARCHITECTURE.md §15](./ARCHITECTURE.md)。
 
@@ -258,10 +258,11 @@ pnpm dev serve /Users/me/work/product-docs
 }
 ```
 
-超过 500 字或包含 JSON、HTTP 请求/响应、异常日志的问题会先脱敏并结构化：
-LLM Router 生成紧凑检索问题，本地提取器保留接口路径、错误码、字段名和首尾空格等
-原始线索；如果 Router 输出不可用，则自动使用本地确定性摘要。密钥、Token、签名和
-密码不会发送给 Router、Embedding 或回答模型，也不会以明文写入 Traffic 日志或反馈缓存。
+独立的 Intent Router 只处理需要上下文消解或语义压缩的问题。无历史的短问题，以及
+带明确 API 路径、错误码或异常名的诊断输入，会直接走确定性快路径，避免回答前再调用
+一次大模型；其余路由结果按“问题 + 最近三轮历史”做进程内 TTL 缓存。长日志仍会先
+脱敏，本地提取器保留接口路径、错误码、字段名和首尾空格等原始线索。密钥、Token、
+签名和密码不会发送给 Router、Embedding 或回答模型，也不会以明文写入 Traffic 日志。
 
 鉴权用 bearer token，走环境变量 `ANYDOCS_MCP_TOKEN`（密钥不入配置文件）；设置后调用须带 `Authorization: Bearer <token>`，否则 401。未设置则端点开放——仅适合 loopback / 可信内网（此时端口无关的 DNS-rebinding Host 守卫生效）。在 MCP 客户端里注册（以 Claude Code 为例）：
 
@@ -340,6 +341,15 @@ the runtime workspace under `<workspace>/state/<projectId>/golden/cases.jsonl`.
 
 ```jsonc
 {
+  // Intent Router（默认 ON）；model=null 时复用主回答模型
+  "router": {
+    "enabled": true,
+    "model": null,                    // 可填网关支持的更小、更快模型
+    "fastPathMaxChars": 240,          // 0 = 关闭确定性快路径
+    "cacheTtlMs": 300000,
+    "cacheMaxEntries": 512
+  },
+
   // RFC 0001 §3 — β 显式 + γ 隐式反馈通道（写库 + reranker 先验）
   "feedback": {
     "enabled": false,                  // 整段开关

@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ConsoleApp } from './console-app';
 import './index.css';
 import './console-app.css';
+import './run-detail.css';
 
 const host = document.getElementById('console-app-root');
 const bootstrap = window.__CONSOLE_APP__;

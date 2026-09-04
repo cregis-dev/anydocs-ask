@@ -248,6 +248,7 @@ code, pre { font-family: "Fira Code", "SFMono-Regular", Consolas, monospace; }
 .ca-table tbody tr { cursor: pointer; }
 .ca-table tbody tr:hover, .ca-table tbody tr:focus { background: #f6f8ff; }
 .ca-question-cell { overflow: hidden; font-size: 11px !important; text-overflow: ellipsis; white-space: nowrap; }
+.ca-question-cell a { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ca-table time { color: var(--ca-muted); white-space: nowrap; }
 .ca-pagination { display: flex; align-items: center; justify-content: space-between; padding: 12px 2px; color: var(--ca-muted); font-size: 10px; }
 .ca-pagination > div { display: flex; align-items: center; gap: 10px; }
@@ -305,12 +306,6 @@ code, pre { font-family: "Fira Code", "SFMono-Regular", Consolas, monospace; }
 .ca-drawer-head h2 { margin: 0; font-size: 14px; }
 .ca-drawer-body { display: flex; flex-direction: column; gap: 12px; padding: 16px; overflow-y: auto; }
 .ca-drawer-actions { display: flex; gap: 8px; padding: 12px 16px; background: var(--ca-surface); border-top: 1px solid var(--ca-border); }
-.ca-long-copy { white-space: pre-wrap; overflow-wrap: anywhere; }
-.ca-retrieval-list { display: flex; flex-direction: column; }
-.ca-retrieval-list > div { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--ca-border); font-size: 10px; }
-.ca-retrieval-list > div:last-child { border-bottom: 0; }
-.ca-retrieval-list code { overflow-wrap: anywhere; }
-.ca-retrieval-list span { color: var(--ca-muted); }
 .ca-json-view { margin: 0; padding: 14px; color: #dfe8e3; background: #171b1f; border-radius: var(--ca-radius); font-size: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
 @keyframes ca-slide { from { transform: translateX(24px); opacity: .6; } }
 @keyframes ca-fade { from { opacity: 0; } }

@@ -40,17 +40,57 @@ export type RunRecord = {
 
 export type RunRetrievalTrace = {
   fused: RunFusedChunk[];
+  /** Context units actually sent to generation after parent expansion. */
+  selected_context?: RunContextChunk[];
   subtree_ask_triggered: boolean;
+  /** Router execution mode. Absent on legacy rows. */
+  router_strategy?: 'fast_path' | 'cache' | 'llm' | 'fallback' | 'disabled';
+  /** Per-stage wall-clock timings. Absent on runs written before this field existed. */
+  timings?: RunStageTimings;
+};
+
+export type RunStageTimings = {
+  router_ms: number;
+  embedding_ms: number;
+  retrieval_ms: number;
+  rerank_ms: number;
+  generation_ms: number;
 };
 
 export type RunFusedChunk = {
   chunk_id: number;
   page: string;
+  /** Stable lookup key. Optional on legacy records. */
+  content_hash?: string;
+  lang?: string;
+  page_title?: string;
+  page_url?: string | null;
+  in_page_path?: string;
+  text_preview?: string;
+  token_count?: number;
+  parent_id?: number | null;
+  chunk_kind?: string;
+  object_path?: string | null;
   rrf_score: number;
   final_score: number;
   vec_rank: number | null;
   bm25_rank: number | null;
+  /** Exact-identifier path rank. Missing on legacy rows. */
+  exact_rank?: number | null;
   nav_index: number | null;
+};
+
+export type RunContextChunk = RunFusedChunk & {
+  context_rank: number;
+  context_token_count: number;
+  expanded_parent: {
+    parent_id: number;
+    content_hash: string;
+    parent_path: string;
+    heading_path: string[];
+    token_count: number;
+    child_count: number;
+  } | null;
 };
 
 export type RunCitation = {
@@ -92,8 +132,6 @@ export type RunAnswer = {
   /** Markdown body (answer) or clarify message; null on error. */
   md: string | null;
   citations: RunCitation[];
-  /** Normalized top-1 share of top-5 final_score sum, in [0,1]. ARCH §16.4. */
-  confidence: number;
   latency_ms: number;
   tokens_in: number | null;
   tokens_out: number | null;

@@ -29,6 +29,7 @@ import type { Reranker } from '../reranker/types.ts';
 import { resolveTransformersCacheDir, type ResolvedConfig } from '../config.ts';
 import { ensureFeedbackDirs } from '../workspace.ts';
 import { SessionTable } from '../feedback/session-table.ts';
+import { LLMIntentRouter, type IntentRouter } from '../query/intent-router.ts';
 
 export type RuntimeOptions = {
   /** Source: anydocs project (pages/ + navigation/). */
@@ -46,6 +47,8 @@ export type RuntimeOptions = {
   reranker?: Reranker | null;
   /** Override LLM (tests inject MockLLM). */
   llm?: LLM;
+  /** Override the lightweight router LLM independently from the answer LLM. */
+  routerLlm?: LLM;
   /**
    * If true, skip the chokidar watcher at start. Tests use this to keep the
    * filesystem from triggering reindex churn during assertions.
@@ -74,6 +77,7 @@ export class Runtime {
    * cross-encoder rerank stage", leaving RRF as the ranking authority.
    */
   readonly reranker: Reranker | null;
+  readonly intentRouter: IntentRouter;
   readonly indexer: Indexer;
   readonly runs: RunsWriter;
   /**
@@ -105,6 +109,8 @@ export class Runtime {
    */
   private readonly llmFactory: () => LLM;
   private llmInstance: LLM | null = null;
+  private readonly routerLlmFactory: () => LLM;
+  private routerLlmInstance: LLM | null = null;
 
   constructor(opts: RuntimeOptions) {
     this.projectRoot = resolve(opts.projectRoot);
@@ -119,6 +125,24 @@ export class Runtime {
     } else {
       this.llmFactory = () => buildDefaultLLM(opts.config);
     }
+    if (opts.routerLlm) {
+      this.routerLlmInstance = opts.routerLlm;
+      this.routerLlmFactory = () => opts.routerLlm!;
+    } else if (opts.llm) {
+      // Test and embedded callers that inject one LLM keep a single mock by
+      // default. They can pass routerLlm to verify independent routing.
+      this.routerLlmFactory = () => opts.llm!;
+    } else if (opts.config.router.model && opts.config.router.model !== opts.config.llm.model) {
+      this.routerLlmFactory = () => buildDefaultLLM(opts.config, { model: opts.config.router.model! });
+    } else {
+      this.routerLlmFactory = () => this.llm;
+    }
+    this.intentRouter = new LLMIntentRouter(() => this.routerLlm, {
+      enabled: opts.config.router.enabled,
+      fastPathMaxChars: opts.config.router.fastPathMaxChars,
+      cacheTtlMs: opts.config.router.cacheTtlMs,
+      cacheMaxEntries: opts.config.router.cacheMaxEntries,
+    });
     this.indexer = new Indexer({
       db: this.db,
       embedder: this.embedder,
@@ -160,6 +184,13 @@ export class Runtime {
       this.llmInstance = this.llmFactory();
     }
     return this.llmInstance;
+  }
+
+  get routerLlm(): LLM {
+    if (!this.routerLlmInstance) {
+      this.routerLlmInstance = this.routerLlmFactory();
+    }
+    return this.routerLlmInstance;
   }
 
   get lastIndexedAtMs(): number | null {

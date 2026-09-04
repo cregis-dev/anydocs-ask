@@ -39,7 +39,7 @@ import {
 } from '../widget/server-gate.ts';
 import { handleMcpRequest } from '../mcp/server.ts';
 import { resolveMcpToken } from '../mcp/gate.ts';
-import { inspectIndexedPage } from '../index/inspect.ts';
+import { inspectIndexedPage, resolveIndexedChunks } from '../index/inspect.ts';
 
 const SSE_HEARTBEAT_MS = 2_000;
 const SSE_DELTA_FLUSH_MS = 150;
@@ -199,7 +199,9 @@ export function createApp(deps: AppDeps): Hono {
         embedder: runtime.embedder,
         reranker: runtime.reranker,
         rerankerConfig: runtime.config.reranker,
+        retrievalConfig: runtime.config.retrieval,
         promptConfig: runtime.config.prompt,
+        intentRouter: runtime.intentRouter,
         resolveLlm: () => runtime.llm,
         // RFC 0007 — record each MCP `ask` turn to runs.jsonl as source=mcp so
         // it shows up in Studio Traffic alongside reader/console. Stateless →
@@ -243,7 +245,16 @@ export function createApp(deps: AppDeps): Hono {
       let ask: Awaited<ReturnType<typeof askWithTrace>>;
       try {
         ask = await askWithTrace(
-          { db: runtime.db, embedder: runtime.embedder, llm: prepared.llm, reranker: runtime.reranker, rerankerConfig: runtime.config.reranker, promptConfig: runtime.config.prompt },
+          {
+            db: runtime.db,
+            embedder: runtime.embedder,
+            llm: prepared.llm,
+            reranker: runtime.reranker,
+            rerankerConfig: runtime.config.reranker,
+            retrievalConfig: runtime.config.retrieval,
+            promptConfig: runtime.config.prompt,
+            intentRouter: runtime.intentRouter,
+          },
           prepared.req,
         );
       } catch (err) {
@@ -366,7 +377,16 @@ export function createApp(deps: AppDeps): Hono {
         let ask: Awaited<ReturnType<typeof askWithTraceStream>>;
         try {
           ask = await askWithTraceStream(
-            { db: runtime.db, embedder: runtime.embedder, llm: prepared.llm, reranker: runtime.reranker, rerankerConfig: runtime.config.reranker, promptConfig: runtime.config.prompt },
+            {
+              db: runtime.db,
+              embedder: runtime.embedder,
+              llm: prepared.llm,
+              reranker: runtime.reranker,
+              rerankerConfig: runtime.config.reranker,
+              retrievalConfig: runtime.config.retrieval,
+              promptConfig: runtime.config.prompt,
+              intentRouter: runtime.intentRouter,
+            },
             prepared.req,
             {
               signal: abortController.signal,
@@ -602,6 +622,37 @@ export function createApp(deps: AppDeps): Hono {
       }, 404);
     }
     return c.json(result);
+  });
+
+  app.post('/v1/index/chunks/resolve', async (c) => {
+    const body = await c.req.json().catch(() => null) as {
+      chunks?: Array<{ chunk_id?: unknown; content_hash?: unknown; page_id?: unknown }>;
+    } | null;
+    if (!body || !Array.isArray(body.chunks) || body.chunks.length > 100) {
+      return c.json({
+        type: 'error',
+        code: 'invalid_request',
+        message: 'chunks must be an array with at most 100 items',
+      }, 400);
+    }
+    const refs = body.chunks.flatMap((item) => {
+      if (!Number.isInteger(item.chunk_id) || Number(item.chunk_id) <= 0) return [];
+      return [{
+        chunk_id: Number(item.chunk_id),
+        ...(typeof item.content_hash === 'string' ? { content_hash: item.content_hash } : {}),
+        ...(typeof item.page_id === 'string' ? { page_id: item.page_id } : {}),
+      }];
+    });
+    if (refs.length !== body.chunks.length) {
+      return c.json({
+        type: 'error',
+        code: 'invalid_request',
+        message: 'every chunk must include a positive integer chunk_id',
+      }, 400);
+    }
+    return c.json({
+      chunks: resolveIndexedChunks(runtime.db, refs, runtime.embedder.model),
+    });
   });
 
   app.post('/v1/index/rebuild', async (c) => {
@@ -934,20 +985,61 @@ function appendRun(
       fused: trace.fused.map((f) => ({
         chunk_id: f.chunk_id,
         page: f.page_id,
+        content_hash: f.content_hash,
+        lang: f.lang,
+        page_title: f.page_title,
+        page_url: f.page_url,
+        in_page_path: f.in_page_path,
+        text_preview: f.text_preview,
+        token_count: f.token_count,
+        parent_id: f.parent_id,
+        chunk_kind: f.chunk_kind,
+        object_path: f.object_path,
         rrf_score: f.rrf_score,
         final_score: f.final_score,
         vec_rank: f.vec_rank,
         bm25_rank: f.bm25_rank,
+        exact_rank: f.exact_rank,
         nav_index: f.nav_index,
       })),
+      ...(trace.selected_context
+        ? {
+            selected_context: trace.selected_context.map((item) => ({
+              chunk_id: item.chunk_id,
+              page: item.page_id,
+              content_hash: item.content_hash,
+              lang: item.lang,
+              page_title: item.page_title,
+              page_url: item.page_url,
+              in_page_path: item.in_page_path,
+              text_preview: item.text_preview,
+              token_count: item.token_count,
+              parent_id: item.parent_id,
+              chunk_kind: item.chunk_kind,
+              object_path: item.object_path,
+              rrf_score: item.rrf_score,
+              final_score: item.final_score,
+              vec_rank: item.vec_rank,
+              bm25_rank: item.bm25_rank,
+              exact_rank: item.exact_rank,
+              nav_index: item.nav_index,
+              context_rank: item.context_rank,
+              context_token_count: item.context_token_count,
+              expanded_parent: item.expanded_parent,
+            })),
+          }
+        : {}),
       subtree_ask_triggered: trace.subtree_ask_triggered,
+      ...(trace.intent_route?.routerStrategy
+        ? { router_strategy: trace.intent_route.routerStrategy }
+        : {}),
+      timings: trace.timings,
     },
     answer: {
       kind,
       answer_id: answerId,
       md,
       citations,
-      confidence: trace.confidence,
       latency_ms: args.latencyMs,
       tokens_in: trace.tokens_in,
       tokens_out: trace.tokens_out,

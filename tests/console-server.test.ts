@@ -71,10 +71,10 @@ function readConsoleBootstrap<T = Record<string, unknown>>(body: string): T {
 }
 
 function readIndexBootstrap(body: string): {
-  langs: Array<{ pages: Array<{ id: string; askStats?: { count: number; medianConfidence: number | null } }> }>;
+  langs: Array<{ pages: Array<{ id: string; askStats?: { count: number } }> }>;
 } {
   const bootstrap = readConsoleBootstrap<{ indexSnapshot: {
-    langs: Array<{ pages: Array<{ id: string; askStats?: { count: number; medianConfidence: number | null } }> }>;
+    langs: Array<{ pages: Array<{ id: string; askStats?: { count: number } }> }>;
   } }>(body);
   return bootstrap.indexSnapshot;
 }
@@ -312,6 +312,52 @@ test('React runs route bootstraps recent records and selected limit', async () =
     assert.equal(bootstrap.projectName, 'docs-zh');
     assert.equal(bootstrap.limit, 25);
     assert.deepEqual(bootstrap.lines.map((line) => line.query), ['How do I authenticate?']);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('React run detail route returns a shareable run workspace and safe traffic target', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const runsDir = join(ws, 'state', 'docs-zh', 'runs');
+    await fs.mkdir(runsDir, { recursive: true });
+    await fs.writeFile(join(runsDir, '2026-W36.jsonl'), `${JSON.stringify({
+      ts: '2026-09-04T04:00:00.000Z',
+      request_id: 'run-detail-1',
+      session_id: 'session-1',
+      query: 'What is A0400?',
+      filters: {},
+      context_pageId: null,
+      source: 'reader',
+      retrieval: { fused: [], selected_context: [], subtree_ask_triggered: false },
+      answer: {
+        kind: 'answer', answer_id: 'answer-1', md: 'Invalid amount.', citations: [],
+        latency_ms: 100, tokens_in: null, tokens_out: null, model: 'mock', error_code: null,
+      },
+      feedback: { beta: null, gamma: null },
+    })}\n`);
+    const app = createConsoleApp({ workspacePath: ws, consolePort: 4100, registry: makeRegistry() });
+
+    const returnTo = '/p/docs-zh?traffic_range=30&traffic_kind=error#traffic';
+    const res = await app.request(`/p/docs-zh/runs/run-detail-1?return=${encodeURIComponent(returnTo)}`);
+    assert.equal(res.status, 200);
+    const bootstrap = readConsoleBootstrap<{
+      kind: string; projectName: string; childLive: boolean; returnTo: string;
+      run: { request_id: string; query: string };
+    }>(await res.text());
+    assert.equal(bootstrap.kind, 'run-detail');
+    assert.equal(bootstrap.projectName, 'docs-zh');
+    assert.equal(bootstrap.childLive, false);
+    assert.equal(bootstrap.returnTo, returnTo);
+    assert.equal(bootstrap.run.request_id, 'run-detail-1');
+    assert.equal(bootstrap.run.query, 'What is A0400?');
+
+    const unsafe = await app.request(`/p/docs-zh/runs/run-detail-1?return=${encodeURIComponent('https://evil.example/')}`);
+    const unsafeBootstrap = readConsoleBootstrap<{ returnTo: string }>(await unsafe.text());
+    assert.equal(unsafeBootstrap.returnTo, '/p/docs-zh?traffic_range=all#traffic');
+    assert.equal((await app.request('/p/docs-zh/runs/missing')).status, 404);
   } finally {
     await cleanup();
   }
@@ -1391,7 +1437,6 @@ test('GET /api/projects/:name/feedback/:id: returns row + run JOIN (RFC 0002 T1-
         question: string;
         rating: number | null;
         breadcrumb: Array<{ title: string }>;
-        confidence: number | null;
         hadNoCitations: boolean | null;
         run: { kind: string; fused: unknown[]; latencyMs: number; model: string | null } | null;
       };
@@ -1400,7 +1445,6 @@ test('GET /api/projects/:name/feedback/:id: returns row + run JOIN (RFC 0002 T1-
     assert.equal(body.detail.feedback_id, 1);
     assert.equal(body.detail.question, 'how do I get a JWT?');
     assert.equal(body.detail.rating, 1);
-    assert.equal(body.detail.confidence, 0.82);
     assert.equal(body.detail.hadNoCitations, false);
     assert.deepEqual(
       body.detail.breadcrumb,
@@ -1454,10 +1498,9 @@ test('GET /api/projects/:name/feedback/:id: row with no linked run → run=null,
       registry: makeRegistry(),
     });
     const body = (await (await app.request('/api/projects/docs-zh/feedback/1')).json()) as {
-      detail: { run: unknown; confidence: number | null; breadcrumb: unknown };
+      detail: { run: unknown; breadcrumb: unknown };
     };
     assert.equal(body.detail.run, null);
-    assert.equal(body.detail.confidence, null);
     assert.equal(body.detail.breadcrumb, null);
   } finally {
     await cleanup();
@@ -1911,8 +1954,7 @@ legacySsrTest('GET /p/:name: Index tab JS reads ?focus=<id> from hash and scroll
 
 test('GET /p/:name: Index tab — per-page ask-usage badge renders when ≥3 hits (RFC 0002 T4)', async () => {
   // Set up: a project with nav→page=auth-jwt, 4 fresh runs all hitting
-  // that page with high confidence. The badge should render with the
-  // neutral (◷) glyph and a count of 4.
+  // that page. The badge should render a count of 4.
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -1954,13 +1996,13 @@ test('GET /p/:name: Index tab — per-page ask-usage badge renders when ≥3 hit
     const body = await (await app.request('/p/docs-zh')).text();
     const page = readIndexBootstrap(body).langs[0]?.pages[0];
     assert.equal(page?.id, 'auth-jwt');
-    assert.deepEqual(page?.askStats, { count: 4, medianConfidence: 0.8 });
+    assert.deepEqual(page?.askStats, { count: 4 });
   } finally {
     await cleanup();
   }
 });
 
-test('GET /p/:name: Index tab — warn tint when median confidence < 0.5 (RFC 0002 T4)', async () => {
+test('GET /p/:name: Index tab — legacy confidence values do not alter usage counts', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -1999,7 +2041,7 @@ test('GET /p/:name: Index tab — warn tint when median confidence < 0.5 (RFC 00
     const body = await (await app.request('/p/docs-zh')).text();
     const page = readIndexBootstrap(body).langs[0]?.pages[0];
     assert.equal(page?.id, 'shaky-page');
-    assert.deepEqual(page?.askStats, { count: 3, medianConfidence: 0.3 });
+    assert.deepEqual(page?.askStats, { count: 3 });
   } finally {
     await cleanup();
   }

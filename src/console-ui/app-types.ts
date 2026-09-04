@@ -78,20 +78,80 @@ export type RunRecord = {
     fused: Array<{
       chunk_id: number;
       page: string;
+      content_hash?: string;
+      lang?: string;
+      page_title?: string;
+      page_url?: string | null;
+      in_page_path?: string;
+      text_preview?: string;
+      token_count?: number;
+      parent_id?: number | null;
+      chunk_kind?: string;
+      object_path?: string | null;
       rrf_score: number;
       final_score: number;
       vec_rank: number | null;
       bm25_rank: number | null;
+      exact_rank?: number | null;
       nav_index: number | null;
     }>;
+    selected_context?: Array<{
+      chunk_id: number;
+      page: string;
+      content_hash?: string;
+      lang: string;
+      page_title: string;
+      page_url: string | null;
+      in_page_path: string;
+      text_preview: string;
+      token_count?: number;
+      parent_id?: number | null;
+      chunk_kind?: string;
+      object_path?: string | null;
+      rrf_score: number;
+      final_score: number;
+      vec_rank: number | null;
+      bm25_rank: number | null;
+      exact_rank?: number | null;
+      nav_index: number | null;
+      context_rank: number;
+      context_token_count: number;
+      expanded_parent: {
+        parent_id: number;
+        content_hash: string;
+        parent_path: string;
+        heading_path: string[];
+        token_count: number;
+        child_count: number;
+      } | null;
+    }>;
     subtree_ask_triggered: boolean;
+    router_strategy?: 'fast_path' | 'cache' | 'llm' | 'fallback' | 'disabled';
+    timings?: {
+      router_ms: number;
+      embedding_ms: number;
+      retrieval_ms: number;
+      rerank_ms: number;
+      generation_ms: number;
+    };
   };
   answer: {
     kind: 'answer' | 'clarify' | 'error';
     answer_id: string | null;
     md: string | null;
-    citations: Array<{ page: string; quote: string; citation_id?: string }>;
-    confidence: number;
+    citations: Array<{
+      chunk_id: number | null;
+      page: string;
+      quote: string;
+      citation_id?: string;
+      semantic_check?: {
+        verdict: 'supports' | 'partially' | 'not_supports';
+        reason: string;
+        model: string;
+        checked_at: string;
+        latency_ms: number;
+      };
+    }>;
     latency_ms: number;
     tokens_in: number | null;
     tokens_out: number | null;
@@ -111,13 +171,21 @@ export type TrafficWindow = {
     countReader: number;
     countConsole: number;
     countMcp: number;
-    meanConfidence: number | null;
     p50LatencyMs: number | null;
     p95LatencyMs: number | null;
     errorRate: number;
     clarifyRate: number;
   };
-  perDay: Array<{ date: string; count: number; meanConfidence: number | null; p95LatencyMs: number | null }>;
+  perDay: Array<{ date: string; count: number; p95LatencyMs: number | null }>;
+};
+
+export type TrafficViewState = {
+  range: 7 | 30 | 90 | 'all';
+  query: string;
+  source: '' | 'reader' | 'console' | 'mcp';
+  kind: '' | 'answer' | 'clarify' | 'error';
+  page: number;
+  pageSize: 25 | 50 | 100;
 };
 
 export type FeedbackRow = {
@@ -128,7 +196,6 @@ export type FeedbackRow = {
   question: string;
   answerId: string;
   currentPageId: string | null;
-  confidence: number | null;
   hadNoCitations: boolean | null;
   sessionId: string | null;
   historyWindow: number | null;
@@ -148,7 +215,6 @@ export type FeedbackSnapshot = {
     explicitCount: number;
     implicitCount: number;
     explicitShare: number | null;
-    meanConfidence: number | null;
     nonAnswerRate: number;
     aplusCandidates: { total: number; mode: 'enabled' | 'shadow' } | null;
     semanticCheckFailed: number | null;
@@ -229,7 +295,7 @@ export type ProjectBootstrap = {
   latestEvalReportBody: string | null;
   indexSnapshot: IndexBootstrap | null;
   trafficWindow?: TrafficWindow;
-  trafficView?: Record<string, unknown>;
+  trafficView?: TrafficViewState;
   feedbackSnapshot?: FeedbackSnapshot;
   candidates?: CandidateSnapshot;
   analyzeHistory: Array<{ filename: string; date: string; sizeBytes: number }>;
@@ -245,6 +311,15 @@ export type RunsBootstrap = {
   navigation: Navigation;
 };
 
+export type RunDetailBootstrap = {
+  kind: 'run-detail';
+  projectName: string;
+  run: RunRecord;
+  childLive: boolean;
+  returnTo: string;
+  navigation: Navigation;
+};
+
 export type ReportBootstrap = {
   kind: 'report';
   projectName: string;
@@ -253,4 +328,4 @@ export type ReportBootstrap = {
   navigation: Navigation;
 };
 
-export type ConsoleBootstrap = HomeBootstrap | ProjectBootstrap | RunsBootstrap | ReportBootstrap;
+export type ConsoleBootstrap = HomeBootstrap | ProjectBootstrap | RunsBootstrap | RunDetailBootstrap | ReportBootstrap;

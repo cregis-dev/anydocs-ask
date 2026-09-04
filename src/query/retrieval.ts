@@ -24,6 +24,9 @@ export type RetrievedChunk = {
   lang: DocsLang;
   in_page_path: string;
   text: string;
+  /** Stable across full reindexes; numeric chunk_id is not. */
+  content_hash?: string;
+  token_count?: number;
   is_code: number;
   parent_id: number | null;
   chunk_kind: string;
@@ -48,28 +51,11 @@ export type RetrieveOptions = {
   perPathK?: number;
   /** Final top-K after RRF. */
   finalK?: number;
-  /**
-   * Individual concept terms extracted from a multi-entity query (e.g.
-   * ["sessions", "checkpoints", "memory"] for "how do sessions, checkpoints,
-   * and memory work?"). When present, a small per-term BM25 pass (top
-   * ENTITY_K each) is injected into the RRF pool at ENTITY_INJECT_RANK so
-   * each named concept has at least one representative in the candidate set,
-   * even if the combined OR query demoted those chunks below perPathK.
-   */
-  entityTerms?: string[];
-  /** Current page id from the client context. Accepted for API compatibility, but ignored by retrieval. */
-  currentPageId?: string | null;
-  /** Language used for language-scoped supplemental/API reference injection. */
+  /** RRF rank constant. Larger values make rank differences less steep. */
+  rrfK?: number;
+  /** Language used to prefer exact identifier matches in the active language. */
   currentPageLang?: DocsLang | null;
-  /** API-intent questions get an extra API reference candidate pass. */
-  apiIntent?: boolean;
-  /** Additional sanitized FTS queries used only for API reference candidate injection. */
-  apiReferenceFtsQueries?: string[];
-  /** Additional sanitized FTS queries used to inject non-API supporting context. */
-  supplementalFtsQueries?: string[];
-  /** Page ids that should contribute supporting context for known domain tasks. */
-  supplementalPageIds?: string[];
-  /** Optional page_id prefix for API reference pages that belong to the active product area. */
+  /** Optional product prefix used to disambiguate generic exact identifiers. */
   apiReferencePagePrefix?: string | null;
   /** Opaque addresses, hashes, API paths, or error codes matched literally. */
   exactIdentifiers?: string[];
@@ -77,33 +63,12 @@ export type RetrieveOptions = {
 
 const DEFAULT_PER_PATH_K = 20;
 const DEFAULT_FINAL_K = 20;
-const RRF_K = 60;
+const DEFAULT_RRF_K = 60;
 /**
  * Vector path over-fetch multiplier — ARCH §6 needs at least PER_PATH_K hits
  * after the boundary filter. 4× covers reasonable scope_id selectivity.
  */
 const VECTOR_OVERFETCH = 4;
-/** Max BM25 hits per entity term for the per-entity injection pass. */
-const ENTITY_K = 5;
-/**
- * Synthetic rank assigned to entity-injected chunks that aren't in the main
- * path pool. Rank perPathK (20) gives them 1/(RRF_K+20) ≈ 0.0125, well below
- * a chunk appearing in both main paths at rank 1 (≈ 0.033), so they fill
- * coverage gaps without displacing strong hits.
- */
-const ENTITY_INJECT_RANK = DEFAULT_PER_PATH_K;
-/** Max API reference chunks to inject for endpoint/field/status questions. */
-const API_REFERENCE_K = 6;
-/** API reference injection should survive trimming but not dominate top dual-path hits. */
-const API_REFERENCE_INJECT_RANK = 6;
-/** Max chunks to inject for domain-specific supporting context. */
-const SUPPLEMENTAL_CONTEXT_K = 4;
-/** Supporting context should survive finalK trimming but remain below exact API refs. */
-const SUPPLEMENTAL_CONTEXT_INJECT_RANK = 10;
-/** Exact literal matches must outrank fuzzy RRF candidates. */
-const EXACT_IDENTIFIER_SCORE = 1;
-const EXACT_IDENTIFIER_K = 8;
-
 /**
  * Trace metadata from the retrieve step — exposed by retrieveWithTrace() for
  * runs jsonl persistence (ARCH §16.4). Per-path rank is 1-based; missing
@@ -112,14 +77,7 @@ const EXACT_IDENTIFIER_K = 8;
 export type RetrievalTrace = {
   vecRanks: Map<number, number>;
   bm25Ranks: Map<number, number>;
-  /** chunk_ids that entered the pool via the per-entity injection pass. */
-  entityInjected: Set<number>;
-  /** Retained for trace schema compatibility. Current page chunks are no longer injected. */
-  currentPageInjected: Set<number>;
-  /** chunk_ids that entered the pool via the API-reference-only retrieval pass. */
-  apiReferenceInjected: Set<number>;
-  /** chunk_ids that entered the pool via supplemental supporting-context queries. */
-  supplementalInjected: Set<number>;
+  exactRanks: Map<number, number>;
 };
 
 export function retrieve(db: DbHandle, opts: RetrieveOptions): RetrievedChunk[] {
@@ -132,6 +90,7 @@ export function retrieveWithTrace(
 ): { chunks: RetrievedChunk[]; trace: RetrievalTrace } {
   const perPathK = opts.perPathK ?? DEFAULT_PER_PATH_K;
   const finalK = opts.finalK ?? DEFAULT_FINAL_K;
+  const rrfK = opts.rrfK ?? DEFAULT_RRF_K;
 
   const vectorIds = vectorPath(db, opts.queryVector, perPathK, opts.scopeId);
   const bm25Ids = opts.ftsQuery ? bm25Path(db, opts.ftsQuery, perPathK, opts.scopeId) : [];
@@ -145,142 +104,45 @@ export function retrieveWithTrace(
     if (!bm25Ranks.has(id)) bm25Ranks.set(id, idx + 1);
   });
 
-  // RRF fusion. Each list provides a rank (1-based); chunks present in only
-  // one list get the other's rank as Infinity, contributing 0.
-  const rrfScores = new Map<number, number>();
-  vectorIds.forEach((id, idx) => {
-    rrfScores.set(id, (rrfScores.get(id) ?? 0) + 1 / (RRF_K + (idx + 1)));
-  });
-  bm25Ids.forEach((id, idx) => {
-    rrfScores.set(id, (rrfScores.get(id) ?? 0) + 1 / (RRF_K + (idx + 1)));
-  });
-
-  const exactIdentifierInjected = new Set<number>();
+  const exactIds: number[] = [];
+  const seenExactIds = new Set<number>();
   for (const identifier of opts.exactIdentifiers ?? []) {
     const ids = exactIdentifierPath(
       db,
       identifier,
-      EXACT_IDENTIFIER_K,
+      perPathK,
       opts.scopeId,
       opts.currentPageLang ?? null,
       opts.apiReferencePagePrefix ?? null,
     );
     for (const id of ids) {
-      exactIdentifierInjected.add(id);
-      rrfScores.set(id, Math.max(rrfScores.get(id) ?? 0, EXACT_IDENTIFIER_SCORE));
+      if (seenExactIds.has(id)) continue;
+      exactIds.push(id);
+      seenExactIds.add(id);
+      if (exactIds.length >= perPathK) break;
     }
+    if (exactIds.length >= perPathK) break;
   }
+  const exactRanks = new Map<number, number>();
+  exactIds.forEach((id, idx) => exactRanks.set(id, idx + 1));
 
-  // Per-entity injection: for each concept term, run a narrow BM25 pass and
-  // either add new chunk_ids at ENTITY_INJECT_RANK score, or stack the
-  // injection score on top of the existing RRF score so that chunks present
-  // in the pool but ranked behind perPathK get pulled forward. This is the
-  // codex-round-8 follow-up — without the additive path, a `checkpoints`
-  // chunk that the combined OR query already retrieved (but ranked at #21+)
-  // stayed below the prompt-context cap and the LLM never saw it.
-  const entityInjected = new Set<number>();
-  if (opts.entityTerms?.length) {
-    const entityInjectScore = 1 / (RRF_K + ENTITY_INJECT_RANK);
-    for (const term of opts.entityTerms) {
-      const sanitized = sanitizeFtsQuery(term);
-      if (!sanitized) continue;
-      const entityIds = bm25Path(db, sanitized, ENTITY_K, opts.scopeId);
-      for (const id of entityIds) {
-        const cur = rrfScores.get(id);
-        if (cur === undefined) {
-          rrfScores.set(id, entityInjectScore);
-          entityInjected.add(id);
-        } else {
-          rrfScores.set(id, cur + entityInjectScore);
-        }
-      }
-    }
+  // Vector, BM25, and exact identifier matching are equal, explainable
+  // ranked paths. No synthetic boosts or protected slots are applied after
+  // fusion: overlap and source rank alone determine the result.
+  const rrfScores = new Map<number, number>();
+  for (const ids of [vectorIds, bm25Ids, exactIds]) {
+    ids.forEach((id, idx) => {
+      rrfScores.set(id, (rrfScores.get(id) ?? 0) + 1 / (rrfK + idx + 1));
+    });
   }
-
-  const supplementalInjected = new Set<number>();
-  if (opts.supplementalFtsQueries?.length) {
-    const supplementalScore = 1 / (RRF_K + SUPPLEMENTAL_CONTEXT_INJECT_RANK);
-    for (const query of [...new Set(opts.supplementalFtsQueries)]) {
-      const ids = bm25Path(db, query, SUPPLEMENTAL_CONTEXT_K, opts.scopeId);
-      for (const id of ids) {
-        supplementalInjected.add(id);
-        const cur = rrfScores.get(id);
-        if (cur === undefined) {
-          rrfScores.set(id, supplementalScore);
-        } else {
-          rrfScores.set(id, cur + supplementalScore);
-        }
-      }
-    }
-  }
-  if (opts.supplementalPageIds?.length && opts.currentPageLang) {
-    const supplementalScore = 1 / (RRF_K + SUPPLEMENTAL_CONTEXT_INJECT_RANK);
-    const pageQueries = [
-      ...(opts.supplementalFtsQueries ?? []),
-      ...(opts.apiReferenceFtsQueries ?? []),
-      ...(opts.ftsQuery ? [opts.ftsQuery] : []),
-    ];
-    for (const pageId of [...new Set(opts.supplementalPageIds)]) {
-      const ids = currentPagePath(
-        db,
-        pageId,
-        opts.currentPageLang,
-        2,
-        opts.scopeId,
-        pageQueries,
-      );
-      for (const id of ids) {
-        supplementalInjected.add(id);
-        const cur = rrfScores.get(id);
-        if (cur === undefined) {
-          rrfScores.set(id, supplementalScore);
-        } else {
-          rrfScores.set(id, cur + supplementalScore);
-        }
-      }
-    }
-  }
-
-  const currentPageInjected = new Set<number>();
-
-  const apiReferenceInjected = new Set<number>();
-  if (opts.apiIntent && opts.ftsQuery) {
-    const apiReferenceInjectScore = 1 / (RRF_K + API_REFERENCE_INJECT_RANK);
-    const queries = [...new Set(
-      opts.apiReferenceFtsQueries?.length ? opts.apiReferenceFtsQueries : [opts.ftsQuery],
-    )];
-    for (const query of queries) {
-      const apiReferenceIds = apiReferencePath(
-        db,
-        query,
-        API_REFERENCE_K,
-        opts.scopeId,
-        opts.currentPageLang ?? null,
-        opts.apiReferencePagePrefix ?? null,
-      );
-      for (const id of apiReferenceIds) {
-        const cur = rrfScores.get(id);
-        if (cur === undefined) {
-          rrfScores.set(id, apiReferenceInjectScore);
-          apiReferenceInjected.add(id);
-        } else {
-          rrfScores.set(id, cur + apiReferenceInjectScore);
-        }
-      }
-    }
-  }
-
-  const protectedIds = new Set([...supplementalInjected, ...exactIdentifierInjected]);
-  const ranked = keepProtectedIds(
-    [...rrfScores.entries()].sort((a, b) => b[1] - a[1]),
-    finalK,
-    protectedIds,
-  );
+  const ranked = [...rrfScores.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+    .slice(0, finalK);
 
   if (ranked.length === 0) {
     return {
       chunks: [],
-      trace: { vecRanks, bm25Ranks, entityInjected, currentPageInjected, apiReferenceInjected, supplementalInjected },
+      trace: { vecRanks, bm25Ranks, exactRanks },
     };
   }
 
@@ -296,25 +158,8 @@ export function retrieveWithTrace(
   }
   return {
     chunks: out,
-    trace: { vecRanks, bm25Ranks, entityInjected, currentPageInjected, apiReferenceInjected, supplementalInjected },
+    trace: { vecRanks, bm25Ranks, exactRanks },
   };
-}
-
-function keepProtectedIds(
-  ranked: Array<[number, number]>,
-  finalK: number,
-  protectedIds: Set<number>,
-): Array<[number, number]> {
-  const top = ranked.slice(0, finalK);
-  if (protectedIds.size === 0) return top;
-  const seen = new Set(top.map(([id]) => id));
-  for (const row of ranked) {
-    const id = row[0];
-    if (!protectedIds.has(id) || seen.has(id)) continue;
-    top.push(row);
-    seen.add(id);
-  }
-  return top;
 }
 
 // ---------------------------------------------------------------------------
@@ -480,94 +325,6 @@ function isScopeSensitiveIdentifier(identifier: string): boolean {
   );
 }
 
-function currentPagePath(
-  db: DbHandle,
-  pageId: string,
-  lang: DocsLang,
-  limit: number,
-  scopeId: string | null,
-  ftsQueries: string[],
-): number[] {
-  const out: number[] = [];
-  const seen = new Set<number>();
-  for (const ftsQuery of [...new Set(ftsQueries)]) {
-    if (out.length >= limit) break;
-    const rows = db
-      .prepare(
-        `SELECT f.rowid AS chunk_id
-           FROM chunks_fts f
-           JOIN chunks c ON c.chunk_id = f.rowid
-           JOIN pages p ON p.page_id = c.page_id AND p.lang = c.lang
-          WHERE chunks_fts MATCH ?
-            AND c.page_id = ?
-            AND c.lang = ?
-            AND p.status = 'published'
-            AND (? IS NULL OR p.subtree_root = ?)
-          ORDER BY rank
-          LIMIT ?`,
-      )
-      .all(ftsQuery, pageId, lang, scopeId, scopeId, limit) as Array<{ chunk_id: number }>;
-    for (const row of rows) {
-      if (seen.has(row.chunk_id)) continue;
-      out.push(row.chunk_id);
-      seen.add(row.chunk_id);
-      if (out.length >= limit) break;
-    }
-  }
-  if (out.length >= limit) return out;
-  const rows = db
-    .prepare(
-      `SELECT c.chunk_id
-         FROM chunks c
-         JOIN pages p ON p.page_id = c.page_id AND p.lang = c.lang
-        WHERE c.page_id = ?
-          AND c.lang = ?
-          AND p.status = 'published'
-          AND (? IS NULL OR p.subtree_root = ?)
-        ORDER BY c.chunk_id ASC
-        LIMIT ?`,
-    )
-    .all(pageId, lang, scopeId, scopeId, limit) as Array<{ chunk_id: number }>;
-  for (const row of rows) {
-    if (seen.has(row.chunk_id)) continue;
-    out.push(row.chunk_id);
-    if (out.length >= limit) break;
-  }
-  return out;
-}
-
-function apiReferencePath(
-  db: DbHandle,
-  ftsQuery: string,
-  limit: number,
-  scopeId: string | null,
-  lang: DocsLang | null,
-  pagePrefix: string | null,
-): number[] {
-  const likePrefix = pagePrefix ? `${pagePrefix}%` : null;
-  const rows = db
-    .prepare(
-      `SELECT f.rowid AS chunk_id
-         FROM chunks_fts f
-         JOIN chunks c ON c.chunk_id = f.rowid
-         JOIN pages p ON p.page_id = c.page_id AND p.lang = c.lang
-        WHERE chunks_fts MATCH ?
-          AND p.status = 'published'
-          AND (? IS NULL OR p.lang = ?)
-          AND (? IS NULL OR p.subtree_root = ?)
-          AND (? IS NULL OR p.page_id LIKE ?)
-          AND (
-            p.page_id LIKE 'api-%'
-            OR p.url LIKE '%/reference/%'
-            OR c.text LIKE '%API reference:%'
-          )
-        ORDER BY rank
-        LIMIT ?`,
-    )
-    .all(ftsQuery, lang, lang, scopeId, scopeId, likePrefix, likePrefix, limit) as Array<{ chunk_id: number }>;
-  return rows.map((r) => r.chunk_id);
-}
-
 function fetchChunkRows(
   db: DbHandle,
   chunkIds: number[],
@@ -577,7 +334,8 @@ function fetchChunkRows(
   const placeholders = chunkIds.map(() => '?').join(',');
   const rows = db
     .prepare(
-      `SELECT c.chunk_id, c.page_id, c.lang, c.in_page_path, c.text, c.is_code,
+      `SELECT c.chunk_id, c.page_id, c.lang, c.in_page_path, c.text,
+              c.content_hash, c.token_count, c.is_code,
               c.parent_id, c.chunk_kind, c.object_path,
               p.title AS page_title, p.url AS page_url, p.subtree_root,
               p.nav_index, p.breadcrumb
@@ -591,6 +349,8 @@ function fetchChunkRows(
       lang: DocsLang;
       in_page_path: string;
       text: string;
+      content_hash: string;
+      token_count: number;
       is_code: number;
       parent_id: number | null;
       chunk_kind: string;

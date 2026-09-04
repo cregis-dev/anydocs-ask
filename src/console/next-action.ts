@@ -151,14 +151,5 @@ export function computeNextAction(inputs: NextActionInputs): NextAction | null {
     };
   }
 
-  if (tr && tr.totals.countReader >= 20 && tr.totals.meanConfidence !== null && tr.totals.meanConfidence < 0.5) {
-    return {
-      level: 'warn',
-      title: `${trafficRangeLabel(tr.range)} mean confidence ${tr.totals.meanConfidence.toFixed(2)}`,
-      detail: 'Retrieval quality looks low — review low-confidence requests on Traffic and run Analyze.',
-      cta: { label: 'Open Traffic', targetTab: 'traffic' },
-    };
-  }
-
   return null;
 }

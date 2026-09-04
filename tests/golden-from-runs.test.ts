@@ -9,7 +9,6 @@ function fakeRun(over: {
   ts?: string;
   session_id?: string | null;
   query?: string;
-  confidence?: number;
   citations?: { page: string }[];
   md?: string;
   kind?: 'answer' | 'clarify' | 'error';
@@ -32,7 +31,6 @@ function fakeRun(over: {
         page: c.page,
         quote: 'q',
       })),
-      confidence: over.confidence ?? 0.85,
       latency_ms: 200,
       tokens_in: null,
       tokens_out: null,
@@ -43,9 +41,9 @@ function fakeRun(over: {
   };
 }
 
-test('from-runs: high-confidence answer becomes a candidate', () => {
+test('from-runs: cited answer becomes a candidate', () => {
   const out = generateFromRuns([
-    fakeRun({ request_id: 'r1', confidence: 0.85, query: 'How to install hermes' }),
+    fakeRun({ request_id: 'r1', query: 'How to install hermes' }),
   ]);
   assert.equal(out.candidates.length, 1);
   assert.equal(out.candidates[0]!.template_id, 'from_runs');
@@ -55,18 +53,18 @@ test('from-runs: high-confidence answer becomes a candidate', () => {
   assert.equal(out.candidates[0]!.expected.must_contain.length, 0);
 });
 
-test('from-runs: drops low-confidence', () => {
+test('from-runs: drops answers without citations', () => {
   const out = generateFromRuns([
-    fakeRun({ request_id: 'r1', confidence: 0.5 }),
+    fakeRun({ request_id: 'r1', citations: [] }),
   ]);
   assert.equal(out.candidates.length, 0);
-  assert.equal(out.stats.droppedLowConf, 1);
+  assert.equal(out.stats.droppedNoCitations, 1);
 });
 
 test('from-runs: drops clarify and error kinds', () => {
   const out = generateFromRuns([
-    fakeRun({ request_id: 'r1', confidence: 0.9, kind: 'clarify' }),
-    fakeRun({ request_id: 'r2', confidence: 0.9, kind: 'error' }),
+    fakeRun({ request_id: 'r1', kind: 'clarify' }),
+    fakeRun({ request_id: 'r2', kind: 'error' }),
   ]);
   assert.equal(out.candidates.length, 0);
   assert.equal(out.stats.droppedNonAnswer, 2);
@@ -74,7 +72,7 @@ test('from-runs: drops clarify and error kinds', () => {
 
 test('from-runs: drops answers > 600 chars', () => {
   const out = generateFromRuns([
-    fakeRun({ request_id: 'r1', confidence: 0.9, md: 'x'.repeat(700) }),
+    fakeRun({ request_id: 'r1', md: 'x'.repeat(700) }),
   ]);
   assert.equal(out.candidates.length, 0);
   assert.equal(out.stats.droppedLongAnswer, 1);
@@ -86,14 +84,12 @@ test('from-runs: drops re-asked runs (within 30s, edit-distance < 5)', () => {
       request_id: 'r1',
       session_id: 's1',
       ts: '2026-05-09T12:00:00.000Z',
-      confidence: 0.9,
       query: 'how to install hermes',
     }),
     fakeRun({
       request_id: 'r2',
       session_id: 's1',
       ts: '2026-05-09T12:00:10.000Z',
-      confidence: 0.9,
       query: 'how to install hermess', // edit distance 1
     }),
   ]);
@@ -103,15 +99,19 @@ test('from-runs: drops re-asked runs (within 30s, edit-distance < 5)', () => {
   assert.equal(out.candidates[0]!.query, 'how to install hermess');
 });
 
-test('from-runs: clusters near-duplicate queries, keeps highest-confidence rep', () => {
+test('from-runs: clusters near-duplicate queries, keeps the best-cited rep', () => {
   const out = generateFromRuns([
-    fakeRun({ request_id: 'r1', confidence: 0.75, query: 'install hermes' }),
-    fakeRun({ request_id: 'r2', confidence: 0.95, query: 'install hermess' }), // near-dup
-    fakeRun({ request_id: 'r3', confidence: 0.85, query: 'completely different question entirely about voice' }),
+    fakeRun({ request_id: 'r1', query: 'install hermes', citations: [{ page: 'home' }] }),
+    fakeRun({
+      request_id: 'r2',
+      query: 'install hermess',
+      citations: [{ page: 'home' }, { page: 'install' }],
+    }), // near-dup
+    fakeRun({ request_id: 'r3', query: 'completely different question entirely about voice' }),
   ]);
   assert.equal(out.stats.clusters, 2);
   assert.equal(out.candidates.length, 2);
-  // Highest-conf rep wins for the duplicate cluster
+  // The representative with broader citation coverage wins.
   const firstClusterReps = out.candidates.filter((c) => c.query.startsWith('install'));
   assert.equal(firstClusterReps.length, 1);
   assert.equal(firstClusterReps[0]!.query, 'install hermess');
@@ -134,8 +134,8 @@ test('from-runs: dedup against existing approved cases', () => {
   ];
   const out = generateFromRuns(
     [
-      fakeRun({ request_id: 'r1', confidence: 0.9, query: 'How do I install Hermes?' }), // dup of existing
-      fakeRun({ request_id: 'r2', confidence: 0.9, query: 'totally fresh new query about voice' }),
+      fakeRun({ request_id: 'r1', query: 'How do I install Hermes?' }), // dup of existing
+      fakeRun({ request_id: 'r2', query: 'totally fresh new query about voice' }),
     ],
     { existingCases: existing },
   );
@@ -146,7 +146,7 @@ test('from-runs: dedup against existing approved cases', () => {
 
 test('from-runs: lang detection (CJK -> zh)', () => {
   const out = generateFromRuns([
-    fakeRun({ request_id: 'r1', confidence: 0.9, query: '如何安装 Hermes？' }),
+    fakeRun({ request_id: 'r1', query: '如何安装 Hermes？' }),
   ]);
   assert.equal(out.candidates[0]!.lang, 'zh');
 });
@@ -156,8 +156,8 @@ test('from-runs: dedup is also applied between candidates within one run', () =>
   // (different sessions so they aren't merged at cluster step). Second
   // should be dropped as dup of the first accepted candidate.
   const out = generateFromRuns([
-    fakeRun({ request_id: 'r1', session_id: null, confidence: 0.95, query: 'install hermes please' }),
-    fakeRun({ request_id: 'r2', session_id: null, confidence: 0.94, query: 'install hermes please.' }),
+    fakeRun({ request_id: 'r1', session_id: null, query: 'install hermes please' }),
+    fakeRun({ request_id: 'r2', session_id: null, query: 'install hermes please.' }),
   ]);
   // Cluster step would actually merge these (normalization removes trailing
   // punct). Verify it does:
@@ -180,7 +180,7 @@ test('from-runs: limit caps output', () => {
     'rotate runs jsonl files weekly',
   ];
   const runs = phrases.map((q, i) =>
-    fakeRun({ request_id: `r${i}`, confidence: 0.9, query: q }),
+    fakeRun({ request_id: `r${i}`, query: q }),
   );
   const out = generateFromRuns(runs, { limit: 3 });
   assert.equal(out.candidates.length, 3);
@@ -188,7 +188,7 @@ test('from-runs: limit caps output', () => {
 
 test('from-runs: stable id format runs:<8-hex>', () => {
   const out = generateFromRuns([
-    fakeRun({ request_id: 'r1', confidence: 0.9, query: 'foo bar' }),
+    fakeRun({ request_id: 'r1', query: 'foo bar' }),
   ]);
   assert.match(out.candidates[0]!.id, /^runs:[0-9a-f]{8}$/);
 });
@@ -197,7 +197,6 @@ test('from-runs: must_cite_pages dedupes citations preserving order', () => {
   const out = generateFromRuns([
     fakeRun({
       request_id: 'r1',
-      confidence: 0.9,
       citations: [{ page: 'a' }, { page: 'b' }, { page: 'a' }, { page: 'c' }],
     }),
   ]);

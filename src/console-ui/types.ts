@@ -1,6 +1,5 @@
 export type AskStats = {
   count: number;
-  medianConfidence: number | null;
 };
 
 export type IndexPage = {
@@ -96,6 +95,16 @@ export type IndexedPageChunks = {
   page: IndexedPageMeta;
   parents: IndexedParent[];
   chunks: IndexedChunk[];
+};
+
+export type ResolvedIndexedChunk = {
+  requested_chunk_id: number;
+  requested_content_hash: string | null;
+  match: 'id' | 'id_unverified' | 'content_hash' | 'missing';
+  stale_id: boolean;
+  page: IndexedPageMeta | null;
+  parent: IndexedParent | null;
+  chunk: IndexedChunk | null;
 };
 
 declare global {

@@ -2,8 +2,7 @@
  * D1 / D2 / D3 — analyze dimensions per ARCH §16.6 (v1 ships 1-3; 4-5 v1.5).
  *
  *   D1 Recall failure
- *     trigger: confidence < confidenceFloor
- *           ∨ citations.length === 0
+ *     trigger: citations.length === 0
  *           ∨ same-session re-ask within 30s with edit distance < 5
  *     bucket: cluster by normalized query (see cluster.ts)
  *
@@ -30,7 +29,6 @@ import { clusterByQuery, levenshteinAtMost, normalize, type Cluster } from './cl
 
 export type DimensionInputs = {
   runs: RunRecord[];
-  confidenceFloor: number;
   latencyP95Threshold: number;
 };
 
@@ -40,7 +38,7 @@ export type RecallFailureCluster = {
    *  reader see "the system thinks X but the user expected Y". */
   topPagesAtRank1: { page: string; count: number }[];
   /** Triggers that fired across the cluster (stable order). */
-  triggers: ('low-confidence' | 'no-citations' | 'reask-30s')[];
+  triggers: ('no-citations' | 'reask-30s')[];
 };
 
 export type RecallFindings = {
@@ -103,14 +101,13 @@ export function analyzeDimensions(input: DimensionInputs): DimensionFindings {
 // D1 — Recall failures
 // ---------------------------------------------------------------------------
 
-type RecallTrigger = 'low-confidence' | 'no-citations' | 'reask-30s';
+type RecallTrigger = 'no-citations' | 'reask-30s';
 
 function analyzeRecall(input: DimensionInputs): RecallFindings {
   const triggers = new Map<string, Set<RecallTrigger>>(); // request_id -> triggers
   for (const r of input.runs) {
     if (r.answer.kind === 'error') continue; // validation / client errors, not retrieval quality
     const t = new Set<RecallTrigger>();
-    if (r.answer.confidence < input.confidenceFloor) t.add('low-confidence');
     if (r.answer.citations.length === 0) t.add('no-citations');
     if (t.size > 0) triggers.set(r.request_id, t);
   }
@@ -159,7 +156,7 @@ function analyzeRecall(input: DimensionInputs): RecallFindings {
       .map(([page, count]) => ({ page, count }))
       .sort((a, b) => b.count - a.count || a.page.localeCompare(b.page))
       .slice(0, 3);
-    const triggerOrder: RecallTrigger[] = ['low-confidence', 'no-citations', 'reask-30s'];
+    const triggerOrder: RecallTrigger[] = ['no-citations', 'reask-30s'];
     const triggers_ = triggerOrder.filter((t) => trigSet.has(t));
     return { cluster: c, topPagesAtRank1, triggers: triggers_ };
   });
