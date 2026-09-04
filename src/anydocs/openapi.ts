@@ -256,22 +256,44 @@ function mediaSchema(content: unknown): unknown | null {
 }
 
 function schemaFields(schema: unknown, spec: OpenApiSpec): Field[] {
-  const resolved = flattenSchema(schema, spec);
-  if (!objectRecord(resolved) || !objectRecord(resolved.properties)) return [];
-  const required = new Set(Array.isArray(resolved.required) ? resolved.required.filter(isString) : []);
   const out: Field[] = [];
+
+  collectSchemaFields(schema, spec, '', 0, out);
+  return out;
+}
+
+function collectSchemaFields(
+  schema: unknown,
+  spec: OpenApiSpec,
+  prefix: string,
+  depth: number,
+  out: Field[],
+): void {
+  if (depth > 6 || out.length >= 200) return;
+  const resolved = flattenSchema(schema, spec);
+  if (!objectRecord(resolved) || !objectRecord(resolved.properties)) return;
+
+  const required = new Set(Array.isArray(resolved.required) ? resolved.required.filter(isString) : []);
   for (const [name, propRaw] of Object.entries(resolved.properties)) {
+    if (out.length >= 200) return;
     const prop = flattenSchema(propRaw, spec);
     if (!objectRecord(prop)) continue;
+
+    const fieldName = prefix ? `${prefix}.${name}` : name;
     out.push({
-      name,
+      name: fieldName,
       type: schemaType(prop),
       required: required.has(name),
       description: stringOr(prop.description, ''),
       example: exampleText(prop.example),
     });
+
+    if (prop.type === 'array') {
+      collectSchemaFields(prop.items, spec, `${fieldName}[]`, depth + 1, out);
+    } else {
+      collectSchemaFields(prop, spec, fieldName, depth + 1, out);
+    }
   }
-  return out;
 }
 
 function formatField(field: Field): string {

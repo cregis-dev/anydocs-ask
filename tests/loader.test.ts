@@ -159,6 +159,56 @@ test('loader: OpenAPI descriptors become synthetic API reference pages', async (
                   },
                 },
               },
+              responses: {
+                '200': {
+                  content: {
+                    'application/json': {
+                      schema: {
+                        allOf: [
+                          { $ref: '#/components/schemas/StandardResponse' },
+                          {
+                            type: 'object',
+                            required: ['data'],
+                            properties: {
+                              data: { $ref: '#/components/schemas/PagedData' },
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        components: {
+          schemas: {
+            StandardResponse: {
+              type: 'object',
+              required: ['code', 'msg'],
+              properties: {
+                code: { type: 'string', example: '00000' },
+                msg: { type: 'string', example: 'ok' },
+              },
+            },
+            PagedData: {
+              type: 'object',
+              required: ['page_num', 'rows'],
+              properties: {
+                page_num: { type: 'integer', format: 'int32' },
+                rows: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/Transaction' },
+                },
+              },
+            },
+            Transaction: {
+              type: 'object',
+              required: ['status'],
+              properties: {
+                status: { type: 'integer', format: 'int32', description: '交易状态' },
+              },
             },
           },
         },
@@ -177,6 +227,8 @@ test('loader: OpenAPI descriptors become synthetic API reference pages', async (
     assert.match(text, /order_currency/);
     assert.match(text, /USDT/);
     assert.match(text, /1000 次\/分钟/);
+    assert.match(text, /data\.page_num/);
+    assert.match(text, /data\.rows\[\]\.status/);
   } finally {
     await cleanup();
   }
