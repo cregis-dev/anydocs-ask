@@ -116,9 +116,21 @@ test('langFromScopeId: unsupported lang prefix returns null', () => {
 
 import {
   answerMentionsEndpointPath,
+  apiReferencePagePrefixForProduct,
   diversifyChunksByPage,
   extractEntityTerms,
 } from '../src/query/answer.ts';
+
+test('apiReferencePagePrefixForProduct: explicit Team API context overrides a broad WaaS route', () => {
+  assert.equal(
+    apiReferencePagePrefixForProduct('waas', 'Team API 查询 wallet_id 字段'),
+    'api-team-api-',
+  );
+  assert.equal(
+    apiReferencePagePrefixForProduct('unknown', 'POST /openapi/v1/wallet_balance'),
+    'api-team-api-',
+  );
+});
 
 test('extractEntityTerms: comma-separated triple', () => {
   assert.deepEqual(

@@ -50,6 +50,8 @@ import {
 
 const HARD_MAX_CHUNKS = 20;
 const DEFAULT_MAX_CHUNKS = 8;
+const DEFAULT_CONTEXT_TOKEN_BUDGET = 8000;
+const DEFAULT_PARENT_TOKEN_LIMIT = 1600;
 /**
  * Number of times we retry an LLM call when postprocess strips every
  * citation. Bumped 1 → 2 after codex round-11 found ~10 % of the
@@ -282,6 +284,7 @@ type RetrievalPipelineOutput = {
   activeHistory: NonNullable<AskRequest['context']>['history'];
   safeHistory: NonNullable<AskRequest['context']>['history'];
   apiIntent: boolean;
+  apiReferencePagePrefix: string | null;
   apiReferenceHintTerms: string[];
   apiReferenceVersionPrefs: string[];
   confidence: number;
@@ -352,7 +355,10 @@ async function runRetrievalPipeline(
   const supplementalContextHints = intentRoute.supplementalContextHints;
   const supplementalPageIds = intentRoute.supplementalPageIds;
   const apiReferenceVersionPrefs = intentRoute.apiReferenceVersionPrefs;
-  const apiReferencePagePrefix = apiReferencePagePrefixForProduct(intentRoute.product);
+  const apiReferencePagePrefix = apiReferencePagePrefixForProduct(
+    intentRoute.product,
+    `${safeQuestion}\n${searchQuestion}`,
+  );
   const apiReferenceHintTerms = apiReferenceHints
     .flatMap((hint) => hint.toLowerCase().split(/\s+/))
     .filter(Boolean);
@@ -413,6 +419,7 @@ async function runRetrievalPipeline(
     activeHistory,
     safeHistory,
     apiIntent,
+    apiReferencePagePrefix,
     apiReferenceHintTerms,
     apiReferenceVersionPrefs,
     confidence,
@@ -507,6 +514,7 @@ async function askWithTraceInternal(
     activeHistory,
     safeHistory,
     apiIntent,
+    apiReferencePagePrefix,
     apiReferenceHintTerms,
     apiReferenceVersionPrefs,
     confidence,
@@ -545,17 +553,22 @@ async function askWithTraceInternal(
 
   // 6 + 7. Generate + postprocess.
   const isCrossLang = outcome.kind === 'translate-fallback';
-  const pickedChildren = pickContextChunks(outcome, req.options?.max_chunks, entityTerms, {
+  const contextCap = contextChunkCap(req.options?.max_chunks, entityTerms);
+  const contextCandidates = pickContextChunks(outcome, req.options?.max_chunks, entityTerms, {
     apiIntent,
     apiReferenceCandidates: reranked,
     apiReferenceHintTerms,
-    apiReferencePagePrefix: apiReferencePagePrefixForProduct(intentRoute.product),
+    apiReferencePagePrefix,
     apiReferenceVersionPrefs,
     projectSetupIntent,
     supplementalPageIds,
     queryLang,
   });
-  const pickedChunks = expandParentContext(deps.db, pickedChildren);
+  const pickedChunks = selectContextWithParents(deps.db, contextCandidates, {
+    maxItems: contextCap,
+    maxTotalTokens: DEFAULT_CONTEXT_TOKEN_BUDGET,
+    maxParentTokens: DEFAULT_PARENT_TOKEN_LIMIT,
+  });
   const selectedContextTrace = buildSelectedContextTrace(pickedChunks, retrievalTrace);
   const formatHint = detectFormatHint(question);
   const preparedPromptInput = prepareDiagnosticInput(question);
@@ -761,37 +774,128 @@ export function expandParentContext(
   chunks: RerankedChunk[],
   maxParentChars = 6000,
 ): RerankedChunk[] {
-  const parentIds = [...new Set(chunks.map((chunk) => chunk.parent_id).filter((id): id is number => id !== null))];
-  if (parentIds.length === 0) return chunks;
+  return selectContextWithParents(db, chunks, {
+    maxItems: chunks.length,
+    maxTotalTokens: Number.POSITIVE_INFINITY,
+    maxParentTokens: Number.POSITIVE_INFINITY,
+    maxParentChars,
+  });
+}
+
+export type ContextSelectionOptions = {
+  maxItems: number;
+  maxTotalTokens?: number;
+  maxParentTokens?: number;
+  /** Compatibility guard for callers that still express the parent bound in characters. */
+  maxParentChars?: number;
+};
+
+/**
+ * Materialize ranked child candidates into prompt context units.
+ *
+ * Expand a structural parent at most once, keep the complete context under a
+ * global token budget, and continue scanning candidates after duplicate child
+ * hits collapse. This makes the item limit apply to actual prompt citations,
+ * not to the pre-expansion child list.
+ */
+export function selectContextWithParents(
+  db: DbHandle,
+  candidates: RerankedChunk[],
+  options: ContextSelectionOptions,
+): RerankedChunk[] {
+  const maxItems = Math.max(0, Math.floor(options.maxItems));
+  if (maxItems === 0 || candidates.length === 0) return [];
+  const maxTotalTokens = options.maxTotalTokens ?? DEFAULT_CONTEXT_TOKEN_BUDGET;
+  const maxParentTokens = options.maxParentTokens ?? DEFAULT_PARENT_TOKEN_LIMIT;
+  const maxParentChars = options.maxParentChars ?? Number.POSITIVE_INFINITY;
+  const parentIds = [...new Set(candidates.map((chunk) => chunk.parent_id).filter((id): id is number => id !== null))];
+  if (parentIds.length === 0) {
+    return takeWithinTokenBudget(candidates, maxItems, maxTotalTokens);
+  }
   const placeholders = parentIds.map(() => '?').join(',');
   const rows = db.prepare(
-    `SELECT cp.parent_id, cp.text, COUNT(c.chunk_id) AS child_count
+    `SELECT cp.parent_id, cp.text, cp.token_count, COUNT(c.chunk_id) AS child_count
        FROM chunk_parents cp
        LEFT JOIN chunks c ON c.parent_id = cp.parent_id
       WHERE cp.parent_id IN (${placeholders})
-      GROUP BY cp.parent_id, cp.text`,
-  ).all(...parentIds) as Array<{ parent_id: number; text: string; child_count: number }>;
+      GROUP BY cp.parent_id, cp.text, cp.token_count`,
+  ).all(...parentIds) as Array<{
+    parent_id: number;
+    text: string;
+    token_count: number;
+    child_count: number;
+  }>;
   const parents = new Map(rows.map((row) => [row.parent_id, row] as const));
-  const emitted = new Set<number>();
+  const emittedParents = new Set<number>();
+  const emittedParentFallbacks = new Set<number>();
+  const emittedChildren = new Set<number>();
   const out: RerankedChunk[] = [];
-  for (const chunk of chunks) {
-    if (chunk.parent_id === null) {
-      out.push(chunk);
-      continue;
+  let usedTokens = 0;
+  for (const chunk of candidates) {
+    if (out.length >= maxItems) break;
+    if (emittedChildren.has(chunk.chunk_id)) continue;
+    emittedChildren.add(chunk.chunk_id);
+
+    let selected = chunk;
+    let selectedTokens = estimateContextTokens(chunk.text);
+    let parentFallbackId: number | null = null;
+    const parent = chunk.parent_id === null ? undefined : parents.get(chunk.parent_id);
+    if (
+      parent &&
+      parent.child_count >= 2 &&
+      parent.token_count <= maxParentTokens &&
+      parent.text.length <= maxParentChars
+    ) {
+      if (emittedParents.has(parent.parent_id)) continue;
+      if (usedTokens + parent.token_count <= maxTotalTokens) {
+        emittedParents.add(parent.parent_id);
+        selected = { ...chunk, text: parent.text };
+        selectedTokens = parent.token_count;
+      } else {
+        // The full parent no longer fits. Keep only its best-ranked child so
+        // later siblings do not consume the slots that refill should use for
+        // distinct context units.
+        if (emittedParentFallbacks.has(parent.parent_id)) continue;
+        parentFallbackId = parent.parent_id;
+      }
     }
-    const parent = parents.get(chunk.parent_id);
-    if (!parent || parent.child_count < 2 || parent.text.length > maxParentChars) {
-      out.push(chunk);
-      continue;
-    }
-    if (emitted.has(chunk.parent_id)) continue;
-    emitted.add(chunk.parent_id);
-    out.push({ ...chunk, text: parent.text });
+
+    if (usedTokens + selectedTokens > maxTotalTokens) continue;
+    if (parentFallbackId !== null) emittedParentFallbacks.add(parentFallbackId);
+    out.push(selected);
+    usedTokens += selectedTokens;
   }
   return out;
 }
 
-function apiReferencePagePrefixForProduct(product: IntentProduct): string | null {
+function takeWithinTokenBudget(
+  candidates: RerankedChunk[],
+  maxItems: number,
+  maxTotalTokens: number,
+): RerankedChunk[] {
+  const out: RerankedChunk[] = [];
+  const seen = new Set<number>();
+  let usedTokens = 0;
+  for (const chunk of candidates) {
+    if (out.length >= maxItems) break;
+    if (seen.has(chunk.chunk_id)) continue;
+    seen.add(chunk.chunk_id);
+    const tokens = estimateContextTokens(chunk.text);
+    if (usedTokens + tokens > maxTotalTokens) continue;
+    out.push(chunk);
+    usedTokens += tokens;
+  }
+  return out;
+}
+
+function estimateContextTokens(text: string): number {
+  const cjk = text.match(/[\u3400-\u9fff]/gu)?.length ?? 0;
+  const nonCjkLength = text.replace(/[\u3400-\u9fff]/gu, '').length;
+  return Math.max(1, cjk + Math.ceil(nonCjkLength / 4));
+}
+
+export function apiReferencePagePrefixForProduct(product: IntentProduct, query = ''): string | null {
+  if (/\/openapi\/|\bteam\s+api\b|团队\s*API/i.test(query)) return 'api-team-api-';
   if (product === 'payment_engine') return 'api-payment-engine-api-';
   if (product === 'waas') return 'api-waas-api-';
   return null;
@@ -1235,12 +1339,11 @@ function pickContextChunks(
   // still left e.g. `checkpoints` outside the prompt. The lift is
   // proportional to the entity count (3 entities → 15 chunks) and capped
   // by HARD_MAX_CHUNKS so an unreasonable enumeration can't blow up cost.
-  const defaultCap =
-    entityTerms && entityTerms.length >= 2
-      ? Math.min(HARD_MAX_CHUNKS, Math.max(DEFAULT_MAX_CHUNKS, entityTerms.length * 5))
-      : DEFAULT_MAX_CHUNKS;
-  const cap = Math.min(clientMax ?? defaultCap, HARD_MAX_CHUNKS);
-  let picked = diversifyChunksByPage(outcome.pick).slice(0, cap);
+  const cap = contextChunkCap(clientMax, entityTerms);
+  // Keep a bounded reserve so parent collapse and token-budget skips can refill
+  // the final prompt without reopening filters against the raw retrieval pool.
+  const poolCap = Math.min(HARD_MAX_CHUNKS, Math.max(cap + 4, cap * 2));
+  let picked = diversifyChunksByPage(outcome.pick).slice(0, poolCap);
 
   if (!opts.apiIntent) {
     const nonApiPicked = picked.filter((c) => !isApiReferenceChunk(c));
@@ -1250,7 +1353,7 @@ function pickContextChunks(
   }
 
   if (opts.projectSetupIntent) {
-    picked = preferProjectSetupContext(picked, opts.apiReferenceCandidates, opts.queryLang, cap);
+    picked = preferProjectSetupContext(picked, opts.apiReferenceCandidates, opts.queryLang, poolCap);
   }
 
   if (opts.supplementalPageIds?.length && opts.apiReferenceCandidates?.length) {
@@ -1259,7 +1362,7 @@ function pickContextChunks(
       opts.apiReferenceCandidates,
       opts.supplementalPageIds,
       opts.queryLang,
-      cap,
+      poolCap,
     );
   }
 
@@ -1308,7 +1411,7 @@ function pickContextChunks(
       picked = pruneCheckoutContextNoise(
         limitApiReferenceContext(ordered, apiContextLimit),
         opts,
-      ).slice(0, cap);
+      ).slice(0, poolCap);
     } else {
       picked = pruneCheckoutContextNoise(
         limitApiReferenceContext(
@@ -1316,7 +1419,7 @@ function pickContextChunks(
           apiContextLimit,
         ),
         opts,
-      ).slice(0, cap);
+      ).slice(0, poolCap);
     }
   }
 
@@ -1350,7 +1453,18 @@ function pickContextChunks(
   if (opts.queryLang && outcome.kind !== 'translate-fallback') {
     picked = dropCrossLanguageDuplicatePages(picked, opts.queryLang);
   }
-  return diversifyChunksByPage(picked).slice(0, cap);
+  return diversifyChunksByPage(picked).slice(0, poolCap);
+}
+
+function contextChunkCap(clientMax: number | undefined, entityTerms: string[] | undefined): number {
+  const defaultCap =
+    entityTerms && entityTerms.length >= 2
+      ? Math.min(HARD_MAX_CHUNKS, Math.max(DEFAULT_MAX_CHUNKS, entityTerms.length * 5))
+      : DEFAULT_MAX_CHUNKS;
+  const requested = clientMax !== undefined && Number.isFinite(clientMax)
+    ? Math.floor(clientMax)
+    : defaultCap;
+  return Math.min(HARD_MAX_CHUNKS, Math.max(1, requested));
 }
 
 /**

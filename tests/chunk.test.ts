@@ -153,3 +153,47 @@ test('chunkPage: API object boundaries and exact identifiers become metadata', (
   assert.ok(chunk?.identifiers.some((item) => item.normalized === 'data.settlement_details.settlement_fee'));
   assert.ok(chunk?.identifiers.some((item) => item.normalized === 'settlement_fee'));
 });
+
+test('chunkPage: every generated API object and example heading carries its object boundary', () => {
+  const page: PageDoc = {
+    id: 'api-nested-example',
+    lang: 'zh',
+    slug: 'reference/nested-example',
+    title: '查询订单信息',
+    status: 'published',
+    content: { version: 1, blocks: [] },
+    render: {
+      markdown: [
+        '# 查询订单信息',
+        '## Request Fields',
+        '### Request Object: request',
+        '- `request.wallet_id` — integer: Wallet ID.',
+        '## Response Fields',
+        '### Response Object: data.rows[]',
+        '- `data.rows[].status` — integer: Transaction status.',
+        '## Examples',
+        '### Request Example: request',
+        '```json',
+        '{"wallet_id": 1}',
+        '```',
+        '### Response Example: data.rows[]',
+        '```json',
+        '{"status": 1}',
+        '```',
+      ].join('\n\n'),
+    },
+  };
+
+  const chunks = chunkPage(page);
+  const apiChunks = chunks.filter((chunk) => chunk.chunk_kind.startsWith('api-'));
+  assert.equal(apiChunks.length, 4);
+  assert.deepEqual(
+    apiChunks.map((chunk) => [chunk.chunk_kind, chunk.object_path]),
+    [
+      ['api-request-object', 'request'],
+      ['api-response-object', 'data.rows[]'],
+      ['api-request-example', 'request'],
+      ['api-response-example', 'data.rows[]'],
+    ],
+  );
+});

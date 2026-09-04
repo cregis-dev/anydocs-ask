@@ -392,3 +392,45 @@ test('retrieveWithTrace: dedicated identifier index resolves a field without sca
     db.close();
   }
 });
+
+test('retrieveWithTrace: generic exact fields stay inside the routed API product when available', () => {
+  const db = openDatabase({ dbPath: ':memory:' });
+  try {
+    const insertPage = db.prepare(
+      `INSERT INTO pages (page_id, lang, status, title, subtree_root, nav_index, breadcrumb, updated_at)
+       VALUES (?, 'en', 'published', ?, 'reference', ?, '[]', 1)`,
+    );
+    insertPage.run('api-waas-api-post-api-v1-payout', 'WaaS payout', 1);
+    insertPage.run('api-payment-engine-api-post-api-v2-order-info', 'Payment Engine order', 100);
+    const insertChunk = db.prepare(
+      `INSERT INTO chunks (page_id, lang, text, content_hash, token_count, created_at)
+       VALUES (?, 'en', ?, ?, 5, 1)`,
+    );
+    const waas = Number(
+      insertChunk.run('api-waas-api-post-api-v1-payout', 'WaaS settlement_fee', 'waas-field').lastInsertRowid,
+    );
+    const payment = Number(
+      insertChunk.run('api-payment-engine-api-post-api-v2-order-info', 'Payment settlement_fee', 'payment-field').lastInsertRowid,
+    );
+    const insertIdentifier = db.prepare(
+      `INSERT INTO chunk_identifiers (chunk_id, identifier, normalized, kind)
+       VALUES (?, 'settlement_fee', 'settlement_fee', 'field')`,
+    );
+    insertIdentifier.run(waas);
+    insertIdentifier.run(payment);
+
+    const result = retrieveWithTrace(db, {
+      queryVector: new Float32Array(1024),
+      ftsQuery: null,
+      scopeId: null,
+      currentPageLang: 'en',
+      apiReferencePagePrefix: 'api-payment-engine-api-',
+      exactIdentifiers: ['settlement_fee'],
+    });
+
+    assert.equal(result.chunks[0]?.chunk_id, payment);
+    assert.equal(result.chunks.some((chunk) => chunk.chunk_id === waas), false);
+  } finally {
+    db.close();
+  }
+});

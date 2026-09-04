@@ -163,6 +163,7 @@ export function retrieveWithTrace(
       EXACT_IDENTIFIER_K,
       opts.scopeId,
       opts.currentPageLang ?? null,
+      opts.apiReferencePagePrefix ?? null,
     );
     for (const id of ids) {
       exactIdentifierInjected.add(id);
@@ -380,9 +381,10 @@ function exactIdentifierPath(
   limit: number,
   scopeId: string | null,
   lang: DocsLang | null,
+  apiReferencePagePrefix: string | null,
 ): number[] {
   const normalized = identifier.toLowerCase();
-  const queryIndex = (requestedLang: DocsLang | null) => db
+  const queryIndex = (requestedLang: DocsLang | null, pagePrefix: string | null) => db
     .prepare(
       `SELECT ci.chunk_id
          FROM chunk_identifiers ci
@@ -392,20 +394,48 @@ function exactIdentifierPath(
           AND p.status = 'published'
           AND (? IS NULL OR p.subtree_root = ?)
           AND (? IS NULL OR p.lang = ?)
+          AND (? IS NULL OR p.page_id LIKE ?)
         ORDER BY p.nav_index ASC, c.chunk_id ASC
         LIMIT ?`,
     )
-    .all(normalized, scopeId, scopeId, requestedLang, requestedLang, limit) as Array<{ chunk_id: number }>;
-  const indexed = queryIndex(lang);
+    .all(
+      normalized,
+      scopeId,
+      scopeId,
+      requestedLang,
+      requestedLang,
+      pagePrefix,
+      pagePrefix ? `${pagePrefix}%` : null,
+      limit,
+    ) as Array<{ chunk_id: number }>;
+
+  // Generic field/header/operation names occur across many APIs. When intent
+  // routing identified a product area, prefer exact matches inside that API
+  // reference subtree and only fall back globally when the scoped index has no
+  // match. Opaque values such as addresses, hashes, and error codes remain
+  // global because their literal value is already discriminative.
+  const preferredPrefix = isScopeSensitiveIdentifier(identifier)
+    ? apiReferencePagePrefix
+    : null;
+  if (preferredPrefix) {
+    const scoped = queryIndex(lang, preferredPrefix);
+    if (scoped.length > 0) return scoped.map((row) => row.chunk_id);
+    if (lang !== null) {
+      const scopedFallback = queryIndex(null, preferredPrefix);
+      if (scopedFallback.length > 0) return scopedFallback.map((row) => row.chunk_id);
+    }
+  }
+
+  const indexed = queryIndex(lang, null);
   if (indexed.length > 0) return indexed.map((row) => row.chunk_id);
   if (lang !== null) {
-    const fallback = queryIndex(null);
+    const fallback = queryIndex(null, null);
     if (fallback.length > 0) return fallback.map((row) => row.chunk_id);
   }
 
   // Compatibility fallback for databases that have migrated but have not
   // yet been reindexed.
-  const queryText = (requestedLang: DocsLang | null) => db
+  const queryText = (requestedLang: DocsLang | null, pagePrefix: string | null) => db
     .prepare(
       `SELECT c.chunk_id
          FROM chunks c
@@ -414,13 +444,40 @@ function exactIdentifierPath(
           AND p.status = 'published'
           AND (? IS NULL OR p.subtree_root = ?)
           AND (? IS NULL OR p.lang = ?)
+          AND (? IS NULL OR p.page_id LIKE ?)
         ORDER BY p.nav_index ASC, c.chunk_id ASC
         LIMIT ?`,
     )
-    .all(identifier, scopeId, scopeId, requestedLang, requestedLang, limit) as Array<{ chunk_id: number }>;
-  const rows = queryText(lang);
-  if (rows.length === 0 && lang !== null) return queryText(null).map((row) => row.chunk_id);
+    .all(
+      identifier,
+      scopeId,
+      scopeId,
+      requestedLang,
+      requestedLang,
+      pagePrefix,
+      pagePrefix ? `${pagePrefix}%` : null,
+      limit,
+    ) as Array<{ chunk_id: number }>;
+  if (preferredPrefix) {
+    const scopedRows = queryText(lang, preferredPrefix);
+    if (scopedRows.length > 0) return scopedRows.map((row) => row.chunk_id);
+    if (lang !== null) {
+      const scopedFallback = queryText(null, preferredPrefix);
+      if (scopedFallback.length > 0) return scopedFallback.map((row) => row.chunk_id);
+    }
+  }
+  const rows = queryText(lang, null);
+  if (rows.length === 0 && lang !== null) return queryText(null, null).map((row) => row.chunk_id);
   return rows.map((row) => row.chunk_id);
+}
+
+function isScopeSensitiveIdentifier(identifier: string): boolean {
+  return (
+    /^Access-(?:Key|Timestamp|Nonce|Signature)$/i.test(identifier) ||
+    /^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+(?:\[\])?(?:\.[A-Za-z][A-Za-z0-9_]*(?:\[\])?)*$/.test(identifier) ||
+    /^(?:data|request|response)(?:\.[A-Za-z][A-Za-z0-9_]*(?:\[\])?)+$/i.test(identifier) ||
+    /^[a-z]+(?:[A-Z][A-Za-z0-9]+){2,}$/.test(identifier)
+  );
 }
 
 function currentPagePath(
