@@ -12,12 +12,12 @@ export default defineConfig({
     lib: {
       entry: 'src/console-ui/index.tsx',
       formats: ['es'],
-      fileName: () => 'index-app.js',
+      fileName: () => 'console-app.js',
     },
     rollupOptions: {
       output: {
         assetFileNames: (assetInfo) =>
-          assetInfo.name?.endsWith('.css') ? 'index-app.css' : '[name][extname]',
+          assetInfo.name?.endsWith('.css') ? 'console-app.css' : '[name][extname]',
       },
     },
   },

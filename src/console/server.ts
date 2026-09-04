@@ -32,10 +32,7 @@ import {
 import type { ConsoleProcessRegistry, RegisteredProcess } from './registry.ts';
 import { defaultOps, isReportFilename, listReports, type ConsoleOps } from './ops.ts';
 import { tailRuns } from '../runs/writer.ts';
-import { renderHome } from './pages/home.ts';
-import { renderProject } from './pages/project.ts';
-import { renderReport } from './pages/report.ts';
-import { renderRuns } from './pages/runs.ts';
+import { renderReactApp } from './pages/react-app.ts';
 import { getStaticAsset } from './static.ts';
 import {
   clearPinnedBaseline,
@@ -206,18 +203,17 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       runningSet,
       projectStats,
     );
-    return c.html(
-      renderHome({
-        consolePort: deps.consolePort,
-        idleTimeoutMin,
-        projects,
-        running,
-        projectStats,
-        workspaceSummary,
-        authEnabled: auth !== null,
-        publicRootPath,
-      }),
-    );
+    return c.html(renderReactApp('projects', {
+      kind: 'home',
+      consolePort: deps.consolePort,
+      idleTimeoutMin,
+      projects,
+      running: Object.fromEntries(running),
+      projectStats: Object.fromEntries(projectStats),
+      workspaceSummary,
+      authEnabled: auth !== null,
+      publicRootPath,
+    }));
   });
 
   app.get('/console/static/:name', (c) => {
@@ -443,25 +439,32 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
           feedback: { enabled: readFeedbackEnabled(askConfig.raw) },
         })
       : undefined;
-    return c.html(
-      renderProject({
-        project,
-        running,
-        reports,
-        autostart,
-        nav: buildNav(name),
-        ...(evalSnapshot ? { evalSnapshot } : {}),
-        latestEvalReportBody,
-        ...(indexSnapshot ? { indexSnapshot } : {}),
-        ...(trafficWindow ? { trafficWindow } : {}),
-        trafficView,
-        ...(feedbackSnapshot ? { feedbackSnapshot } : {}),
-        ...(candidates ? { candidates } : {}),
-        analyzeHistory,
-        latestAnalyzeBody,
-        askConfig,
-      }),
-    );
+    const nav = buildNav(name);
+    return c.html(renderReactApp(project.name, {
+      kind: 'project',
+      project,
+      running,
+      reports,
+      autostart,
+      navigation: {
+        projects: nav.projects,
+        running: [...nav.running],
+        consolePort: nav.consolePort,
+        idleTimeoutMin: nav.idleTimeoutMin,
+        authEnabled: nav.authEnabled,
+        publicRootPath: nav.publicRootPath,
+      },
+      evalSnapshot,
+      latestEvalReportBody,
+      indexSnapshot: indexSnapshot ? toIndexBootstrap(project.name, running !== null, indexSnapshot) : null,
+      trafficWindow,
+      trafficView,
+      feedbackSnapshot,
+      candidates,
+      analyzeHistory,
+      latestAnalyzeBody,
+      askConfig,
+    }));
   });
 
   // -----------------------------------------------------------------------
@@ -579,7 +582,20 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const path = join(stateRoot, 'reports', file);
     if (!existsSync(path)) return c.text(`not found: ${file}`, 404);
     const body = readFileSync(path, 'utf8');
-    return c.html(renderReport({ projectName: name, filename: file, body, nav: buildNav(name) }));
+    const nav = buildNav(name);
+    return c.html(renderReactApp(`${name} · ${file}`, {
+      kind: 'report',
+      projectName: name,
+      filename: file,
+      body,
+      navigation: {
+        projects: nav.projects,
+        running: [...nav.running],
+        consolePort: nav.consolePort,
+        authEnabled: nav.authEnabled,
+        publicRootPath: nav.publicRootPath,
+      },
+    }));
   });
 
   app.get('/p/:name/runs', (c) => {
@@ -591,7 +607,20 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const limitRaw = c.req.query('limit');
     const limit = limitRaw !== undefined ? Math.max(1, Math.min(500, Number(limitRaw) || 50)) : 50;
     const lines = tailRuns({ stateRoot, count: limit });
-    return c.html(renderRuns({ projectName: name, lines, limit, nav: buildNav(name) }));
+    const nav = buildNav(name);
+    return c.html(renderReactApp(`${name} · runs`, {
+      kind: 'runs',
+      projectName: name,
+      lines,
+      limit,
+      navigation: {
+        projects: nav.projects,
+        running: [...nav.running],
+        consolePort: nav.consolePort,
+        authEnabled: nav.authEnabled,
+        publicRootPath: nav.publicRootPath,
+      },
+    }));
   });
 
   app.get('/api/projects/:name/runs', (c) => {
@@ -1428,4 +1457,19 @@ function runningMap(list: RegisteredProcess[]): Map<string, RegisteredProcess> {
   const m = new Map<string, RegisteredProcess>();
   for (const e of list) m.set(e.name, e);
   return m;
+}
+
+function toIndexBootstrap(
+  projectName: string,
+  childLive: boolean,
+  snapshot: Awaited<ReturnType<typeof loadIndexSnapshot>>,
+) {
+  return {
+    projectName,
+    childLive,
+    totalPages: snapshot.totalPages,
+    langs: snapshot.langs,
+    warnings: snapshot.warnings,
+    dbStatus: snapshot.dbStatus,
+  };
 }

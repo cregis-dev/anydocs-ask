@@ -28,14 +28,16 @@ const ASSETS: Record<string, () => StaticAsset> = {
     // marked@18 exports `.` only; resolve the entry then read the ESM file.
     body: readFileSync(require_.resolve('marked'), 'utf8'),
   }),
-  'index-app.js': () => loadConsoleUiAsset('index-app.js', 'application/javascript; charset=utf-8'),
-  'index-app.css': () => loadConsoleUiAsset('index-app.css', 'text/css; charset=utf-8'),
+  'index-app.js': () => loadConsoleUiAsset('console-app.js', 'application/javascript; charset=utf-8'),
+  'index-app.css': () => loadConsoleUiAsset('console-app.css', 'text/css; charset=utf-8'),
+  'console-app.js': () => loadConsoleUiAsset('console-app.js', 'application/javascript; charset=utf-8'),
+  'console-app.css': () => loadConsoleUiAsset('console-app.css', 'text/css; charset=utf-8'),
 };
 
 function loadConsoleUiAsset(name: string, contentType: string): StaticAsset {
   const candidates = [
-    join(here, '..', 'console-ui', name),
     join(here, '..', '..', 'dist', 'console-ui', name),
+    join(here, '..', 'console-ui', name),
   ];
   const path = candidates.find((candidate) => existsSync(candidate));
   if (!path) throw new Error(`console UI asset is missing: ${name}; run pnpm build`);

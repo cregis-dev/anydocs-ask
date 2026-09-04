@@ -81,5 +81,6 @@ export type IndexedPageChunks = {
 declare global {
   interface Window {
     __INDEX_EXPLORER__?: IndexBootstrap;
+    __CONSOLE_APP__?: import('./app-types').ConsoleBootstrap;
   }
 }

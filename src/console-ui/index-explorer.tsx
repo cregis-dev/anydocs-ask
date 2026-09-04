@@ -450,7 +450,7 @@ function Meta(props: { label: string; value: string; mono?: boolean; good?: bool
 }
 
 function InlineNotice({ children, tone }: { children: React.ReactNode; tone: 'warning' | 'error' }) {
-  return <div className="ix-notice" data-tone={tone}><CircleAlert size={15} />{children}</div>;
+  return <div className="ix-notice" data-tone={tone} role={tone === 'error' ? 'alert' : 'status'} aria-live="polite"><CircleAlert size={15} />{children}</div>;
 }
 
 function PaneEmpty({ children, tone }: { children: React.ReactNode; tone?: 'error' }) {
@@ -458,7 +458,7 @@ function PaneEmpty({ children, tone }: { children: React.ReactNode; tone?: 'erro
 }
 
 function LoadingRows() {
-  return <div className="ix-loading" aria-label="Loading chunks">{[0, 1, 2, 3].map((i) => <span key={i} />)}</div>;
+  return <div className="ix-loading" role="status" aria-live="polite" aria-label="Loading chunks">{[0, 1, 2, 3].map((i) => <span key={i} />)}</div>;
 }
 
 function groupPages(pages: IndexPage[]): Array<[string, IndexPage[]]> {
