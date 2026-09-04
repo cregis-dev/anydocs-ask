@@ -2,7 +2,7 @@ FROM node:22-bookworm-slim AS build
 WORKDIR /app
 ENV ONNXRUNTIME_NODE_INSTALL=skip
 RUN corepack enable && corepack prepare pnpm@9.0.0 --activate
-COPY package.json pnpm-lock.yaml tsconfig.json ./
+COPY package.json pnpm-lock.yaml tsconfig.json tsconfig.ui.json vite.config.ts ./
 COPY scripts ./scripts
 RUN pnpm install --frozen-lockfile
 COPY src ./src

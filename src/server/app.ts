@@ -39,6 +39,7 @@ import {
 } from '../widget/server-gate.ts';
 import { handleMcpRequest } from '../mcp/server.ts';
 import { resolveMcpToken } from '../mcp/gate.ts';
+import { inspectIndexedPage } from '../index/inspect.ts';
 
 const SSE_HEARTBEAT_MS = 2_000;
 const SSE_DELTA_FLUSH_MS = 150;
@@ -575,6 +576,32 @@ export function createApp(deps: AppDeps): Hono {
       warm: runtime.warm,
       last_indexed_at: runtime.lastIndexedAtMs,
     });
+  });
+
+  app.get('/v1/index/chunks', (c) => {
+    const pageId = c.req.query('page_id')?.trim() ?? '';
+    const lang = c.req.query('lang')?.trim() ?? '';
+    if (!pageId || !lang) {
+      return c.json({
+        type: 'error',
+        code: 'invalid_request',
+        message: 'page_id and lang are required',
+      }, 400);
+    }
+    const result = inspectIndexedPage(
+      runtime.db,
+      pageId,
+      lang,
+      runtime.embedder.model,
+    );
+    if (!result) {
+      return c.json({
+        type: 'error',
+        code: 'not_found',
+        message: `indexed page not found: ${pageId} (${lang})`,
+      }, 404);
+    }
+    return c.json(result);
   });
 
   app.post('/v1/index/rebuild', async (c) => {

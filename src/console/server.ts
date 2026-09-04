@@ -763,6 +763,38 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     }
   });
 
+  app.get('/api/projects/:name/index/chunks', async (c) => {
+    const name = c.req.param('name');
+    const project = findProject(deps.workspacePath, name);
+    if (!project) return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
+    const pageId = c.req.query('page_id')?.trim() ?? '';
+    const lang = c.req.query('lang')?.trim() ?? '';
+    if (!pageId || !lang) {
+      return c.json({ ok: false, error: 'page_id and lang are required' }, 400);
+    }
+    const port = deps.registry.getPort(name);
+    if (port === null) {
+      return c.json({ ok: false, error: 'child not running — start the project first' }, 502);
+    }
+    deps.registry.touch(name);
+    const query = new URLSearchParams({ page_id: pageId, lang });
+    try {
+      const res = await fetchFn(`http://127.0.0.1:${port}/v1/index/chunks?${query}`, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      const body = await res.text();
+      return new Response(body, {
+        status: res.status,
+        headers: {
+          'Content-Type': res.headers.get('content-type') ?? 'application/json',
+          'Cache-Control': 'no-store',
+        },
+      });
+    } catch (err) {
+      return c.json({ ok: false, error: `proxy failed: ${(err as Error).message}` }, 502);
+    }
+  });
+
   // -----------------------------------------------------------------------
   // MCP knowledge-base proxy — stable per-project `/mcp/:name` endpoint for
   // external agents (CAWP mount, ADR-038). Reverse-proxies MCP-over-

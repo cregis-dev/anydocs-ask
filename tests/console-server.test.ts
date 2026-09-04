@@ -64,6 +64,16 @@ function makeRegistry(): ProcessRegistry {
 
 const CONSOLE_AUTH_TOKEN = 'test-console-auth-token-32-characters';
 
+function readIndexBootstrap(body: string): {
+  langs: Array<{ pages: Array<{ id: string; askStats?: { count: number; medianConfidence: number | null } }> }>;
+} {
+  const match = /window\.__INDEX_EXPLORER__ = (\{.*?\});<\/script>/.exec(body);
+  assert.ok(match?.[1], 'expected serialized React Index bootstrap state');
+  return JSON.parse(match[1]) as {
+    langs: Array<{ pages: Array<{ id: string; askStats?: { count: number; medianConfidence: number | null } }> }>;
+  };
+}
+
 test('console auth protects pages and management APIs', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
@@ -1685,8 +1695,8 @@ test('GET /p/:name: drawer jump-to-doc chip disabled when current_page_id is nul
 });
 
 test('GET /p/:name: Index tab JS reads ?focus=<id> from hash and scrolls/flashes the row (RFC 0002 T1-d follow-up)', async () => {
-  // Static-source assertion of the focus receiver. The receiver lives in
-  // langSwitchScript so it ships when the explorer renders at all.
+  // The Index workspace is a React island. Assert both the SSR mount and the
+  // client-side hash receiver that preserves Feedback → Index jumps.
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -1713,15 +1723,13 @@ test('GET /p/:name: Index tab JS reads ?focus=<id> from hash and scrolls/flashes
       registry: makeRegistry(),
     });
     const body = await (await app.request('/p/docs-zh')).text();
-    // Receiver hooks into hashchange + initial.
-    assert.match(body, /\[?focus=/);
-    assert.match(body, /window\.addEventListener\('hashchange', applyFocus\)/);
-    assert.match(body, /applyFocus\(\);/);
-    // Flash highlight uses the accent outline style — sanity-check the
-    // exact style string so a future refactor doesn't silently drop it.
-    assert.match(body, /outline = '2px solid var\(--accent\)'/);
-    // Row carries data-page-id for the focus query.
-    assert.match(body, /data-page-id="auth"/);
+    assert.match(body, /id="index-explorer-root"/);
+    assert.match(body, /src="\/console\/static\/index-app\.js"/);
+    assert.equal(readIndexBootstrap(body).langs[0]?.pages[0]?.id, 'auth');
+    const source = await fs.readFile(join(process.cwd(), 'src', 'console-ui', 'index-explorer.tsx'), 'utf8');
+    assert.match(source, /window\.addEventListener\('hashchange', applyFocus\)/);
+    assert.match(source, /data-page-id=\{page\.id\}/);
+    assert.match(source, /scrollIntoView/);
   } finally {
     await cleanup();
   }
@@ -1774,10 +1782,9 @@ test('GET /p/:name: Index tab — per-page ask-usage badge renders when ≥3 hit
       registry: makeRegistry(),
     });
     const body = await (await app.request('/p/docs-zh')).text();
-    // Badge present with neutral glyph + count + ask-count attribute.
-    assert.match(body, /data-page-id="auth-jwt"[\s\S]*?data-ask-mark="ok"/);
-    assert.match(body, /data-ask-count="4"/);
-    assert.match(body, /◷\s*4 asks/);
+    const page = readIndexBootstrap(body).langs[0]?.pages[0];
+    assert.equal(page?.id, 'auth-jwt');
+    assert.deepEqual(page?.askStats, { count: 4, medianConfidence: 0.8 });
   } finally {
     await cleanup();
   }
@@ -1820,8 +1827,9 @@ test('GET /p/:name: Index tab — warn tint when median confidence < 0.5 (RFC 00
       registry: makeRegistry(),
     });
     const body = await (await app.request('/p/docs-zh')).text();
-    assert.match(body, /data-page-id="shaky-page"[\s\S]*?data-ask-mark="warn"/);
-    assert.match(body, /⚠\s*3 asks/);
+    const page = readIndexBootstrap(body).langs[0]?.pages[0];
+    assert.equal(page?.id, 'shaky-page');
+    assert.deepEqual(page?.askStats, { count: 3, medianConfidence: 0.3 });
   } finally {
     await cleanup();
   }
@@ -1863,10 +1871,9 @@ test('GET /p/:name: Index tab — no badge when hit count < 3 (RFC 0002 T4 noise
       registry: makeRegistry(),
     });
     const body = await (await app.request('/p/docs-zh')).text();
-    // Row exists, but no badge attribute should appear for it.
-    assert.match(body, /data-page-id="quiet-page"/);
-    // Tighter assertion: the badge data-attrs don't co-occur with this page.
-    assert.equal(/data-page-id="quiet-page"[^>]*>[^<]*<[^<]*data-ask-mark/.test(body), false);
+    const page = readIndexBootstrap(body).langs[0]?.pages[0];
+    assert.equal(page?.id, 'quiet-page');
+    assert.equal(page?.askStats, undefined);
   } finally {
     await cleanup();
   }

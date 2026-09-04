@@ -602,6 +602,42 @@ test('GET /v1/index/status returns DB counts + config models', async () => {
   }
 });
 
+test('GET /v1/index/chunks returns page metadata and inspectable chunks', async () => {
+  const { runtime, cleanup } = await makeRuntime();
+  try {
+    await runtime.start();
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/index/chunks?page_id=auth&lang=zh');
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      page: { page_id: string; title: string; breadcrumb: unknown[] };
+      chunks: Array<{
+        ordinal: number;
+        text: string;
+        token_count: number;
+        embedded: boolean;
+        embedding_cached: boolean;
+      }>;
+    };
+    assert.equal(body.page.page_id, 'auth');
+    assert.equal(body.page.title, '鉴权');
+    assert.ok(body.page.breadcrumb.length > 0);
+    assert.ok(body.chunks.length > 0);
+    assert.equal(body.chunks[0]?.ordinal, 1);
+    assert.match(body.chunks[0]?.text ?? '', /JWT bearer token/);
+    assert.ok((body.chunks[0]?.token_count ?? 0) > 0);
+    assert.equal(body.chunks[0]?.embedded, true);
+    assert.equal(body.chunks[0]?.embedding_cached, true);
+
+    const invalid = await app.request('/v1/index/chunks?page_id=auth');
+    assert.equal(invalid.status, 400);
+    const missing = await app.request('/v1/index/chunks?page_id=missing&lang=zh');
+    assert.equal(missing.status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('POST /v1/index/rebuild reruns fullReindex with cache hits', async () => {
   const { runtime, cleanup } = await makeRuntime();
   try {
