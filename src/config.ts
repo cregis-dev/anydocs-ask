@@ -44,20 +44,15 @@ export type LLMConfig = {
 export type RetrievalConfig = {
   topK: number;
   rrfK: number;
-  rerankSameSubtreeBoost: number;
-  navOrderBoost: number;
   maxChunksHardCap: number;
 };
 
 /**
- * Cross-encoder reranker — runs after the rule-based rerank to re-score top-K
- * candidates as (query, doc) pairs. Disabled by default so v1 pipeline stays
- * byte-equivalent unless explicitly enabled.
+ * Cross-encoder reranker — optionally re-scores the top RRF candidates as
+ * (query, doc) pairs. Disabled by default.
  *
  * When enabled, the reranker re-sorts the top {@link rerankTopK} candidates
- * from rule rerank before aggregation. The size matters: too small and a
- * bug-pushed-down chunk (e.g. an API page demoted by same-page boost) never
- * reaches the cross-encoder; too large and inference latency grows linearly.
+ * before aggregation. The size balances recall against linear inference cost.
  */
 export type RerankerConfig = {
   enabled: boolean;
@@ -66,9 +61,8 @@ export type RerankerConfig = {
   preferQuantized: boolean;
   /** Tokens per (query, doc) pair fed into the cross-encoder. 512 = model native. */
   maxLength: number;
-  /** Size of the candidate window pulled from rule rerank for cross-encoder
-   *  re-scoring. 20 catches typical retrieval losses where the right chunk
-   *  ranks 10-15 after rule rerank. Inference is O(N) in this number. */
+  /** Size of the RRF candidate window sent to the cross-encoder. Inference is
+   *  O(N) in this number. */
   rerankTopK: number;
 };
 
@@ -309,8 +303,6 @@ const DEFAULTS: ResolvedConfig = {
   retrieval: {
     topK: 20,
     rrfK: 60,
-    rerankSameSubtreeBoost: 0.2,
-    navOrderBoost: 0.1,
     maxChunksHardCap: 20,
   },
   reranker: {

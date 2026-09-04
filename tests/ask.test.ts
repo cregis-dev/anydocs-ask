@@ -1492,7 +1492,7 @@ test('PRD §8 #11 — zh question against an en-only project triggers translatio
 // PRD §8 #12 — lang isolation when same-lang context is sufficient
 // ---------------------------------------------------------------------------
 
-test('PRD §8 #12 — same-lang context wins over cross-lang via lang_boost', async () => {
+test('PRD §8 #12 — aggregation selects same-lang context when sufficient', async () => {
   const ctx = await bootstrap(async (root) => {
     await writePage(root, 'zh', {
       id: 'auth',
@@ -1515,7 +1515,7 @@ test('PRD §8 #12 — same-lang context wins over cross-lang via lang_boost', as
       assert.equal(r.translation_notice, null, 'no translation when same-lang context exists');
       assert.ok(r.citations.length > 0);
       for (const cit of r.citations) {
-        assert.equal(cit.lang, 'zh', 'all citations should be zh thanks to lang_boost');
+        assert.equal(cit.lang, 'zh', 'same-lang aggregation should select zh citations');
         assert.equal(cit.source_lang, null);
       }
     }

@@ -51,7 +51,6 @@ export type RunFusedChunk = {
   vec_rank: number | null;
   bm25_rank: number | null;
   nav_index: number | null;
-  nav_index_boost: number;
 };
 
 export type RunCitation = {

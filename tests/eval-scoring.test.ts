@@ -40,7 +40,6 @@ function trace(pageIds: string[]): AskTrace {
       vec_rank: i + 1,
       bm25_rank: null,
       nav_index: null,
-      nav_index_boost: 0,
     })),
     subtree_ask_triggered: false,
     top_final_score: 1,

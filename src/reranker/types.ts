@@ -7,9 +7,8 @@
  *     never see each other; subtle relevance signals (e.g. "this chunk has the
  *     valid_time field definition the user is asking about") are lost.
  *   - A cross-encoder scores (query, doc) jointly, recovering those signals.
- *   - Rule-based rerank (src/query/rerank.ts) catches structural biases
- *     (same-subtree, nav order, API intent). Cross-encoder catches semantic
- *     relevance the rules can't express.
+ *   - Hybrid retrieval supplies an RRF-ordered candidate set. The optional
+ *     cross-encoder becomes the sole post-retrieval relevance ranker.
  *
  * Implementations:
  *   - MockReranker (./mock): deterministic identity (returns input order with

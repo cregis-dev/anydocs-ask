@@ -154,7 +154,7 @@ v1 实现：`published` 状态硬过滤 + 单 anydocs 项目隔离（一进程�
 | query 是 zh，且 zh 文档有充分命中 | 用 zh chunks 生成 zh 答案；citations 全是 zh |
 | query 是 zh，但 zh 文档无命中（仅 en 有） | 用 en chunks 生成 zh 答案；citations 仍含 `lang: en` 的原文片段（snippet **不翻译**）；正文开头加一句"原文为英文文档，已为您翻译要点："提示 |
 | query 是 zh，跨多个 zh 子树命中分散 | 走 §4.4 树状反问；反问选项**只显示 zh 子树**，反问文案也用 zh |
-| query 是 zh，zh 与 en 子树都有命中 | 同 lang 优先（lang_boost）；如果 lang_boost 之后仍是 zh 主导子树 → 直答 zh；如果 zh 完全没命中才走翻译降级 |
+| query 是 zh，zh 与 en 子树都有命中 | 聚合阶段优先选择同 lang；zh 有充分命中时直答 zh，zh 没有充分命中时走跨语言翻译降级 |
 
 **实现要点：**
 
@@ -623,7 +623,7 @@ Golden case schema（jsonl，每行）：
 
 **位置**：`<workspace>/state/<projectId>/runs/<YYYY-Www>.jsonl`（runtime 侧，与 sqlite 同位），按 ISO 周切片，避免单文件无限增长。
 
-**默认开启**，`runs.enabled=false` opt-out。每行记录一次 `/v1/ask`：query、filters、context、检索 trace（fused chunks + RRF/BM25/vec rank + nav_index_boost）、answer、citations、confidence、latency、tokens、model。详细 schema 见 ARCHITECTURE §16.4。
+**默认开启**，`runs.enabled=false` opt-out。每行记录一次 `/v1/ask`：query、filters、context、检索 trace（fused chunks + RRF/BM25/vec rank + nav_index）、answer、citations、confidence、latency、tokens、model。详细 schema 见 ARCHITECTURE §16.4。
 
 **隐私**：v1 默认不写 IP / UA / 用户标识；脱敏 hook 留 v1.5（PRD §9 已留口子）。`feedback.beta` / `feedback.gamma` 字段在 runs 中预留为 null，由 v1.5 §11 反馈回路异步回填。
 
@@ -631,7 +631,7 @@ Golden case schema（jsonl，每行）：
 
 ### 12.6 冷启动评测协议
 
-无 β/γ 信号、无积累 runs 时**严禁乱调权重**——只用 v1 默认（vec+BM25 RRF + nav_index_boost + 子树聚合反问 + sonnet-4-6 默认 prompt，详见 §4.2 / ARCHITECTURE §6）。
+无 β/γ 信号、无积累 runs 时**严禁增加经验权重**——使用默认的 vec+BM25+Exact Identifier RRF、子树聚合和默认 prompt（详见 §4.2 / ARCHITECTURE §6）。
 
 **Day 0 必做**：
 
@@ -739,7 +739,7 @@ Golden case schema（jsonl，每行）：
 #### 13.4.2 Ask 体验台
 
 - 文本框 + 提交按钮，调子进程的 `/v1/ask`，**默认 dry-run**：不落 runs jsonl，不进 answer-cache，仅在 console 内存里返回结果。
-- 显示：检索 fused top-5（page / rrf_score / vec_rank / bm25_rank / nav_index_boost）、最终 answer markdown、citations、confidence、latency、model。
+- 显示：检索 fused top-5（page / rrf_score / final_score / vec_rank / bm25_rank / nav_index）、最终 answer markdown、citations、confidence、latency、model。
 - 子树反问触发时显示反问选项树（与 Reader 一致）。
 - 不提供"标记 bad"按钮（v1 不引入 feedback inbox 写入；详见 §13.6 与 v1.5 扩展点）。
 - **persist 开关**（2026-05-11 加入）：右上 checkbox，默认 **OFF**，开启时该次提交反代到 `/v1/ask?source=console`，子进程**落 runs，进 answer-cache**，`source` 字段标记 `"console"`。

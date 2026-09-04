@@ -1943,7 +1943,7 @@ test('GET /p/:name: Index tab — per-page ask-usage badge renders when ≥3 hit
       makeRunRecord({ answer_id: 'a4', confidence: 0.8 }),
     ].map((r, i) => ({
       ...r,
-      retrieval: { fused: [{ chunk_id: i + 1, page: 'auth-jwt', rrf_score: 0.5, final_score: 0.5, vec_rank: 1, bm25_rank: 1, nav_index: null, nav_index_boost: 0 }], subtree_ask_triggered: false },
+      retrieval: { fused: [{ chunk_id: i + 1, page: 'auth-jwt', rrf_score: 0.5, final_score: 0.5, vec_rank: 1, bm25_rank: 1, nav_index: null }], subtree_ask_triggered: false },
     })));
 
     const app = createConsoleApp({
@@ -1988,7 +1988,7 @@ test('GET /p/:name: Index tab — warn tint when median confidence < 0.5 (RFC 00
       makeRunRecord({ answer_id: 'a3', confidence: 0.4 }),
     ].map((r, i) => ({
       ...r,
-      retrieval: { fused: [{ chunk_id: i + 1, page: 'shaky-page', rrf_score: 0.5, final_score: 0.5, vec_rank: 1, bm25_rank: 1, nav_index: null, nav_index_boost: 0 }], subtree_ask_triggered: false },
+      retrieval: { fused: [{ chunk_id: i + 1, page: 'shaky-page', rrf_score: 0.5, final_score: 0.5, vec_rank: 1, bm25_rank: 1, nav_index: null }], subtree_ask_triggered: false },
     })));
 
     const app = createConsoleApp({
@@ -2032,7 +2032,7 @@ test('GET /p/:name: Index tab — no badge when hit count < 3 (RFC 0002 T4 noise
       makeRunRecord({ answer_id: 'a2', confidence: 0.9 }),
     ].map((r, i) => ({
       ...r,
-      retrieval: { fused: [{ chunk_id: i + 1, page: 'quiet-page', rrf_score: 0.5, final_score: 0.5, vec_rank: 1, bm25_rank: 1, nav_index: null, nav_index_boost: 0 }], subtree_ask_triggered: false },
+      retrieval: { fused: [{ chunk_id: i + 1, page: 'quiet-page', rrf_score: 0.5, final_score: 0.5, vec_rank: 1, bm25_rank: 1, nav_index: null }], subtree_ask_triggered: false },
     })));
 
     const app = createConsoleApp({

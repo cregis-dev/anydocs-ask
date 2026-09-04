@@ -9,7 +9,7 @@
  *   2. Boundary filter is applied inside retrieval SQL (status='published',
  *      optional subtree_root match)
  *   3. Hybrid retrieve (vector + BM25 + RRF)
- *   4. Structural rerank (lang_boost / same_subtree_boost / nav_index_boost)
+ *   4. Keep RRF order; optionally replace it with cross-encoder scores
  *   5. Subtree aggregate → answer-same-lang | translate-fallback
  *   6. Build prompt + generate via LLM
  *   7. Postprocess (citation legality, lang fill, truncation, hallucination)
@@ -29,8 +29,7 @@ import type { DocsLang } from '../anydocs/types.ts';
 import { detectLangFromText, langFromScopeId } from './lang.ts';
 import { extractExactIdentifiers, sanitizeFtsQuery } from './sanitize.ts';
 import { retrieveWithTrace, type RetrievalTrace, type RetrievedChunk } from './retrieval.ts';
-import { computeTitleMatches } from './rerank.ts';
-import { rerank, type RerankedChunk } from './rerank.ts';
+import { rankByRrf, type RerankedChunk } from './rerank.ts';
 import {
   apiReferenceChunkMatchesVersion,
   isApiReferenceChunk,
@@ -66,10 +65,9 @@ export type AskDeps = {
   embedder: Embedder;
   llm: LLM;
   /**
-   * Cross-encoder reranker. Optional — when null/omitted the cross-encoder
-   * rerank stage is skipped and the rule rerank is the only ranking
-   * authority. answer.ts gates the entire stage on this being non-null so
-   * v1 callers stay byte-equivalent.
+   * Cross-encoder reranker. Optional — when null/omitted, RRF is the only
+   * ranking authority. answer.ts gates the entire stage on this being
+   * non-null.
    */
   reranker?: Reranker | null;
   /** Cross-encoder rerank config (window size etc). Optional; defaults
@@ -93,10 +91,10 @@ export type AskStreamHooks = {
  * commands read this back to compute recall-failure / latency / etc. metrics.
  */
 export type AskTrace = {
-  /** Reranked chunks (sorted descending by final_score). Empty on early-error
-   *  paths (validation / invalid_scope). */
+  /** Ranked chunks (RRF order, or cross-encoder order when enabled). Empty on
+   *  early-error paths (validation / invalid_scope). */
   fused: AskTraceFusedChunk[];
-  /** Query text used by title/rerank/context hint logic after intent routing. */
+  /** Query text used by retrieval and context hint logic after intent routing. */
   search_question?: string;
   /** Query text embedded for retrieval; may include rewritten multi-turn context. */
   retrieve_question?: string;
@@ -104,8 +102,8 @@ export type AskTrace = {
   selected_context?: AskTraceContextChunk[];
   /** True when aggregate decided to fire a clarify (subtree-aggregation ask). */
   subtree_ask_triggered: boolean;
-  /** Top final_score from rerank — raw RRF + nav-boost output. Kept for
-   *  analyze diagnostics; not the value persisted as `answer.confidence`. */
+  /** Top final_score from RRF or the optional cross-encoder. Kept for analyze
+   *  diagnostics; not the value persisted as `answer.confidence`. */
   top_final_score: number;
   /** Normalized confidence: top1.final_score / sum(top-K.final_score), K=5.
    *  In [0,1]; `1.0` when only one candidate, `0` when no candidates.
@@ -140,9 +138,6 @@ export type AskTraceFusedChunk = {
   vec_rank: number | null;
   bm25_rank: number | null;
   nav_index: number | null;
-  /** Same formula as rerank.ts navIndexBoostFor. Captured here so analyze can
-   *  inspect "why did this chunk win" without re-running the math. */
-  nav_index_boost: number;
 };
 
 export type AskTraceContextChunk = AskTraceFusedChunk & {
@@ -313,7 +308,6 @@ async function runRetrievalPipeline(
   signal?: AbortSignal,
 ): Promise<RetrievalPipelineOutput> {
   const scopeId = req.context?.scope_id ?? null;
-  const currentSubtreeRoot = null;
   // RFC 0003 §4.2 — multi-turn history-aware retrieve query (M1).
   // A single LLM intent router owns the semantic decisions that feed
   // retrieval. Retrieval-only eval uses this exact helper so it measures the
@@ -383,21 +377,11 @@ async function runRetrievalPipeline(
     exactIdentifiers,
   });
 
-  const ruleReranked = rerank(retrieved, {
-    queryLang,
-    currentSubtreeRoot,
-    currentPageId: null,
-    query: searchQuestion,
-    entityTerms,
-    apiIntent,
-    apiReferenceHintTerms,
-    apiReferenceVersionPrefs,
-    apiReferencePagePrefix,
-  });
+  const rrfRanked = rankByRrf(retrieved);
 
   const reranked = deps.reranker
-    ? await applyCrossEncoderRerank(deps.reranker, searchQuestion, ruleReranked, deps.rerankerConfig)
-    : ruleReranked;
+    ? await applyCrossEncoderRerank(deps.reranker, searchQuestion, rrfRanked, deps.rerankerConfig)
+    : rrfRanked;
 
   const fusedTrace = buildFusedTrace(reranked, retrievalTrace);
   const top_final_score = reranked[0]?.final_score ?? 0;
@@ -533,23 +517,12 @@ async function askWithTraceInternal(
     supplementalPageIds,
     top_final_score,
   } = retrieval;
-  const currentSubtreeRoot = null;
-
   // 5. Aggregate.
-  // Derive title-match subtrees so aggregate can skip clarify when the user's
-  // query explicitly names a page.
   const aggregationCandidates = pickAggregationCandidates(reranked, {
     apiIntent,
     signatureAuthIntent,
   });
-  const titleMatchedPageIds = computeTitleMatches(retrieved, searchQuestion);
-  const titleMatchedSubtrees = new Set<string>();
-  for (const c of aggregationCandidates) {
-    if (titleMatchedPageIds.has(c.page_id) && c.subtree_root) {
-      titleMatchedSubtrees.add(c.subtree_root);
-    }
-  }
-  const outcome = aggregate(aggregationCandidates, { queryLang, currentSubtreeRoot, titleMatchedSubtrees });
+  const outcome = aggregate(aggregationCandidates, { queryLang });
 
   // 6 + 7. Generate + postprocess.
   const isCrossLang = outcome.kind === 'translate-fallback';
@@ -950,7 +923,6 @@ function buildFusedTrace(
     vec_rank: retrievalTrace.vecRanks.get(c.chunk_id) ?? null,
     bm25_rank: retrievalTrace.bm25Ranks.get(c.chunk_id) ?? null,
     nav_index: c.nav_index,
-    nav_index_boost: navIndexBoostForTrace(c.nav_index),
   }));
 }
 
@@ -971,7 +943,6 @@ function buildSelectedContextTrace(
     vec_rank: retrievalTrace.vecRanks.get(c.chunk_id) ?? null,
     bm25_rank: retrievalTrace.bm25Ranks.get(c.chunk_id) ?? null,
     nav_index: c.nav_index,
-    nav_index_boost: navIndexBoostForTrace(c.nav_index),
   }));
 }
 
@@ -979,17 +950,10 @@ function previewText(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 240);
 }
 
-function navIndexBoostForTrace(navIndex: number | null): number {
-  // Mirrors rerank.ts navIndexBoostFor (kept as a sibling to avoid leaking
-  // the internal helper through rerank.ts's public surface).
-  if (navIndex === null) return 0;
-  return 0.1 * (1 / Math.log(navIndex + 2));
-}
-
 const DEFAULT_RERANK_TOP_K = 20;
 
 /**
- * Cross-encoder rerank — feeds the top-N rule-reranked candidates to a
+ * Cross-encoder rerank — feeds the top-N RRF-ranked candidates to a
  * Reranker as (query, chunk_text) pairs and reorders by relevance score.
  *
  * The chunk text already carries its heading_path prefix (set in
@@ -1009,13 +973,13 @@ const DEFAULT_RERANK_TOP_K = 20;
 async function applyCrossEncoderRerank(
   reranker: Reranker,
   query: string,
-  ruleReranked: RerankedChunk[],
+  rrfRanked: RerankedChunk[],
   config: RerankerConfig | undefined,
 ): Promise<RerankedChunk[]> {
   const topK = config?.rerankTopK ?? DEFAULT_RERANK_TOP_K;
-  if (ruleReranked.length === 0) return ruleReranked;
-  const window = ruleReranked.slice(0, topK);
-  const tail = ruleReranked.slice(topK);
+  if (rrfRanked.length === 0) return rrfRanked;
+  const window = rrfRanked.slice(0, topK);
+  const tail = rrfRanked.slice(topK);
   const docs = window.map((c) => ({ chunk_id: c.chunk_id, text: c.text }));
   const scores = await reranker.rerank(query, docs);
   const scoreByChunk = new Map<number | bigint, number>();

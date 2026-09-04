@@ -57,7 +57,6 @@ function run(
         vec_rank: i + 1,
         bm25_rank: i + 1,
         nav_index: null,
-        nav_index_boost: 0,
       })),
       subtree_ask_triggered: false,
     },

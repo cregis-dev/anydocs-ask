@@ -1,6 +1,6 @@
 /**
  * Unit tests for the pure-function modules of the query pipeline:
- * lang detection, FTS5 sanitization, rerank, aggregate, postprocess.
+ * lang detection, FTS5 sanitization, RRF ranking, aggregate, postprocess.
  *
  * Each module is exercised standalone — no DB and no LLM — so the e2e
  * suite (tests/ask.test.ts) can stay focused on PRD §8 acceptance #11/#12/#13.
@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detectLangFromText, langFromScopeId } from '../src/query/lang.ts';
 import { extractExactIdentifiers, sanitizeFtsQuery } from '../src/query/sanitize.ts';
-import { rerank, computeTitleMatches } from '../src/query/rerank.ts';
+import { rankByRrf } from '../src/query/rerank.ts';
 import { aggregate } from '../src/query/aggregate.ts';
 import { postprocess } from '../src/query/postprocess.ts';
 import { buildPrompt, detectFormatHint } from '../src/query/prompt.ts';
@@ -1188,276 +1188,25 @@ test('buildPrompt: adds grounded answer checklist for test-token environment lim
   assert.match(prompt.user, /不能直接用于生产环境/);
 });
 
-test('rerank: lang_boost +0.30 applied when chunk.lang == query_lang', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, lang: 'zh', rrf_score: 0.1, nav_index: 1000 }),
-      fakeRetrieved({ chunk_id: 2, lang: 'en', rrf_score: 0.1, nav_index: 1000 }),
-    ],
-    { queryLang: 'zh', currentSubtreeRoot: null },
-  );
-  // Find both by id; zh should score higher than en.
-  const zh = out.find((c) => c.chunk_id === 1)!;
-  const en = out.find((c) => c.chunk_id === 2)!;
-  assert.ok(zh.final_score > en.final_score, 'zh chunk must beat en chunk under same RRF');
-  assert.ok(zh.final_score >= 0.1 * (1 + 0.3), 'lang boost adds at least +0.30 multiplicatively');
+test('rankByRrf: final score and order come only from RRF', () => {
+  const out = rankByRrf([
+    fakeRetrieved({ chunk_id: 1, lang: 'zh', page_title: 'Exact title', nav_index: 0, rrf_score: 0.05 }),
+    fakeRetrieved({ chunk_id: 2, lang: 'en', page_title: 'Other', nav_index: 100, rrf_score: 0.20 }),
+    fakeRetrieved({ chunk_id: 3, subtree_root: 'current', rrf_score: 0.10 }),
+  ]);
+
+  assert.deepEqual(out.map((chunk) => chunk.chunk_id), [2, 3, 1]);
+  assert.deepEqual(out.map((chunk) => chunk.final_score), [0.20, 0.10, 0.05]);
 });
 
-test('rerank: same_subtree_boost +0.20 when current subtree matches', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, subtree_root: 'A', nav_index: 1000 }),
-      fakeRetrieved({ chunk_id: 2, subtree_root: 'B', nav_index: 1000 }),
-    ],
-    { queryLang: 'zh', currentSubtreeRoot: 'A' },
-  );
-  const a = out.find((c) => c.chunk_id === 1)!;
-  const b = out.find((c) => c.chunk_id === 2)!;
-  assert.ok(a.final_score > b.final_score);
-});
+test('rankByRrf: metadata cannot break an RRF tie', () => {
+  const out = rankByRrf([
+    fakeRetrieved({ chunk_id: 1, lang: 'zh', page_title: 'Named in query', nav_index: 0, rrf_score: 0.1 }),
+    fakeRetrieved({ chunk_id: 2, lang: 'en', page_title: 'Unrelated', nav_index: 999, rrf_score: 0.1 }),
+  ]);
 
-test('rerank: current_page_boost prefers exact current page over same-subtree sibling', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({
-        chunk_id: 1,
-        page_id: 'authentication',
-        page_title: 'Authentication & Signature',
-        subtree_root: 'get-started',
-        rrf_score: 0.1,
-        nav_index: 1000,
-      }),
-      fakeRetrieved({
-        chunk_id: 2,
-        page_id: 'webhook-mechanism',
-        page_title: 'Webhook Callback Mechanism',
-        subtree_root: 'get-started',
-        rrf_score: 0.12,
-        nav_index: 1000,
-      }),
-    ],
-    {
-      queryLang: 'en',
-      currentSubtreeRoot: 'get-started',
-      currentPageId: 'authentication',
-      query: 'How do I calculate sign?',
-    },
-  );
-
-  assert.equal(out[0]?.page_id, 'authentication');
-});
-
-test('rerank: api_reference_boost prefers API reference chunks for API-intent questions', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({
-        chunk_id: 1,
-        page_id: 'payment-engine-quickstart-30min',
-        page_title: '支付引擎 30 分钟接入实战',
-        page_url: '/zh/payment-engine-quickstart-30min',
-        text: '创建订单后跳转托管收银台。',
-        rrf_score: 0.12,
-        nav_index: 1000,
-      }),
-      fakeRetrieved({
-        chunk_id: 2,
-        page_id: 'api-payment-engine-api-post-api-v2-checkout',
-        page_title: 'POST /api/v2/checkout — 创建订单',
-        page_url: '/zh/reference/payment-engine-api/post-api-v2-checkout',
-        text: 'API reference: Payment Engine API\nEndpoint: POST `/api/v2/checkout`',
-        rrf_score: 0.1,
-        nav_index: 1000,
-      }),
-    ],
-    {
-      queryLang: 'zh',
-      currentSubtreeRoot: null,
-      query: '创建订单接口 POST /api/v2/checkout 返回哪些字段？',
-      apiIntent: true,
-    },
-  );
-
-  assert.equal(out[0]?.page_id, 'api-payment-engine-api-post-api-v2-checkout');
-});
-
-test('rerank: api_reference_boost skips API chunks that miss hint terms or preferred version', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({
-        chunk_id: 1,
-        page_id: 'api-waas-api-post-api-v1-payout',
-        page_title: 'POST /api/v1/payout — 发起钱包提币',
-        text: 'API reference: WaaS API. HTTP Request POST /api/v1/payout.',
-        rrf_score: 0.1,
-        nav_index: 1000,
-      }),
-      fakeRetrieved({
-        chunk_id: 2,
-        page_id: 'api-waas-api-post-api-v2-payout',
-        page_title: 'POST /api/v2/payout — 发起钱包提币',
-        text: 'API reference: WaaS API. HTTP Request POST /api/v2/payout.',
-        rrf_score: 0.1,
-        nav_index: 1000,
-      }),
-      fakeRetrieved({
-        chunk_id: 3,
-        page_id: 'api-waas-api-post-api-v1-coins',
-        page_title: 'POST /api/v1/coins — 查询币种',
-        text: 'API reference: WaaS API. HTTP Request POST /api/v1/coins.',
-        rrf_score: 0.1,
-        nav_index: 1000,
-      }),
-    ],
-    {
-      queryLang: 'zh',
-      currentSubtreeRoot: null,
-      query: 'WaaS API 出款流程',
-      apiIntent: true,
-      apiReferenceHintTerms: ['api', 'v1', 'payout'],
-      apiReferenceVersionPrefs: ['v1'],
-      apiReferencePagePrefix: 'api-waas-',
-    },
-  );
-  const v1 = out.find((c) => c.page_id === 'api-waas-api-post-api-v1-payout')!;
-  const v2 = out.find((c) => c.page_id === 'api-waas-api-post-api-v2-payout')!;
-  const coins = out.find((c) => c.page_id === 'api-waas-api-post-api-v1-coins')!;
-  assert.ok(v1.final_score > v2.final_score);
-  assert.ok(v1.final_score > coins.final_score);
-});
-
-test('rerank: nav_index_boost decays with depth', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, nav_index: 0 }),
-      fakeRetrieved({ chunk_id: 2, nav_index: 100 }),
-    ],
-    { queryLang: 'zh', currentSubtreeRoot: null },
-  );
-  const shallow = out.find((c) => c.chunk_id === 1)!;
-  const deep = out.find((c) => c.chunk_id === 2)!;
-  assert.ok(shallow.final_score > deep.final_score, 'lower nav_index ranks higher');
-});
-
-test('rerank: title_match_boost +0.30 when query contains page_title (word-aligned)', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, page_id: 'home-assistant', page_title: 'Home Assistant', rrf_score: 0.04, nav_index: 1000 }),
-      fakeRetrieved({ chunk_id: 2, page_id: 'mattermost', page_title: 'Mattermost', rrf_score: 0.045, nav_index: 1000 }),
-    ],
-    { queryLang: 'en', currentSubtreeRoot: null, query: 'How do I integrate Home Assistant?' },
-  );
-  const ha = out.find((c) => c.chunk_id === 1)!;
-  const mm = out.find((c) => c.chunk_id === 2)!;
-  // ha: 0.04 × (1+0.3 lang+0.3 title+~0 nav) = 0.064
-  // mm: 0.045 × (1+0.3 lang) = 0.0585  → ha wins
-  assert.ok(ha.final_score > mm.final_score, 'title-matched chunk wins despite lower rrf');
-});
-
-test('rerank: title_match_boost suppressed when longer matched title contains shorter', () => {
-  // Both "Installation" and "Installation on Termux" appear in query;
-  // only the longer-titled page should keep the boost.
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, page_id: 'install', page_title: 'Installation', rrf_score: 0.10, nav_index: 1000 }),
-      fakeRetrieved({ chunk_id: 2, page_id: 'install-termux', page_title: 'Installation on Termux', rrf_score: 0.10, nav_index: 1000 }),
-    ],
-    { queryLang: 'en', currentSubtreeRoot: null, query: 'tell me about Installation on Termux please' },
-  );
-  const generic = out.find((c) => c.chunk_id === 1)!;
-  const specific = out.find((c) => c.chunk_id === 2)!;
-  assert.ok(specific.final_score > generic.final_score, 'specific (longer) title wins, generic suppressed');
-});
-
-// entity_match_boost: chunks whose page_id or page_title contains a known
-// entity term get a +0.20 boost. This rescues compare-style queries where
-// the verb (`compare`/`vs`) dominates vector ranking and entity-specific
-// pages would otherwise drop below the prompt-context cap.
-test('rerank: entity_match_boost +0.20 when chunk.page_id matches entity term', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, page_id: 'checkpoints', page_title: 'Filesystem Checkpoints', rrf_score: 0.05, nav_index: 1000 }),
-      fakeRetrieved({ chunk_id: 2, page_id: 'random-page', page_title: 'Other Topic', rrf_score: 0.05, nav_index: 1000 }),
-    ],
-    { queryLang: 'en', currentSubtreeRoot: null, query: 'compare sessions and checkpoints', entityTerms: ['sessions', 'checkpoints'] },
-  );
-  const ckpt = out.find((c) => c.chunk_id === 1)!;
-  const other = out.find((c) => c.chunk_id === 2)!;
-  assert.ok(ckpt.final_score > other.final_score, 'entity-matched page wins');
-});
-
-test('rerank: entity_match_boost off when entityTerms not provided', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, page_id: 'checkpoints', page_title: 'Checkpoints', rrf_score: 0.05, nav_index: 1000 }),
-      fakeRetrieved({ chunk_id: 2, page_id: 'random', page_title: 'Random', rrf_score: 0.05, nav_index: 1000 }),
-    ],
-    { queryLang: 'en', currentSubtreeRoot: null, query: 'something unrelated' },
-  );
-  // No entity terms → no entity boost; final_scores equal modulo nav_index_boost.
-  const ckpt = out.find((c) => c.chunk_id === 1)!;
-  const random = out.find((c) => c.chunk_id === 2)!;
-  assert.equal(ckpt.final_score, random.final_score);
-});
-
-test('rerank: title_match_boost skipped for titles below min length', () => {
-  // Title "TTS" (3 chars) is below TITLE_MATCH_MIN_LEN; no boost even on exact match.
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, page_id: 'tts', page_title: 'TTS', rrf_score: 0.05, nav_index: 1000 }),
-      fakeRetrieved({ chunk_id: 2, page_id: 'voice', page_title: 'Voice', rrf_score: 0.05, nav_index: 1000 }),
-    ],
-    { queryLang: 'en', currentSubtreeRoot: null, query: 'how does TTS work' },
-  );
-  const tts = out.find((c) => c.chunk_id === 1)!;
-  const voice = out.find((c) => c.chunk_id === 2)!;
-  // No title-match boost on either; final_scores tie or differ only on lang_boost.
-  assert.equal(tts.final_score, voice.final_score, 'short titles get no title boost');
-});
-
-// Singular/plural tolerance in title matching — query types "tool" but the
-// title is "Tools Runtime" (or vice versa). Both directions should match.
-// Regression for codex clarify follow-up: `tool` query failed to title-match
-// `Tools Runtime` so the title-match tiebreaker never fired.
-test('computeTitleMatches: query singular hits title plural via trailing -s', () => {
-  const out = computeTitleMatches(
-    [fakeRetrieved({ chunk_id: 1, page_id: 'tools-runtime', page_title: 'Tools Runtime' })],
-    'how do I create a custom tool safely?',
-  );
-  assert.ok(out.has('tools-runtime'), 'expected `tool` query to match `Tools Runtime` title');
-});
-
-test('computeTitleMatches: query plural hits title singular via trailing -s', () => {
-  const out = computeTitleMatches(
-    [fakeRetrieved({ chunk_id: 1, page_id: 'session', page_title: 'Session Management' })],
-    'how do sessions work?',
-  );
-  assert.ok(out.has('session'));
-});
-
-// Regression for codex codeGroup clarify case. Query `codeGroup` (camelCase,
-// no whitespace) used to be opaque to word-boundary matching, so it never
-// aligned with "Code Blocks and Code Groups". Normalizing the query by
-// splitting on case boundaries lets `code` and `groups` words hit naturally.
-test('computeTitleMatches: camelCase query token splits before word-boundary match', () => {
-  const out = computeTitleMatches(
-    [fakeRetrieved({ chunk_id: 1, page_id: 'code-blocks', page_title: 'Code Blocks and Code Groups' })],
-    'does the Markdown conversion path support codeGroup?',
-  );
-  assert.ok(out.has('code-blocks'), 'expected `codeGroup` query to title-match `Code Blocks and Code Groups`');
-});
-
-test('rerank: sorted descending by final_score', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, rrf_score: 0.05 }),
-      fakeRetrieved({ chunk_id: 2, rrf_score: 0.20 }),
-      fakeRetrieved({ chunk_id: 3, rrf_score: 0.10 }),
-    ],
-    { queryLang: 'zh', currentSubtreeRoot: null, query: '' },
-  );
-  for (let i = 1; i < out.length; i++) {
-    assert.ok(out[i - 1]!.final_score >= out[i]!.final_score);
-  }
+  assert.deepEqual(out.map((chunk) => chunk.chunk_id), [1, 2]);
+  assert.ok(out.every((chunk) => chunk.final_score === chunk.rrf_score));
 });
 
 // ---------------------------------------------------------------------------

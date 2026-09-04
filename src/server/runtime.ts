@@ -71,8 +71,7 @@ export class Runtime {
   /**
    * Cross-encoder reranker. `null` when config.reranker.enabled = false or
    * tests passed `reranker: null`. answer.ts treats null as "skip the
-   * cross-encoder rerank stage" and the rule rerank remains the only ranking
-   * authority — keeps v1 pipeline byte-equivalent unless explicitly enabled.
+   * cross-encoder rerank stage", leaving RRF as the ranking authority.
    */
   readonly reranker: Reranker | null;
   readonly indexer: Indexer;

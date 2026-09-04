@@ -19,7 +19,7 @@
 
 1. Extract exact identifiers from the original and rewritten query.
 2. Run vector and BM25 retrieval over children.
-3. Inject exact identifier hits with protected rank and apply existing structural reranking.
+3. Inject exact identifier hits with protected rank, then keep the fused RRF order.
 4. Select diverse child hits.
 5. Before generation, replace children that share a parent with one bounded parent context.
 6. Keep the winning child's citation identity, but link generated OpenAPI pages to the real operation URL.

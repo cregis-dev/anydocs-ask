@@ -90,17 +90,12 @@ API 协议见 [ARCHITECTURE §5](../ARCHITECTURE.md)；CORS / 段落 anchor 等�
 1.5 query lang 检测：scope_id > current_page_id.lang > 文本 CJK 比例（≥0.30 → zh）
 2.  边界过滤：status='published' [AND subtree_root=scope_id]（lang 不在硬过滤里）
 3.  混合召回 K=20：vec0 余弦 top-20 ∪ FTS5 BM25 top-20 → RRF(k=60) 融合 top-20
-4.  结构重排：final_score = rrf_score × (1 + lang_boost + same_subtree_boost
-                                           + nav_index_boost + title_match_boost)
-       lang_boost          +0.30  chunk.lang == query_lang
-       same_subtree_boost  +0.20  chunk.subtree_root == current_page 的 subtree_root
-       nav_index_boost     +0.10 × 1/log(nav_index + 2)
-       title_match_boost   +0.30  query 含 chunk 所在页 title（≥5 字符；影子抑制）
+4.  排序：保持 RRF 顺序与分数；启用 cross-encoder 时，由它重排 top-N 并覆盖 final_score。
+       不再按语言、导航位置、当前页、标题、实体或 API 类型叠加规则权重。
 5.  子树聚合 + lang 路径：
        同 lang 充分（top10_same_lang 非空且 max(rrf) ≥ 0.01）：
          max(subtree share) ≥ 0.55   → 直答（dominant subtree）
-         top-2 subtree Δ < 0.25       → 仍直答（保留同 lang 多子树上下文；
-                                           current-page/title-match 只影响 dominant subtree）
+         top-2 subtree Δ < 0.25       → 仍直答（保留同 lang 多子树上下文）
          其他                          → 直答（按主导子树）
        同 lang 不足                 → 跨 lang 翻译降级，answer_lang=query_lang，
                                       citation snippet 保留原 lang **不翻译**
@@ -173,7 +168,7 @@ Console 体验台 persist 落的 runs 自带 `source=console`，`analyze` / `gol
 
 ### 5.1 v1 立即可调（无需上游字段）
 
-- **检索权重**：`anydocs.ask.json` 的 `retrieval.{rrfK,rerankSameSubtreeBoost,navOrderBoost,maxChunksHardCap}`。先看 eval / analyze 指标再动手；冷启动期一律默认值（PRD §12.6）。子树聚合阈值（dominance / spread）现固化为 `src/query/aggregate.ts` 的代码常量；spread 只作为近似子树 tie-breaker，不再自动触发 clarify。
+- **检索参数**：`anydocs.ask.json` 的 `retrieval.{topK,rrfK,maxChunksHardCap}`。先看 eval / analyze 指标再调整；冷启动期使用默认值。子树聚合阈值（dominance / spread）固化为 `src/query/aggregate.ts` 的代码常量，不再自动触发 clarify。
 - **chunk 边界**：`indexing.{chunkMaxTokens,chunkHardCap}`；analyze D2 显示 "long queries + many candidates 慢" → 多半是 chunk 过大触发 token 爆。
 - **embedding 量化**：`embedding.preferQuantized: true` 走 int8 版 bge-m3，冷启快 5-6× / 磁盘 ~191MB vs 1.2GB（ARCH §8 spike 实测）。VPS / 小内存场景推荐。
 - **navigation 编排**：D3 歧义高发 → 合并 / 拆分子树。R@5 偏低 → 给重要 section 显式写 `id`（ARCH §2.2.2 推荐）+ 调整 nav 顺序（`nav_index` 作权重）。

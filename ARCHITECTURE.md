@@ -110,7 +110,7 @@ stable_nav_id(node, file, dfs_path) =
                 │ 查询管线                           │
                 │  ├ 边界过滤（硬：published）       │
                 │  ├ 混合召回（向量 + BM25 → RRF）   │
-                │  ├ 结构重排（同子树 / nav 顺序）   │
+                │  ├ RRF 排序（可选 cross-encoder）  │
                 │  ├ 子树聚合判定                    │
                 │  │  ├ 集中 → 生成                  │
                 │  │  └ 分散 → 树状反问              │
@@ -164,7 +164,7 @@ CREATE INDEX idx_pages_parent  ON pages(parent_id);
 CREATE INDEX idx_pages_lang    ON pages(lang);
 
 -- 内容层：chunk 与 page 解耦；embedding 按 content_hash 缓存
--- chunks 也带 lang，便于查询时 lang_boost / 过滤不 join pages
+-- chunks 也带 lang，便于聚合阶段按语言过滤而不 join pages
 CREATE TABLE chunks (
   chunk_id      INTEGER PRIMARY KEY AUTOINCREMENT,
   page_id       TEXT NOT NULL,
@@ -422,8 +422,7 @@ HTTP 400。`scope_id` 校验是硬条件——未命中 `pages` 表中任一 `su
    WHERE pages.status = 'published'
    AND (scope_id IS NULL OR pages.subtree_root = scope_id)
    注意：lang 不在硬过滤里——多 lang 检索是 v1 的核心能力（PRD §4.8）；
-        lang 偏好通过步骤 4 的 lang_boost 体现，并通过步骤 5 的"同 lang
-        优先 + 跨 lang 降级"决定最终走向。
+        步骤 5 通过"同 lang 优先 + 跨 lang 降级"决定最终上下文。
 
 3. 混合召回（K = 20）
    ├─ 向量路径：embed(question, model=bge-m3) → sqlite-vec 余弦 top-20
@@ -434,35 +433,21 @@ HTTP 400。`scope_id` 校验是硬条件——未命中 `pages` 表中任一 `su
         靠精确词匹配；向量路径补"鉴权 / 登录 / auth"这类语义相似。
         bge-m3 同时覆盖 zh/en，所以单次 embed 可以同时打到 zh 和 en chunks。
 
-4. 结构重排（在 RRF top-20 上加权）
-   final_score = rrf_score × (1 + lang_boost + same_subtree_boost
-                                + nav_index_boost + title_match_boost)
+4. 排序
+   ├─ 默认：final_score = rrf_score，保持 RRF top-20 顺序
+   └─ 可选：cross-encoder 对 top-N 联合编码并覆盖 final_score
 
-   ├─ lang_boost：chunks.lang == query_lang ? +0.30 : 0
-   │  （PRD §4.8 同 lang 优先；权重最高，确保跨 lang 仅在同 lang 没结果时显现）
-   ├─ same_subtree_boost：chunk 所属页与 current_page_id **共享 subtree_root**：+0.20
-   │  （v1 实现取 §12 一致的"同子树"语义而非严格"祖先链命中"——同子树兄弟
-   │   也吃 boost，与 PRD §4.2 "结构坐标上下文"的「同子树为主」初衷一致；
-   │   严格祖先版本会漏掉同级页面，可读性 / 召回都不利。current_page_id 为
-   │   空或解析失败 → 0）
-   ├─ nav_index_boost：+0.10 × (1 / log(nav_index + 2))
-   │  （nav_index 即"编排权重"近似；v1 不依赖 anydocs 加字段）
-   └─ title_match_boost：query 含 chunk 所在页的 title（≥5 字符、ASCII 走
-      词边界 / CJK 走子串）：+0.30
-      （2026-05-08 加入；作者写下的 page title 是显式编排意图，query 命中
-       title 视作强指针。**影子抑制**：若另一被命中页的 title 严格包含本
-       title（如"Termux 上安装" 严格包含 "安装"），则丢掉短 title 的命中
-       避免双倍 boost；详 rerank.ts:computeTitleMatches。属 PRD §4.1 编排
-       意图先验的实战补丁，不在 v1.5 nav.weight / page.priority 路线上）
+   查询时不再叠加语言、同子树、导航顺序、当前页、标题、实体或 API 类型
+   的人工乘法权重。Vector、BM25 与 Exact Identifier 的融合结果是默认的
+   唯一相关性排序来源；启用 cross-encoder 时，它是唯一后置重排器。
 
-5. 子树聚合 + lang 路径判定（在重排后 top-10 上）
+5. 子树聚合 + lang 路径判定（在排序后 top-10 上）
    先按 lang 切片：top10_same_lang = top10 ∩ {chunks.lang == query_lang}
 
    分支 A — 同 lang 充分（top10_same_lang 非空且 max(rrf) ≥ 0.01）
      按 chunks.page_id → pages.subtree_root 分组，计算各子树得分占比 p_i：
      ├─ max(p_i) ≥ 0.55 → 单一子树主导，进入生成（语种 = query_lang，正常路径）
-     ├─ 否则 top-2 子树得分差 < 0.25 → 仍直接进入生成（同 lang 上下文全部保留；
-     │  current-page / title-match 仅作为 dominantSubtree 记录用的 tie-breaker）
+     ├─ 否则 top-2 子树得分差 < 0.25 → 仍直接进入生成（同 lang 上下文全部保留）
      └─ 中间情况 → 直接进入生成（按主导子树，语种 = query_lang）
 
    分支 B — 同 lang 不足（top10_same_lang 空 或 max(rrf) < 0.01）
@@ -503,7 +488,7 @@ HTTP 400。`scope_id` 校验是硬条件——未命中 `pages` 表中任一 `su
 8. 落 answer 缓存（TTL 24h）+ 返回
 ```
 
-> **测试钩子**：lang 检测 / lang_boost / 翻译降级三段是 v1 多语言的核心，单测必须覆盖 PRD §8 验收 #11 / #12 / #13 的样例。
+> **测试钩子**：lang 检测 / 同语言聚合 / 翻译降级三段是 v1 多语言的核心，单测必须覆盖 PRD §8 验收 #11 / #12 / #13 的样例。
 
 ---
 
@@ -689,8 +674,6 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
   "retrieval": {
     "topK": 20,
     "rrfK": 60,
-    "rerankSameSubtreeBoost": 0.20,
-    "navOrderBoost": 0.10,
     "maxChunksHardCap": 20
   },
   "server": {
@@ -795,14 +778,14 @@ v1 假设：本地开发 + 编辑发生在创作者机器上；对外发布是�
 
 | PRD 条款 | 实现位置 |
 |---|---|
-| §4.1 编排意图优先 | 查询管线 §6 步骤 4：`navOrderBoost`（`nav_index` 近似，v1 永久方案） |
-| §4.2 结构坐标上下文 | API context.current_page_id；查询管线 §6 步骤 4 同子树 boost |
+| §4.1 编排意图优先 | 索引阶段保留导航、标题和结构元数据；查询排序由 RRF / 可选 cross-encoder 决定 |
+| §4.2 结构坐标上下文 | API context.current_page_id；parent context 与子树聚合保留结构边界 |
 | §4.3 结构化输出 | 查询管线 §6 步骤 6 格式判断 + 步骤 7 后处理校验 |
 | §4.4 树状降级反问 | 历史协议兼容：API §5.1 保留 clarify / scope_id；默认查询管线 §6 步骤 5 已改为直接回答优先 |
 | §4.5 边界与版本隔离 | 查询管线 §6 步骤 2 硬条件；索引管线 §7 仅 published 入库 |
 | §4.6 拖拽零重算 | 双层索引 §2 + embedding_cache §4 + 增量更新 §7.2 navigation 分支 |
 | §4.7 立体溯源 | API §5.1 citations[].breadcrumb；查询时实时 join 结构层；citation snippet 保留原 lang 不翻译 |
-| §4.8 多语言策略 | 检测 §6 步骤 1.5；lang_boost §6 步骤 4；同 lang 优先 + 跨 lang 降级 §6 步骤 5；citation lang/source_lang §5.1 + §6 步骤 7 |
+| §4.8 多语言策略 | 检测 §6 步骤 1.5；同 lang 优先 + 跨 lang 降级 §6 步骤 5；citation lang/source_lang §5.1 + §6 步骤 7 |
 
 ---
 
@@ -909,17 +892,13 @@ ALTER TABLE feedback ADD COLUMN session_id TEXT;
 
 退化路径：连 Reader 极小改造都做不到的项目，γ 只剩"重问检测"一条；其他三项静默无效。这是可接受的最低档。
 
-### 15.3 Reranker 加权（A 路径）
+### 15.3 反馈信号（A 路径）
 
-修改 §6 步骤 4（结构重排），引入"反馈先验"：
+反馈信号用于离线评测、golden case 和检索质量分析，不直接修改在线
+`final_score`。若未来需要引入学习排序，应通过可评测的 reranker 模型实现，
+不恢复查询时的人工乘法规则。
 
-```
-final_score = rrf_score 
-            × (1 + structural_boosts)          # v1 已有：同子树 + nav_index
-            × (1 + feedback_prior(chunk_id))    # v1.5 新增；feedback.enabled=false 时为 0
-```
-
-`feedback_prior(chunk_id)` 计算（每周离线汇总到 `chunk_priors` 表，查询时 O(1) 查表）：
+历史上讨论过的 `feedback_prior(chunk_id)` 计算如下，仅保留为离线分析指标：
 
 ```
 prior = clip(  Σ_{f referencing chunk} weight(f) × rating_normalized(f)
@@ -1268,8 +1247,7 @@ Baseline: 2026-04-25 (R@5=0.74, Cit=0.68, Ans=0.62)
         "rrf_score": 0.83,
         "vec_rank": 2,
         "bm25_rank": 5,
-        "nav_index": 3,
-        "nav_index_boost": 0.05
+        "nav_index": 3
       }
     ],
     "subtree_ask_triggered": false

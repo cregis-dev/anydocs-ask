@@ -129,7 +129,6 @@ export type EvalTraceChunkDiagnostic = {
   vec_rank: number | null;
   bm25_rank: number | null;
   nav_index: number | null;
-  nav_index_boost: number;
 };
 
 export type EvalProgressEvent =
@@ -540,7 +539,6 @@ function buildChunkDiagnostic(
     vec_rank: chunk.vec_rank,
     bm25_rank: chunk.bm25_rank,
     nav_index: chunk.nav_index,
-    nav_index_boost: chunk.nav_index_boost,
   };
 }
 

@@ -31,7 +31,6 @@ function fakeRun(over: {
         vec_rank: i,
         bm25_rank: i,
         nav_index: i,
-        nav_index_boost: 0,
       })),
       subtree_ask_triggered: over.subtree_ask ?? false,
     },

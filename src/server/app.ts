@@ -939,7 +939,6 @@ function appendRun(
         vec_rank: f.vec_rank,
         bm25_rank: f.bm25_rank,
         nav_index: f.nav_index,
-        nav_index_boost: f.nav_index_boost,
       })),
       subtree_ask_triggered: trace.subtree_ask_triggered,
     },
