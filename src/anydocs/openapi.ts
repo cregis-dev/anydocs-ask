@@ -1,6 +1,13 @@
 import { promises as fs } from 'node:fs';
 import { basename, join } from 'node:path';
-import { isDocsLang, isPageStatus, type DocsLang, type PageDoc } from './types.ts';
+import {
+  isDocsLang,
+  isPageStatus,
+  type DocsLang,
+  type NavigationDoc,
+  type NavItem,
+  type PageDoc,
+} from './types.ts';
 
 type OpenApiDescriptor = {
   id: string;
@@ -50,6 +57,99 @@ export async function loadOpenApiPages(
   }
 
   return out;
+}
+
+/**
+ * Add generated OpenAPI operations to the in-memory navigation tree.
+ *
+ * API references are described by api-sources rather than authored as dozens
+ * of navigation page entries. Replacing the existing API Reference link with
+ * a virtual folder lets every downstream consumer see the generated pages as
+ * normal members of the product subtree without changing navigation/*.json.
+ */
+export function attachOpenApiPagesToNavigation(
+  navigationsByLang: Map<DocsLang, NavigationDoc>,
+  apiPagesByLang: Map<DocsLang, PageDoc[]>,
+  warnings: string[],
+): void {
+  for (const [lang, pages] of apiPagesByLang) {
+    const navigation = navigationsByLang.get(lang);
+    if (!navigation) continue;
+
+    const groups = groupApiPages(pages);
+    for (const group of groups.values()) {
+      const target = findGroupContainer(navigation.items, group.groupId, group.routeBase);
+      if (!target) {
+        warnings.push(
+          `api-sources: cannot attach OpenAPI group "${group.groupId}" to navigation/${lang}.json; generated pages remain orphaned`,
+        );
+        continue;
+      }
+
+      const folder: NavItem = {
+        type: 'folder',
+        id: `api-reference:${group.groupId}`,
+        title: lang === 'zh' ? 'API 参考' : 'API Reference',
+        children: group.pages.map((page) => ({ type: 'page', pageId: page.id })),
+      };
+      const linkIndex = target.children.findIndex(
+        (item) => item.type === 'link' && sameRoute(item.href, group.routeBase),
+      );
+      if (linkIndex >= 0) target.children.splice(linkIndex, 1, folder);
+      else target.children.push(folder);
+    }
+  }
+}
+
+type ApiPageGroup = {
+  groupId: string;
+  routeBase: string;
+  pages: PageDoc[];
+};
+
+function groupApiPages(pages: PageDoc[]): Map<string, ApiPageGroup> {
+  const groups = new Map<string, ApiPageGroup>();
+  for (const page of pages) {
+    const groupId = stringOr(page.metadata?.openapi_group_id, 'api-reference');
+    const routeBase = stringOr(page.metadata?.openapi_route_base, '');
+    const key = `${groupId}\0${routeBase}`;
+    const group = groups.get(key) ?? { groupId, routeBase, pages: [] };
+    group.pages.push(page);
+    groups.set(key, group);
+  }
+  return groups;
+}
+
+function findGroupContainer(
+  items: NavItem[],
+  groupId: string,
+  routeBase: string,
+): Extract<NavItem, { type: 'section' | 'folder' }> | null {
+  const routeSegment = normalizeRoute(routeBase).split('/').filter(Boolean).at(-1);
+  const candidateIds = new Set(
+    [groupId, `${groupId}-api`, routeSegment].filter((id): id is string => Boolean(id)),
+  );
+
+  for (const item of items) {
+    if ((item.type === 'section' || item.type === 'folder') && item.id && candidateIds.has(item.id)) {
+      return item;
+    }
+  }
+  for (const item of items) {
+    if (item.type !== 'section' && item.type !== 'folder') continue;
+    const nested = findGroupContainer(item.children, groupId, routeBase);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+function sameRoute(left: string, right: string): boolean {
+  return Boolean(right) && normalizeRoute(left) === normalizeRoute(right);
+}
+
+function normalizeRoute(value: string): string {
+  const path = value.split(/[?#]/, 1)[0] ?? '';
+  return path.length > 1 ? path.replace(/\/+$/, '') : path;
 }
 
 async function readDescriptor(
@@ -157,6 +257,9 @@ function pagesFromSpec(descriptor: OpenApiDescriptor, spec: OpenApiSpec): PageDo
         metadata: {
           source_type: 'openapi',
           openapi_id: descriptor.id,
+          openapi_group_id: descriptor.display?.groupId ?? baseId,
+          openapi_group_title: descriptor.display?.title ?? specTitle,
+          openapi_route_base: descriptor.runtime?.routeBase ?? '',
           operation_method: methodUpper,
           operation_path: apiPath,
           operation_id: stringOr(op.operationId, ''),

@@ -300,7 +300,7 @@ function walkNav(
   for (const it of items) {
     if (!it || typeof it !== 'object') continue;
     const node = it as { type?: string; title?: string; pageId?: string; children?: unknown };
-    if (node.type === 'section') {
+    if (node.type === 'section' || node.type === 'folder') {
       walkNav(node.children, [...trail, node.title ?? ''], visit);
     } else if (node.type === 'page' && typeof node.pageId === 'string') {
       visit(node.pageId, trail);
