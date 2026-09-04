@@ -6,7 +6,7 @@
  *   - `ask`        → `ask()`     (full RAG answer + validated citations; LLM)
  *   - `fetch_page` → DB read     (reconstruct a page's text from its chunks)
  *
- * `search` / `fetch_page` are deliberately LLM-free: `search` injects the
+ * `search` / `fetch_page` are deliberately LLM-free: `search` uses the
  * static {@link fallbackRoute} intent router (same path as retrieval-only
  * eval) so no provider call happens, and an LLM stub guards against accidental
  * generation. Only `ask` resolves the real LLM — so a `search`-only deployment
@@ -25,12 +25,13 @@ import type { BreadcrumbNode } from '../db/schema.ts';
 import type { Embedder } from '../embedding/types.ts';
 import type { LLM } from '../llm/types.ts';
 import type { Reranker } from '../reranker/types.ts';
-import type { McpToolName, PromptConfig, RerankerConfig } from '../config.ts';
+import type { McpToolName, PromptConfig, RerankerConfig, RetrievalConfig } from '../config.ts';
 import { performance } from 'node:perf_hooks';
 import { askWithTrace, search } from '../query/answer.ts';
 import type { AskDeps, AskTrace } from '../query/answer.ts';
 import type { AskResult } from '../query/types.ts';
 import { fallbackRoute, type IntentRouter } from '../query/intent-router.ts';
+import { MAX_QUESTION_CHARS } from '../query/diagnostic-input.ts';
 
 /**
  * Dependencies the MCP tools need. The LLM is resolved lazily (and only by
@@ -43,7 +44,9 @@ export type McpToolDeps = {
   embedder: Embedder;
   reranker: Reranker | null;
   rerankerConfig: RerankerConfig;
+  retrievalConfig: RetrievalConfig;
   promptConfig: PromptConfig;
+  intentRouter: IntentRouter;
   /** Resolve the answer LLM; only `ask` calls it. Throws if unavailable. */
   resolveLlm: () => LLM;
   /**
@@ -121,6 +124,7 @@ export function registerMcpTools(
     llm: UNUSED_LLM,
     reranker: deps.reranker,
     rerankerConfig: deps.rerankerConfig,
+    retrievalConfig: deps.retrievalConfig,
     promptConfig: deps.promptConfig,
     intentRouter: STATIC_SEARCH_ROUTER,
   };
@@ -133,7 +137,7 @@ export function registerMcpTools(
         description:
           'Semantic + keyword search over the indexed documentation. Returns the most relevant passages with their source page, URL, and breadcrumb so you can ground answers in the docs. Use this to find supporting material, then write and cite the answer yourself; it returns passages only and does NOT generate a written answer.',
         inputSchema: {
-          query: z.string().min(1).max(500).describe('Natural-language search query.'),
+          query: z.string().min(1).max(MAX_QUESTION_CHARS).describe('Natural-language search query or API troubleshooting payload.'),
           scope_id: z
             .string()
             .optional()
@@ -183,7 +187,7 @@ export function registerMcpTools(
         description:
           'Ask a natural-language question and get a synthesized answer grounded in the documentation, with citations to the source pages. Costs an LLM call on the server. Prefer this when you want a direct answer; use `search` when you only need raw passages to reason over yourself.',
         inputSchema: {
-          question: z.string().min(1).max(500).describe('The question to answer.'),
+          question: z.string().min(1).max(MAX_QUESTION_CHARS).describe('The question or API troubleshooting payload to answer.'),
           scope_id: z
             .string()
             .optional()
@@ -209,7 +213,7 @@ export function registerMcpTools(
         const scopeId = scope_id ?? null;
         const t0 = performance.now();
         const { result, trace } = await askWithTrace(
-          { ...retrievalDeps, llm, intentRouter: undefined },
+          { ...retrievalDeps, llm, intentRouter: deps.intentRouter },
           { question, context: { scope_id: scopeId } },
         );
         const latencyMs =

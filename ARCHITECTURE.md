@@ -110,7 +110,7 @@ stable_nav_id(node, file, dfs_path) =
                 │ 查询管线                           │
                 │  ├ 边界过滤（硬：published）       │
                 │  ├ 混合召回（向量 + BM25 → RRF）   │
-                │  ├ 结构重排（同子树 / nav 顺序）   │
+                │  ├ RRF 排序（可选 cross-encoder）  │
                 │  ├ 子树聚合判定                    │
                 │  │  ├ 集中 → 生成                  │
                 │  │  └ 分散 → 树状反问              │
@@ -164,7 +164,7 @@ CREATE INDEX idx_pages_parent  ON pages(parent_id);
 CREATE INDEX idx_pages_lang    ON pages(lang);
 
 -- 内容层：chunk 与 page 解耦；embedding 按 content_hash 缓存
--- chunks 也带 lang，便于查询时 lang_boost / 过滤不 join pages
+-- chunks 也带 lang，便于聚合阶段按语言过滤而不 join pages
 CREATE TABLE chunks (
   chunk_id      INTEGER PRIMARY KEY AUTOINCREMENT,
   page_id       TEXT NOT NULL,
@@ -395,11 +395,19 @@ HTTP 400。`scope_id` 校验是硬条件——未命中 `pages` 表中任一 `su
 
 ```
 1. 入参验证
-   ├─ question 长度 ≤ 500 字
+   ├─ question 长度 ≤ 20,000 字
    ├─ scope_id（如有）必须命中 pages 表中某个 subtree_root；
    │  否则返回 HTTP 400 invalid_scope（绝不降级为全局）
    └─ options.max_chunks → min(client_value, retrieval.maxChunksHardCap)
       默认服务端硬上限 20，防止恶意客户端拖爆 LLM token
+
+1.25 长问题与诊断输入预处理
+   ├─ 对 API key、Authorization、Token、签名、密码等敏感值做本地脱敏
+   ├─ question > 500 字或检测到 JSON / HTTP / 日志结构时：
+   │  ├─ Intent Router 生成 ≤ 600 字的语义检索问题
+   │  └─ 本地提取 endpoint、错误码、异常名、字段名和精确原文线索
+   ├─ Router 原样回显、超长、失败或返回非法 JSON → 使用本地确定性检索摘要
+   └─ 回答提示、runs 日志和反馈缓存只携带脱敏文本与经原文校验的精确线索
 
 1.5 query lang 检测（v1.0+；PRD §4.8）
    ├─ scope_id 给了 → 从 scope_id 解析 lang（覆盖检测）
@@ -414,8 +422,7 @@ HTTP 400。`scope_id` 校验是硬条件——未命中 `pages` 表中任一 `su
    WHERE pages.status = 'published'
    AND (scope_id IS NULL OR pages.subtree_root = scope_id)
    注意：lang 不在硬过滤里——多 lang 检索是 v1 的核心能力（PRD §4.8）；
-        lang 偏好通过步骤 4 的 lang_boost 体现，并通过步骤 5 的"同 lang
-        优先 + 跨 lang 降级"决定最终走向。
+        步骤 5 通过"同 lang 优先 + 跨 lang 降级"决定最终上下文。
 
 3. 混合召回（K = 20）
    ├─ 向量路径：embed(question, model=bge-m3) → sqlite-vec 余弦 top-20
@@ -426,35 +433,21 @@ HTTP 400。`scope_id` 校验是硬条件——未命中 `pages` 表中任一 `su
         靠精确词匹配；向量路径补"鉴权 / 登录 / auth"这类语义相似。
         bge-m3 同时覆盖 zh/en，所以单次 embed 可以同时打到 zh 和 en chunks。
 
-4. 结构重排（在 RRF top-20 上加权）
-   final_score = rrf_score × (1 + lang_boost + same_subtree_boost
-                                + nav_index_boost + title_match_boost)
+4. 排序
+   ├─ 默认：final_score = rrf_score，保持 RRF top-20 顺序
+   └─ 可选：cross-encoder 对 top-N 联合编码并覆盖 final_score
 
-   ├─ lang_boost：chunks.lang == query_lang ? +0.30 : 0
-   │  （PRD §4.8 同 lang 优先；权重最高，确保跨 lang 仅在同 lang 没结果时显现）
-   ├─ same_subtree_boost：chunk 所属页与 current_page_id **共享 subtree_root**：+0.20
-   │  （v1 实现取 §12 一致的"同子树"语义而非严格"祖先链命中"——同子树兄弟
-   │   也吃 boost，与 PRD §4.2 "结构坐标上下文"的「同子树为主」初衷一致；
-   │   严格祖先版本会漏掉同级页面，可读性 / 召回都不利。current_page_id 为
-   │   空或解析失败 → 0）
-   ├─ nav_index_boost：+0.10 × (1 / log(nav_index + 2))
-   │  （nav_index 即"编排权重"近似；v1 不依赖 anydocs 加字段）
-   └─ title_match_boost：query 含 chunk 所在页的 title（≥5 字符、ASCII 走
-      词边界 / CJK 走子串）：+0.30
-      （2026-05-08 加入；作者写下的 page title 是显式编排意图，query 命中
-       title 视作强指针。**影子抑制**：若另一被命中页的 title 严格包含本
-       title（如"Termux 上安装" 严格包含 "安装"），则丢掉短 title 的命中
-       避免双倍 boost；详 rerank.ts:computeTitleMatches。属 PRD §4.1 编排
-       意图先验的实战补丁，不在 v1.5 nav.weight / page.priority 路线上）
+   查询时不再叠加语言、同子树、导航顺序、当前页、标题、实体或 API 类型
+   的人工乘法权重。Vector、BM25 与 Exact Identifier 的融合结果是默认的
+   唯一相关性排序来源；启用 cross-encoder 时，它是唯一后置重排器。
 
-5. 子树聚合 + lang 路径判定（在重排后 top-10 上）
+5. 子树聚合 + lang 路径判定（在排序后 top-10 上）
    先按 lang 切片：top10_same_lang = top10 ∩ {chunks.lang == query_lang}
 
    分支 A — 同 lang 充分（top10_same_lang 非空且 max(rrf) ≥ 0.01）
      按 chunks.page_id → pages.subtree_root 分组，计算各子树得分占比 p_i：
      ├─ max(p_i) ≥ 0.55 → 单一子树主导，进入生成（语种 = query_lang，正常路径）
-     ├─ 否则 top-2 子树得分差 < 0.25 → 仍直接进入生成（同 lang 上下文全部保留；
-     │  current-page / title-match 仅作为 dominantSubtree 记录用的 tie-breaker）
+     ├─ 否则 top-2 子树得分差 < 0.25 → 仍直接进入生成（同 lang 上下文全部保留）
      └─ 中间情况 → 直接进入生成（按主导子树，语种 = query_lang）
 
    分支 B — 同 lang 不足（top10_same_lang 空 或 max(rrf) < 0.01）
@@ -495,7 +488,7 @@ HTTP 400。`scope_id` 校验是硬条件——未命中 `pages` 表中任一 `su
 8. 落 answer 缓存（TTL 24h）+ 返回
 ```
 
-> **测试钩子**：lang 检测 / lang_boost / 翻译降级三段是 v1 多语言的核心，单测必须覆盖 PRD §8 验收 #11 / #12 / #13 的样例。
+> **测试钩子**：lang 检测 / 同语言聚合 / 翻译降级三段是 v1 多语言的核心，单测必须覆盖 PRD §8 验收 #11 / #12 / #13 的样例。
 
 ---
 
@@ -678,11 +671,16 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
     "model": "claude-sonnet-4-6",
     "apiKeyEnv": "ANTHROPIC_API_KEY"
   },
+  "router": {
+    "enabled": true,
+    "model": null,
+    "fastPathMaxChars": 240,
+    "cacheTtlMs": 300000,
+    "cacheMaxEntries": 512
+  },
   "retrieval": {
     "topK": 20,
     "rrfK": 60,
-    "rerankSameSubtreeBoost": 0.20,
-    "navOrderBoost": 0.10,
     "maxChunksHardCap": 20
   },
   "server": {
@@ -705,6 +703,12 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
 ```
 
 LLM API key **仅从环境变量读取**，不写配置文件。配置里只写 `apiKeyEnv` 字段名。
+
+`router.model = null` 时复用 `llm.model`；也可通过 `router.model` 或环境变量
+`ANYDOCS_ROUTER_MODEL` 指定网关支持的轻量模型。无历史且不超过
+`fastPathMaxChars` 的问题，以及带明确 endpoint / 错误码 / 异常名的问题跳过 Router LLM。
+其余路由结果按脱敏后的问题、语言和最近三轮历史的 SHA-256 键做进程内 TTL/LRU 缓存。
+设 `fastPathMaxChars = 0` 可关闭快路径，设 `cacheTtlMs = 0` 可关闭缓存。
 
 `prompt` 是项目级追加说明：`assistantName` 只替换助手身份文案，`systemInstructions` 按行追加到 system prompt 末尾。它不能覆盖核心规则：答案仍必须只基于检索片段、必须内联 `[cit_N]` 引用、不能编造代码/API/路径。为控制 token 体积，加载和 Console 保存都会规范化空白字符，并限制 `assistantName` 最多 80 字符、`systemInstructions` 最多 20 条、每条最多 500 字符；被截断或忽略的内容会进入 warning。
 
@@ -787,14 +791,14 @@ v1 假设：本地开发 + 编辑发生在创作者机器上；对外发布是�
 
 | PRD 条款 | 实现位置 |
 |---|---|
-| §4.1 编排意图优先 | 查询管线 §6 步骤 4：`navOrderBoost`（`nav_index` 近似，v1 永久方案） |
-| §4.2 结构坐标上下文 | API context.current_page_id；查询管线 §6 步骤 4 同子树 boost |
+| §4.1 编排意图优先 | 索引阶段保留导航、标题和结构元数据；查询排序由 RRF / 可选 cross-encoder 决定 |
+| §4.2 结构坐标上下文 | API context.current_page_id；parent context 与子树聚合保留结构边界 |
 | §4.3 结构化输出 | 查询管线 §6 步骤 6 格式判断 + 步骤 7 后处理校验 |
 | §4.4 树状降级反问 | 历史协议兼容：API §5.1 保留 clarify / scope_id；默认查询管线 §6 步骤 5 已改为直接回答优先 |
 | §4.5 边界与版本隔离 | 查询管线 §6 步骤 2 硬条件；索引管线 §7 仅 published 入库 |
 | §4.6 拖拽零重算 | 双层索引 §2 + embedding_cache §4 + 增量更新 §7.2 navigation 分支 |
 | §4.7 立体溯源 | API §5.1 citations[].breadcrumb；查询时实时 join 结构层；citation snippet 保留原 lang 不翻译 |
-| §4.8 多语言策略 | 检测 §6 步骤 1.5；lang_boost §6 步骤 4；同 lang 优先 + 跨 lang 降级 §6 步骤 5；citation lang/source_lang §5.1 + §6 步骤 7 |
+| §4.8 多语言策略 | 检测 §6 步骤 1.5；同 lang 优先 + 跨 lang 降级 §6 步骤 5；citation lang/source_lang §5.1 + §6 步骤 7 |
 
 ---
 
@@ -901,17 +905,13 @@ ALTER TABLE feedback ADD COLUMN session_id TEXT;
 
 退化路径：连 Reader 极小改造都做不到的项目，γ 只剩"重问检测"一条；其他三项静默无效。这是可接受的最低档。
 
-### 15.3 Reranker 加权（A 路径）
+### 15.3 反馈信号（A 路径）
 
-修改 §6 步骤 4（结构重排），引入"反馈先验"：
+反馈信号用于离线评测、golden case 和检索质量分析，不直接修改在线
+`final_score`。若未来需要引入学习排序，应通过可评测的 reranker 模型实现，
+不恢复查询时的人工乘法规则。
 
-```
-final_score = rrf_score 
-            × (1 + structural_boosts)          # v1 已有：同子树 + nav_index
-            × (1 + feedback_prior(chunk_id))    # v1.5 新增；feedback.enabled=false 时为 0
-```
-
-`feedback_prior(chunk_id)` 计算（每周离线汇总到 `chunk_priors` 表，查询时 O(1) 查表）：
+历史上讨论过的 `feedback_prior(chunk_id)` 计算如下，仅保留为离线分析指标：
 
 ```
 prior = clip(  Σ_{f referencing chunk} weight(f) × rating_normalized(f)
@@ -1260,18 +1260,25 @@ Baseline: 2026-04-25 (R@5=0.74, Cit=0.68, Ans=0.62)
         "rrf_score": 0.83,
         "vec_rank": 2,
         "bm25_rank": 5,
-        "nav_index": 3,
-        "nav_index_boost": 0.05
+        "exact_rank": null,
+        "nav_index": 3
       }
     ],
-    "subtree_ask_triggered": false
+    "subtree_ask_triggered": false,
+    "router_strategy": "fast_path",
+    "timings": {
+      "router_ms": 0.2,
+      "embedding_ms": 31.4,
+      "retrieval_ms": 4.8,
+      "rerank_ms": 0,
+      "generation_ms": 1197.6
+    }
   },
   "answer": {
     "kind": "answer",
     "answer_id": "ans_xxx",
     "md": "...",
     "citations": [{ "chunk_id": 42, "page": "security/jwt", "quote": "..." }],
-    "confidence": 0.78,
     "latency_ms": 1234,
     "tokens_in": null,
     "tokens_out": null,
@@ -1285,7 +1292,9 @@ Baseline: 2026-04-25 (R@5=0.74, Cit=0.68, Ans=0.62)
 **字段说明**（v1 实施细节）：
 
 - `answer.kind`：`'answer' | 'clarify' | 'error'`——所有出口都落 runs（错误 / 反问 / 答案），analyze 维度 1 / 3 依赖此区分。
-- `answer.confidence`：归一化代理 `top1.final_score / sum(top-5.final_score)`，∈ [0, 1]；只有一个候选时为 1，无候选为 0。与 `top_final_score`（原始 RRF×boost 分，仅 trace 内部用）刻意区分——归一版本对项目规模不敏感，是 analyze D1 `confidenceFloor` 的判定依据。v1.5 引入 reranker model 后会替换为模型分。
+- `retrieval.fused[*].vec_rank / bm25_rank / exact_rank`：三条召回路径的原始名次；`rrf_score` 仅由这些名次和配置的 `retrieval.rrfK` 计算。`final_score` 默认等于 `rrf_score`，仅在明确启用 cross-encoder 时改为模型分。
+- `retrieval.router_strategy`：`fast_path | cache | llm | fallback | disabled`；旧日志没有此字段。
+- `retrieval.timings`：Router、Embedding、检索、可选 Reranker 与答案生成的 wall-clock 毫秒数；旧日志没有此字段。各阶段之和可能略小于 `answer.latency_ms`，差值为校验、上下文组装、后处理和日志外壳开销。
 - `answer.tokens_in / tokens_out`：v1 LLM 接口未暴露，写 `null`；后续 LLM 接口扩展时填充。schema 不变。
 - `answer.error_code`：仅 `kind='error'` 时非 null（如 `invalid_scope` / `invalid_question`）。
 - `source`：`"reader" | "console"`（2026-05-11 加入）。Reader 直调 `/v1/ask` 时填 `"reader"`；dev console persist 切换开启时填 `"console"`。**旧 jsonl 行缺此字段 → 读取时视为 `"reader"`**（`runs/types.ts:runSource()` 兜底）。`analyze` / `golden generate --from runs` 默认排除 `"console"`，`--include-console` 显式纳入。详 §17.3.3 / §17.8。
@@ -1337,10 +1346,11 @@ user:   page = {slug, title, headings}
 
 ```
 SELECT runs WHERE
-  confidence >= 0.7
+  kind = 'answer'
+  AND len(citations) > 0
   AND no_re_ask_within_30s   (基于同 session_id 时间窗)
   AND length(answer.md) <= 600
-ORDER BY confidence DESC
+ORDER BY citation_count DESC, ts ASC
 LIMIT --limit (默认 50)
 ```
 
@@ -1352,7 +1362,7 @@ CLI `analyze runs <project> --since 7d` 读 `<workspace>/state/<projectId>/runs/
 
 | # | 维度 | 触发判据 | 聚合粒度 | 输出 |
 |---|---|---|---|---|
-| 1 | 召回失败 | `confidence<0.4` ∨ `len(citations)==0` ∨ 同 session 30s 内重问且 query 编辑距离 < 5 | 按 query MinHash 聚类 | `reports/.../analyze.md` 章节 + 高频缺失 page 列入 `feedback/.../suggestions/<YYYY-Www>.md` |
+| 1 | 召回失败 | `len(citations)==0` ∨ 同 session 30s 内重问且 query 编辑距离 < 5 | 按 query MinHash 聚类 | `reports/.../analyze.md` 章节 + 高频缺失 page 列入 `feedback/.../suggestions/<YYYY-Www>.md` |
 | 2 | 延迟异常 | `latency_ms` 落入 p95 上界外 | 按 query 长度 bucket / chunk 数 bucket | 报告章节 |
 | 3 | 歧义高发 | `subtree_ask_triggered=true` 且后续无 follow-up（下个 ask 不在同 session 5min 内） | 按反问的 navigation 子树 | 报告章节 + 提示 navigation 调整 |
 | 4 | 引用错配 (v1.5) | `feedback.beta=='negative'` 且 `feedback.target=='citation'` | 按 chunk_id | 报告章节 + chunk 拆分建议进 inbox |
@@ -1409,8 +1419,7 @@ subtree_ask_triggered rate: 18% (74 / 412), of which 31 未跟进 →
   "analyze": {
     "schedule": "weekly",
     "lookbackDays": 7,
-    "latencyP95Threshold": 3000,
-    "confidenceFloor": 0.4
+    "latencyP95Threshold": 3000
   }
 }
 ```
@@ -1511,7 +1520,7 @@ ProcessRegistry {
 | `GET /` | 项目选择器（卡片网格） |
 | `GET /p/:name` | 项目详情：左 sidebar（status / lifecycle / Golden / Analyze / reports）+ 顶部 next-action 横幅（§17.3.7）+ 右主区 **4 tab** （Ask / Index / Eval / Traffic）+ 右侧 Config drawer（§17.3.9）。tab 由 hash `#tab` 持久化、刷新保留 |
 | `GET /p/:name/reports/:file` | 渲染 `state/<projectId>/reports/<file>.md` |
-| `GET /p/:name/runs` | 分页 jsonl 查看（最近 50，可过滤 query/confidence/latency） |
+| `GET /p/:name/runs` | 分页 jsonl 查看（最近 50，可过滤 query/kind/source） |
 
 #### 17.3.2 JSON API（console 自身）
 
@@ -1597,14 +1606,17 @@ tab "Index" 渲染：
 
 | 区块 | 内容 |
 |---|---|
-| 健康度 strip | 4 KPI 卡 + 按日分桶 sparkline：queries · 7d / mean confidence / P95 latency (P50 副) / non-answer rate (error + clarify) |
-| 筛选条 | query / source(reader\|console) / kind / minConf |
-| runs 表 | SSR 行；每行 ts/kind+src-pill/conf/latency/query/cit |
-| 行展开 | 左：fused top-8 表 + meta(model/answer_id/request_id/tokens) + ↩ Re-ask 按钮；右：answer markdown + citations |
+| 健康度 strip | 4 KPI 卡 + 按日分桶 sparkline：queries · 7d/30d/90d/all / error rate / P95 latency (P50 副) / non-answer rate (error + clarify) |
+| 筛选条 | 服务端 query / source(reader\|console\|mcp) / kind |
+| runs 表 | 筛选后按 25/50/100 条服务端分页；每行 ts/kind+src-pill/latency/query/cit；点击整行进入专用 Run Detail 页面 |
+| Run Detail | `/p/:name/runs/:requestId` 全页诊断工作区；返回链接保留 range/query/source/kind/page 筛选状态；展示输入、答案、阶段耗时、配置和完整 retrieval inspector |
+| retrieval inspector | 分为 generation context / candidates / citations 三个视图；每条记录可展开查看实际送入生成模型的 parent context、命中的 child、标识符、对象路径、rank、score、token、content hash 与引用校验结果 |
 | Re-ask | 写回 Ask tab textarea + 切到 Ask tab + 滑哈希到 `#ask`；当前 cfg 重跑对比 |
 | **Analyze 区**（2026-05-12 加入） | runs 表下方：▶ run analyze · 7d 按钮 + "include console traffic" 复选框（→ body `include_console:true`）+ `<details>` 折叠区 inline marked 渲染最新 analyze 报告 + 历史报告 |
 
-`src/console/traffic-state.ts` 装载 7d 窗口；console-origin runs 与 reader 一同纳入（与 analyze 默认排除不同——Traffic 视图需要可见对照）。analyze 报告解析与列举见 `eval-state.ts:listAnalyzeReports / readAnalyzeReportBody`。
+`src/console/traffic-state.ts` 默认装载 7d 窗口，也支持 30d、90d 和全部历史；console-origin runs 与 reader 一同纳入（与 analyze 默认排除不同——Traffic 视图需要可见对照）。Analyze 区仍固定汇总最近 7d，报告解析与列举见 `eval-state.ts:listAnalyzeReports / readAnalyzeReportBody`。
+
+Run Detail 从 append-only JSONL 中按 `request_id` 定位基础 run，再折叠后续的 feedback 与 citation semantic-check 更新。新 run 会持久化 fused child 快照和 `selected_context`，从而区分“被召回”与“真正送入生成模型”。页面通过 child 的 `POST /v1/index/chunks/resolve` 补充当前索引中的完整内容；解析优先校验 numeric `chunk_id`，索引重建导致 ID 漂移时回退到 `content_hash + page_id`。服务离线或旧 run 缺少快照时，页面仍以已持久化数据降级显示。
 
 #### 17.3.7 Next-action 横幅（2026-05-11 加入）
 
@@ -1641,6 +1653,8 @@ CTA 是 `<a href="#tab">`，layout 加 `hashchange` listener 触发 `setProjectT
 ESC / 点外侧 / 点 × 关闭。Phase 1 仅只读；inline edit 涉及 \"console 自身零状态\" 锁，Phase 2 评估。
 
 ### 17.4 前端形态
+
+> 2026-09 更新：Console 已迁移到 React + Vite + TanStack Query，并使用 Lucide 图标。下述 SSR 说明仅保留为旧架构记录；新页面由 `src/console-ui/` 构建，Hono 只负责 HTML bootstrap、认证和 API 代理。
 
 **SSR + Hono `html` 模板**，零前端构建链：
 

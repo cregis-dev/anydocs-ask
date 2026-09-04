@@ -6,9 +6,7 @@
  *   A. answer-same-lang   — same-lang slice has signal. When multiple
  *                           subtrees are close, we still answer with the
  *                           same-lang context instead of blocking on an
- *                           automatic section picker; current-page/title
- *                           tiebreakers only choose the reported dominant
- *                           subtree.
+ *                           automatic section picker.
  *   B. translate-fallback — same-lang slice is empty, OR even the strongest
  *                           same-lang hit is too weak (max RRF < 0.05). We
  *                           use the cross-lang top-K and the LLM is told to
@@ -56,17 +54,6 @@ export type AggregateOptions = {
   queryLang: DocsLang;
   /** Top-K to consider (default 10). */
   topK?: number;
-  /** Subtree root of the user's current page (from rerank context). When set,
-   *  used as a tiebreaker: if the current subtree appears in the clarify
-   *  candidates, prefer it over asking the user to choose. */
-  currentSubtreeRoot?: string | null;
-  /**
-   * Subtrees that contain a title-matched page (computed by rerank's
-   * computeTitleMatches). When the top subtree in a near-tie contains a
-   * title-matched page, skip clarify and answer directly — the user's query
-   * explicitly names a page, so forcing a section-picker wastes a turn.
-   */
-  titleMatchedSubtrees?: Set<string>;
 };
 
 export function aggregate(
@@ -108,34 +95,8 @@ export function aggregate(
     // Two competing subtrees with similar weight. Earlier builds returned a
     // `clarify` result here, but that blocked common task-oriented docs
     // questions and especially multi-turn follow-ups. We now answer directly
-    // with the same-lang context. Two tiebreakers still choose the reported
-    // dominant subtree when possible:
-    //
-    //   1. current-page subtree: the user is already in a section; stay there.
-    //   2. title-match subtree: the query explicitly names a page title, so the
-    //      user doesn't need a section picker — they already know where to look.
-    //
-    // We prefer whichever tiebreaker fires first (current-page > title-match).
-    if (opts.currentSubtreeRoot) {
-      const contextMatch = shares.find((s) => s.subtree_root === opts.currentSubtreeRoot);
-      if (contextMatch) {
-        return {
-          kind: 'answer-same-lang',
-          pick: sameLang,
-          dominantSubtree: contextMatch.subtree_root,
-        };
-      }
-    }
-    if (opts.titleMatchedSubtrees?.size) {
-      const titleMatch = shares.find((s) => opts.titleMatchedSubtrees!.has(s.subtree_root));
-      if (titleMatch) {
-        return {
-          kind: 'answer-same-lang',
-          pick: sameLang,
-          dominantSubtree: titleMatch.subtree_root,
-        };
-      }
-    }
+    // with the same-lang context. The leading RRF subtree is reported as the
+    // dominant subtree; no metadata tiebreaker changes that result.
     return {
       kind: 'answer-same-lang',
       pick: sameLang,

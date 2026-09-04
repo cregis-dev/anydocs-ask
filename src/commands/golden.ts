@@ -262,7 +262,7 @@ async function runFromRuns(
   report(
     `  filter: total=${stats.total} ` +
       `non-answer=${stats.droppedNonAnswer} ` +
-      `low-conf=${stats.droppedLowConf} ` +
+      `no-citations=${stats.droppedNoCitations} ` +
       `long-answer=${stats.droppedLongAnswer} ` +
       `reasked=${stats.droppedReask}\n` +
       `  cluster: ${stats.clusters} clusters, ${stats.droppedDuplicate} dropped as dup of existing cases\n`,
@@ -273,7 +273,7 @@ async function runFromRuns(
     // a streaming UI doesn't show ✓ done with an empty log.
     emitError(
       report,
-      `(no candidates produced; loosen --since or check that runs have confidence ≥0.7 ` +
+      `(no candidates produced; loosen --since or check that runs have citations ` +
         `and answer.md ≤600 chars.)\n`,
     );
     return 0;

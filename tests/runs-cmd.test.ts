@@ -168,7 +168,7 @@ test('runs export: csv format includes header + escaped fields', async () => {
     assert.equal(value, 0);
     const lines = out.trim().split('\n');
     assert.equal(lines.length, 2);
-    assert.match(lines[0]!, /^ts,request_id,kind,confidence,latency_ms,model,query$/);
+    assert.match(lines[0]!, /^ts,request_id,kind,latency_ms,model,query$/);
     assert.match(lines[1]!, /"has, comma"$/);
   } finally {
     await cleanup();

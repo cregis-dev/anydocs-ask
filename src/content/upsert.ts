@@ -50,10 +50,25 @@ export async function upsertChunksForPage(
     `SELECT chunk_id FROM chunks WHERE page_id = ? AND lang = ?`,
   );
   const deleteChunks = db.prepare(`DELETE FROM chunks WHERE page_id = ? AND lang = ?`);
+  const deleteParents = db.prepare(`DELETE FROM chunk_parents WHERE page_id = ? AND lang = ?`);
   const deleteVec = db.prepare(`DELETE FROM chunks_vec WHERE chunk_id = ?`);
+  const insertParent = db.prepare(`
+    INSERT INTO chunk_parents
+      (page_id, lang, parent_path, heading_id, heading_path, text, content_hash, token_count, created_at)
+    VALUES
+      (@page_id, @lang, @parent_path, @heading_id, @heading_path, @text, @content_hash, @token_count, @created_at)
+  `);
   const insertChunk = db.prepare(`
-    INSERT INTO chunks (page_id, lang, in_page_path, text, content_hash, token_count, is_code, created_at)
-    VALUES (@page_id, @lang, @in_page_path, @text, @content_hash, @token_count, @is_code, @created_at)
+    INSERT INTO chunks
+      (page_id, lang, in_page_path, text, content_hash, token_count, is_code,
+       parent_id, chunk_kind, object_path, created_at)
+    VALUES
+      (@page_id, @lang, @in_page_path, @text, @content_hash, @token_count, @is_code,
+       @parent_id, @chunk_kind, @object_path, @created_at)
+  `);
+  const insertIdentifier = db.prepare(`
+    INSERT OR IGNORE INTO chunk_identifiers (chunk_id, identifier, normalized, kind)
+    VALUES (?, ?, ?, ?)
   `);
   const insertVec = db.prepare(`INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)`);
 
@@ -66,10 +81,32 @@ export async function upsertChunksForPage(
     // Now drop chunks rows. FTS5 trigger fires on each delete to clean
     // chunks_fts.
     deleteChunks.run(pageId, lang);
+    deleteParents.run(pageId, lang);
 
-    // Insert new chunks. lastInsertRowid is BigInt — feed straight into vec0.
+    // Parents are stored once per heading/object boundary. Child chunks carry
+    // the parent id but remain the only embedded and BM25-indexed records.
     const now = Date.now();
+    const parentIds = new Map<string, number | bigint>();
     for (const c of chunks) {
+      if (parentIds.has(c.parent.parent_path)) continue;
+      const info = insertParent.run({
+        page_id: c.page_id,
+        lang: c.lang,
+        parent_path: c.parent.parent_path,
+        heading_id: c.parent.heading_id || null,
+        heading_path: JSON.stringify(c.parent.heading_path),
+        text: c.parent.text,
+        content_hash: c.parent.content_hash,
+        token_count: c.parent.token_count,
+        created_at: now,
+      });
+      parentIds.set(c.parent.parent_path, info.lastInsertRowid);
+    }
+
+    // Insert new children. lastInsertRowid is BigInt — feed straight into vec0.
+    for (const c of chunks) {
+      const parentId = parentIds.get(c.parent.parent_path);
+      if (parentId === undefined) throw new Error(`internal: parent missing for ${c.parent.parent_path}`);
       const info = insertChunk.run({
         page_id: c.page_id,
         lang: c.lang,
@@ -78,6 +115,9 @@ export async function upsertChunksForPage(
         content_hash: c.content_hash,
         token_count: c.token_count,
         is_code: c.is_code,
+        parent_id: parentId,
+        chunk_kind: c.chunk_kind,
+        object_path: c.object_path,
         created_at: now,
       });
       const newId =
@@ -91,6 +131,9 @@ export async function upsertChunksForPage(
         );
       }
       insertVec.run(newId, Buffer.from(v.buffer, v.byteOffset, v.byteLength));
+      for (const identifier of c.identifiers) {
+        insertIdentifier.run(newId, identifier.value, identifier.normalized, identifier.kind);
+      }
     }
   });
   tx();

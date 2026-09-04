@@ -9,9 +9,13 @@ import { MockLLM } from './mock.ts';
 import type { LLM } from './types.ts';
 import type { ResolvedConfig } from '../config.ts';
 
-export function buildDefaultLLM(config: ResolvedConfig): LLM {
+export function buildDefaultLLM(
+  config: ResolvedConfig,
+  opts: { model?: string } = {},
+): LLM {
+  const model = opts.model ?? config.llm.model;
   if (config.llm.provider === 'mock') {
-    return new MockLLM({ model: config.llm.model });
+    return new MockLLM({ model });
   }
   if (config.llm.provider === 'anthropic') {
     // Pick credentials in order of precedence:
@@ -35,7 +39,7 @@ export function buildDefaultLLM(config: ResolvedConfig): LLM {
     // Model id is already env-resolved by applyEnvOverrides() during
     // loadConfig — config.llm.model is the canonical value here.
     return new AnthropicLLM({
-      model: config.llm.model,
+      model,
       ...(apiKey ? { apiKey } : {}),
       ...(authToken ? { authToken } : {}),
       ...(baseURL ? { baseURL } : {}),

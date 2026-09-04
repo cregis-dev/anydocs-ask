@@ -62,7 +62,308 @@ function makeRegistry(): ProcessRegistry {
   });
 }
 
-test('GET /: empty workspace shows guidance, not crash', async () => {
+const CONSOLE_AUTH_TOKEN = 'test-console-auth-token-32-characters';
+
+function readConsoleBootstrap<T = Record<string, unknown>>(body: string): T {
+  const match = /window\.__CONSOLE_APP__ = (\{.*\});<\/script>/.exec(body);
+  assert.ok(match?.[1], 'expected serialized React Console bootstrap state');
+  return JSON.parse(match[1]) as T;
+}
+
+function readIndexBootstrap(body: string): {
+  langs: Array<{ pages: Array<{ id: string; askStats?: { count: number } }> }>;
+} {
+  const bootstrap = readConsoleBootstrap<{ indexSnapshot: {
+    langs: Array<{ pages: Array<{ id: string; askStats?: { count: number } }> }>;
+  } }>(body);
+  return bootstrap.indexSnapshot;
+}
+
+// These tests pin the removed server-rendered markup and inline JavaScript.
+// React behavior is covered by the bootstrap contract tests below and by
+// browser smoke tests; keeping the old assertions runnable would preserve the
+// implementation the migration intentionally replaces.
+const legacySsrTest = test.skip;
+
+test('console auth protects pages and management APIs', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      authToken: CONSOLE_AUTH_TOKEN,
+    });
+    const page = await app.request('/');
+    assert.equal(page.status, 302);
+    assert.equal(page.headers.get('location'), '/login');
+
+    const api = await app.request('/api/projects');
+    assert.equal(api.status, 401);
+    assert.deepEqual(await api.json(), { ok: false, error: 'unauthorized' });
+
+    const health = await app.request('/health');
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), { ok: true, auth: true });
+  } finally {
+    await cleanup();
+  }
+});
+
+test('console auth exchanges a valid token for a secure session cookie', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      authToken: CONSOLE_AUTH_TOKEN,
+      publicRootPath: '/rag-console/',
+    });
+
+    const invalid = await app.request('/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token: 'wrong-token' }).toString(),
+    });
+    assert.equal(invalid.status, 401);
+    assert.match(await invalid.text(), /Invalid access token/);
+    assert.equal(invalid.headers.get('set-cookie'), null);
+
+    const login = await app.request('/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Forwarded-Proto': 'https',
+      },
+      body: new URLSearchParams({ token: CONSOLE_AUTH_TOKEN }).toString(),
+    });
+    assert.equal(login.status, 303);
+    assert.equal(login.headers.get('location'), '/rag-console/');
+    const setCookie = login.headers.get('set-cookie') ?? '';
+    assert.match(setCookie, /^anydocs_console_session=/);
+    assert.match(setCookie, /HttpOnly/i);
+    assert.match(setCookie, /Secure/i);
+    assert.match(setCookie, /SameSite=Strict/i);
+    assert.equal(setCookie.includes(CONSOLE_AUTH_TOKEN), false);
+
+    const cookie = setCookie.split(';', 1)[0]!;
+    const authenticated = await app.request('/', { headers: { Cookie: cookie } });
+    assert.equal(authenticated.status, 200);
+    const authenticatedBody = await authenticated.text();
+    assert.match(authenticatedBody, /src="\/console\/static\/console-app\.js"/);
+    assert.equal(readConsoleBootstrap<{ authEnabled: boolean }>(authenticatedBody).authEnabled, true);
+
+    const logout = await app.request('/logout', { headers: { Cookie: cookie } });
+    assert.equal(logout.status, 303);
+    assert.equal(logout.headers.get('location'), '/login');
+    assert.match(logout.headers.get('set-cookie') ?? '', /Max-Age=0/i);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('React console home bootstraps project, runtime, and workspace summary state', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const registry = makeRegistry();
+    await registry.start('docs-zh');
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry,
+      publicRootPath: '/rag-console/',
+    });
+
+    const res = await app.request('/');
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    assert.match(body, /id="console-app-root"/);
+    assert.match(body, /console-app\.css/);
+    assert.match(body, /console-app\.js/);
+    assert.equal(body.includes('class="app-shell"'), false, 'React shell must not be server rendered');
+
+    const bootstrap = readConsoleBootstrap<{
+      kind: string;
+      consolePort: number;
+      publicRootPath: string;
+      projects: Array<{ name: string; valid: boolean }>;
+      running: Record<string, { port: number; pid: number }>;
+      workspaceSummary: { projectsTotal: number; projectsRunning: number };
+    }>(body);
+    assert.equal(bootstrap.kind, 'home');
+    assert.equal(bootstrap.consolePort, 4100);
+    assert.equal(bootstrap.publicRootPath, '/rag-console/');
+    assert.deepEqual(bootstrap.projects.map((project) => project.name), ['docs-zh']);
+    assert.equal(bootstrap.projects[0]?.valid, true);
+    assert.equal(bootstrap.running['docs-zh']?.port, 4101);
+    assert.equal(bootstrap.workspaceSummary.projectsTotal, 1);
+    assert.equal(bootstrap.workspaceSummary.projectsRunning, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('React project route bootstraps every migrated workspace surface', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    await fs.writeFile(
+      join(ws, 'projects', 'docs-zh', 'anydocs.ask.json'),
+      JSON.stringify({ version: 1, feedback: { enabled: true } }),
+    );
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+
+    const res = await app.request('/p/docs-zh');
+    assert.equal(res.status, 200);
+    const bootstrap = readConsoleBootstrap<Record<string, unknown>>(await res.text());
+    assert.equal(bootstrap.kind, 'project');
+    assert.deepEqual((bootstrap.project as { name: string }).name, 'docs-zh');
+    assert.equal(bootstrap.running, null);
+    for (const key of [
+      'navigation',
+      'evalSnapshot',
+      'indexSnapshot',
+      'trafficWindow',
+      'trafficView',
+      'feedbackSnapshot',
+      'candidates',
+      'analyzeHistory',
+      'askConfig',
+    ]) {
+      assert.ok(key in bootstrap, `missing React project bootstrap key: ${key}`);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test('React report route bootstraps markdown body and navigation', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const reportsDir = join(ws, 'state', 'docs-zh', 'reports');
+    await fs.mkdir(reportsDir, { recursive: true });
+    await fs.writeFile(join(reportsDir, '2026-05-08-eval.md'), '# Eval\n\nR@5=0.78');
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+
+    const res = await app.request('/p/docs-zh/reports/2026-05-08-eval.md');
+    const bootstrap = readConsoleBootstrap<{
+      kind: string;
+      projectName: string;
+      filename: string;
+      body: string;
+      navigation: unknown;
+    }>(await res.text());
+    assert.equal(bootstrap.kind, 'report');
+    assert.equal(bootstrap.projectName, 'docs-zh');
+    assert.equal(bootstrap.filename, '2026-05-08-eval.md');
+    assert.match(bootstrap.body, /R@5=0\.78/);
+    assert.ok(bootstrap.navigation);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('React runs route bootstraps recent records and selected limit', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const runsDir = join(ws, 'state', 'docs-zh', 'runs');
+    await fs.mkdir(runsDir, { recursive: true });
+    await fs.writeFile(join(runsDir, '2026-W19.jsonl'), `${JSON.stringify({
+      ts: '2026-05-10T03:14:15.123Z',
+      request_id: 'run-1',
+      session_id: null,
+      query: 'How do I authenticate?',
+      filters: {},
+      context_pageId: null,
+      retrieval: { fused: [], subtree_ask_triggered: false },
+      answer: {
+        kind: 'answer', answer_id: 'answer-1', md: 'Use a signature.', citations: [],
+        confidence: 0.8, latency_ms: 100, tokens_in: null, tokens_out: null,
+        model: 'mock', error_code: null,
+      },
+      feedback: { beta: null, gamma: null },
+    })}\n`);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+
+    const res = await app.request('/p/docs-zh/runs?limit=25');
+    const bootstrap = readConsoleBootstrap<{
+      kind: string;
+      projectName: string;
+      limit: number;
+      lines: Array<{ query: string }>;
+    }>(await res.text());
+    assert.equal(bootstrap.kind, 'runs');
+    assert.equal(bootstrap.projectName, 'docs-zh');
+    assert.equal(bootstrap.limit, 25);
+    assert.deepEqual(bootstrap.lines.map((line) => line.query), ['How do I authenticate?']);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('React run detail route returns a shareable run workspace and safe traffic target', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const runsDir = join(ws, 'state', 'docs-zh', 'runs');
+    await fs.mkdir(runsDir, { recursive: true });
+    await fs.writeFile(join(runsDir, '2026-W36.jsonl'), `${JSON.stringify({
+      ts: '2026-09-04T04:00:00.000Z',
+      request_id: 'run-detail-1',
+      session_id: 'session-1',
+      query: 'What is A0400?',
+      filters: {},
+      context_pageId: null,
+      source: 'reader',
+      retrieval: { fused: [], selected_context: [], subtree_ask_triggered: false },
+      answer: {
+        kind: 'answer', answer_id: 'answer-1', md: 'Invalid amount.', citations: [],
+        latency_ms: 100, tokens_in: null, tokens_out: null, model: 'mock', error_code: null,
+      },
+      feedback: { beta: null, gamma: null },
+    })}\n`);
+    const app = createConsoleApp({ workspacePath: ws, consolePort: 4100, registry: makeRegistry() });
+
+    const returnTo = '/p/docs-zh?traffic_range=30&traffic_kind=error#traffic';
+    const res = await app.request(`/p/docs-zh/runs/run-detail-1?return=${encodeURIComponent(returnTo)}`);
+    assert.equal(res.status, 200);
+    const bootstrap = readConsoleBootstrap<{
+      kind: string; projectName: string; childLive: boolean; returnTo: string;
+      run: { request_id: string; query: string };
+    }>(await res.text());
+    assert.equal(bootstrap.kind, 'run-detail');
+    assert.equal(bootstrap.projectName, 'docs-zh');
+    assert.equal(bootstrap.childLive, false);
+    assert.equal(bootstrap.returnTo, returnTo);
+    assert.equal(bootstrap.run.request_id, 'run-detail-1');
+    assert.equal(bootstrap.run.query, 'What is A0400?');
+
+    const unsafe = await app.request(`/p/docs-zh/runs/run-detail-1?return=${encodeURIComponent('https://evil.example/')}`);
+    const unsafeBootstrap = readConsoleBootstrap<{ returnTo: string }>(await unsafe.text());
+    assert.equal(unsafeBootstrap.returnTo, '/p/docs-zh?traffic_range=all#traffic');
+    assert.equal((await app.request('/p/docs-zh/runs/missing')).status, 404);
+  } finally {
+    await cleanup();
+  }
+});
+
+legacySsrTest('GET /: empty workspace shows guidance, not crash', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     const app = createConsoleApp({
@@ -80,7 +381,7 @@ test('GET /: empty workspace shows guidance, not crash', async () => {
   }
 });
 
-test('GET /: lists valid + invalid projects with status tags', async () => {
+legacySsrTest('GET /: lists valid + invalid projects with status tags', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -113,7 +414,7 @@ test('GET /: lists valid + invalid projects with status tags', async () => {
   }
 });
 
-test('GET /: running registry entry surfaces port + run tag', async () => {
+legacySsrTest('GET /: running registry entry surfaces port + run tag', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -194,7 +495,7 @@ test('GET /p/:name: 404 on unknown project', async () => {
   }
 });
 
-test('GET /p/:name: stopped project shows start button enabled, stop disabled', async () => {
+legacySsrTest('GET /p/:name: stopped project shows start button enabled, stop disabled', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -223,7 +524,7 @@ test('GET /p/:name: stopped project shows start button enabled, stop disabled', 
   }
 });
 
-test('GET /p/:name: running project disables start, enables stop, shows pid+port', async () => {
+legacySsrTest('GET /p/:name: running project disables start, enables stop, shows pid+port', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -248,7 +549,7 @@ test('GET /p/:name: running project disables start, enables stop, shows pid+port
   }
 });
 
-test('GET /p/:name: project tabs (Ask/Index/Eval/Traffic) + scoped JS handler so they do not collide with Ask sub-tabs', async () => {
+legacySsrTest('GET /p/:name: project tabs (Ask/Index/Eval/Traffic) + scoped JS handler so they do not collide with Ask sub-tabs', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -279,7 +580,7 @@ test('GET /p/:name: project tabs (Ask/Index/Eval/Traffic) + scoped JS handler so
   }
 });
 
-test('GET /p/:name: every nav tab is in the hashchange whitelist (URL-anchor jumps stay in sync)', async () => {
+legacySsrTest('GET /p/:name: every nav tab is in the hashchange whitelist (URL-anchor jumps stay in sync)', async () => {
   // Regression: T1-a added a Feedback tab CTA pointing at `#settings`, which
   // exposed an existing gap — 'settings' was never in the hashchange
   // whitelist, so the URL changed but the panel didn't. Lock down the rule:
@@ -314,7 +615,7 @@ test('GET /p/:name: every nav tab is in the hashchange whitelist (URL-anchor jum
   }
 });
 
-test('GET /p/:name: setProjectTab preserves ?query suffix (jump-to-doc dogfood regression)', async () => {
+legacySsrTest('GET /p/:name: setProjectTab preserves ?query suffix (jump-to-doc dogfood regression)', async () => {
   // Live dogfood on hermes-docs caught this: the Feedback drawer's
   // jump-to-doc chip sets `location.hash = '#index?focus=<id>'`, which
   // fires hashchange. The hashchange listener called setProjectTab('index'),
@@ -350,7 +651,7 @@ test('GET /p/:name: setProjectTab preserves ?query suffix (jump-to-doc dogfood r
   }
 });
 
-test('GET /p/:name: Feedback tab — disabled state when feedback.enabled is false (RFC 0002 T1-a)', async () => {
+legacySsrTest('GET /p/:name: Feedback tab — disabled state when feedback.enabled is false (RFC 0002 T1-a)', async () => {
   // PRD §11.4 #6 makes feedback.enabled=false the default. The tab must
   // still register (so URL/anchor jumps work), but render the disabled
   // empty state pointing at Settings.
@@ -381,7 +682,7 @@ test('GET /p/:name: Feedback tab — disabled state when feedback.enabled is fal
   }
 });
 
-test('GET /p/:name: Feedback tab — empty state when feedback.enabled is true but no rows (RFC 0002 T1-a)', async () => {
+legacySsrTest('GET /p/:name: Feedback tab — empty state when feedback.enabled is true but no rows (RFC 0002 T1-a)', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -468,7 +769,7 @@ function insertFeedback(
   );
 }
 
-test('GET /p/:name: Feedback tab — KPI tiles + list render when feedback table populated (RFC 0002 T1-b)', async () => {
+legacySsrTest('GET /p/:name: Feedback tab — KPI tiles + list render when feedback table populated (RFC 0002 T1-b)', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     const { db } = await seedFeedbackProject(ws, 'docs-zh');
@@ -524,7 +825,7 @@ test('GET /p/:name: Feedback tab — KPI tiles + list render when feedback table
   }
 });
 
-test('GET /p/:name: Feedback tab — onboarding banner only when 0 < totalCount < 10 (RFC 0002 T1-b)', async () => {
+legacySsrTest('GET /p/:name: Feedback tab — onboarding banner only when 0 < totalCount < 10 (RFC 0002 T1-b)', async () => {
   // The "X signals collected" banner is an onboarding aid for the
   // pre-PRD §10.3 ≥50 phase. It MUST hide on the 0 row case (covered by
   // its own test) and SHOULD also hide once we cross 10 rows so the
@@ -639,9 +940,12 @@ test('GET /api/projects/:name/feedback: curated rows excluded from all chip + KP
     assert.equal(body.rows.length, 3);
     assert.ok(body.rows.every((r) => r.signal_source !== 'curated'));
 
-    // SSR KPI: feedback·7d count tile reads explicit+implicit only.
-    const ssr = await (await app.request('/p/docs-zh')).text();
-    assert.match(ssr, /feedback · 7d[\s\S]*?>3</);
+    // React bootstrap carries the same KPI without re-deriving it in the UI.
+    const page = await (await app.request('/p/docs-zh')).text();
+    const bootstrap = readConsoleBootstrap<{
+      feedbackSnapshot: { kpi: { count: number } };
+    }>(page);
+    assert.equal(bootstrap.feedbackSnapshot.kpi.count, 3);
   } finally {
     await cleanup();
   }
@@ -838,7 +1142,39 @@ function makeCitationCheckUpdate(args: {
   };
 }
 
-test('GET /p/:name: Feedback tab — breadcrumb chain rendered when pages row exists (RFC 0002 T1-c)', async () => {
+legacySsrTest('GET /p/:name: Traffic filters all records before paginating', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const stateRoot = join(ws, 'state', 'docs-zh');
+    await seedRunsFile(
+      stateRoot,
+      Array.from({ length: 60 }, (_, index) => makeRunRecord({
+        answer_id: `traffic-${index}`,
+        kind: index % 2 === 0 ? 'error' : 'answer',
+      })),
+    );
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+    });
+    const res = await app.request(
+      '/p/docs-zh?traffic_range=all&traffic_kind=error&traffic_page=2&traffic_page_size=25',
+    );
+    const body = await res.text();
+
+    assert.equal(res.status, 200);
+    assert.match(body, /value="error" selected/);
+    assert.match(body, /Showing 26-30 of 30 runs/);
+    assert.match(body, /page 2 \/ 2/);
+    assert.match(body, /traffic_range=all/);
+  } finally {
+    await cleanup();
+  }
+});
+
+legacySsrTest('GET /p/:name: Feedback tab — breadcrumb chain rendered when pages row exists (RFC 0002 T1-c)', async () => {
   // T1-c replaces the raw current_page_id cell with the title chain
   // resolved via the pages.breadcrumb JOIN. Missing page rows
   // (unpublished / deleted) fall back to the raw page_id, dimmed.
@@ -959,7 +1295,7 @@ test('GET /api/projects/:name/feedback?filter=no_citations: returns only rows wi
   }
 });
 
-test('GET /p/:name: Feedback tab — no_citations chip is in the SSR chip bar (RFC 0002 T1-c)', async () => {
+legacySsrTest('GET /p/:name: Feedback tab — no_citations chip is in the SSR chip bar (RFC 0002 T1-c)', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     const { db } = await seedFeedbackProject(ws, 'docs-zh');
@@ -984,7 +1320,7 @@ test('GET /p/:name: Feedback tab — no_citations chip is in the SSR chip bar (R
 // T1-d — per-row detail drawer + endpoint
 // ---------------------------------------------------------------------------
 
-test('GET /p/:name: Feedback tab — drawer SSR shell appears when rows exist (RFC 0002 T1-d)', async () => {
+legacySsrTest('GET /p/:name: Feedback tab — drawer SSR shell appears when rows exist (RFC 0002 T1-d)', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     const { db } = await seedFeedbackProject(ws, 'docs-zh');
@@ -1030,7 +1366,7 @@ test('GET /p/:name: Feedback tab — drawer shell hidden when zero rows', async 
   }
 });
 
-test('GET /p/:name: Feedback drawer inline JS guards against stale async responses (Codex P2 regression)', async () => {
+legacySsrTest('GET /p/:name: Feedback drawer inline JS guards against stale async responses (Codex P2 regression)', async () => {
   // Two rapid row clicks must not let the slower fetch overwrite the
   // faster one. Codex flagged this on PR #50 — the drawer code now
   // tracks a request token bumped on each openDrawer() and on closeDrawer
@@ -1101,7 +1437,6 @@ test('GET /api/projects/:name/feedback/:id: returns row + run JOIN (RFC 0002 T1-
         question: string;
         rating: number | null;
         breadcrumb: Array<{ title: string }>;
-        confidence: number | null;
         hadNoCitations: boolean | null;
         run: { kind: string; fused: unknown[]; latencyMs: number; model: string | null } | null;
       };
@@ -1110,7 +1445,6 @@ test('GET /api/projects/:name/feedback/:id: returns row + run JOIN (RFC 0002 T1-
     assert.equal(body.detail.feedback_id, 1);
     assert.equal(body.detail.question, 'how do I get a JWT?');
     assert.equal(body.detail.rating, 1);
-    assert.equal(body.detail.confidence, 0.82);
     assert.equal(body.detail.hadNoCitations, false);
     assert.deepEqual(
       body.detail.breadcrumb,
@@ -1164,10 +1498,9 @@ test('GET /api/projects/:name/feedback/:id: row with no linked run → run=null,
       registry: makeRegistry(),
     });
     const body = (await (await app.request('/api/projects/docs-zh/feedback/1')).json()) as {
-      detail: { run: unknown; confidence: number | null; breadcrumb: unknown };
+      detail: { run: unknown; breadcrumb: unknown };
     };
     assert.equal(body.detail.run, null);
-    assert.equal(body.detail.confidence, null);
     assert.equal(body.detail.breadcrumb, null);
   } finally {
     await cleanup();
@@ -1178,7 +1511,7 @@ test('GET /api/projects/:name/feedback/:id: row with no linked run → run=null,
 // RFC 0003 M6 — Feedback tab session grouping
 // ---------------------------------------------------------------------------
 
-test('GET /p/:name: Feedback tab — contiguous same-session rows fold into one block (RFC 0003 M6)', async () => {
+legacySsrTest('GET /p/:name: Feedback tab — contiguous same-session rows fold into one block (RFC 0003 M6)', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     const { db } = await seedFeedbackProject(ws, 'docs-zh');
@@ -1248,7 +1581,7 @@ test('GET /p/:name: Feedback tab — contiguous same-session rows fold into one 
   }
 });
 
-test('GET /p/:name: Feedback tab — single-turn session does not render a session header (RFC 0003 M6)', async () => {
+legacySsrTest('GET /p/:name: Feedback tab — single-turn session does not render a session header (RFC 0003 M6)', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     const { db } = await seedFeedbackProject(ws, 'docs-zh');
@@ -1514,7 +1847,7 @@ test('GET /api/projects/:name/feedback/:id: parseRunCitations skips items missin
 // T1-d follow-up — drawer cross-journey chips
 // ---------------------------------------------------------------------------
 
-test('GET /p/:name: drawer JS emits add-to-golden + jump-to-doc chip handlers (RFC 0002 T1-d follow-up)', async () => {
+legacySsrTest('GET /p/:name: drawer JS emits add-to-golden + jump-to-doc chip handlers (RFC 0002 T1-d follow-up)', async () => {
   // Static-source assertion that the wiring exists, mirroring the same
   // pattern as the stale-response regression. The two chips dispatch via
   // (a) console:add-golden CustomEvent (reuses BOOTSTRAP_SCRIPT receiver
@@ -1546,7 +1879,7 @@ test('GET /p/:name: drawer JS emits add-to-golden + jump-to-doc chip handlers (R
   }
 });
 
-test('GET /p/:name: drawer jump-to-doc chip disabled when current_page_id is null', async () => {
+legacySsrTest('GET /p/:name: drawer jump-to-doc chip disabled when current_page_id is null', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     const { db } = await seedFeedbackProject(ws, 'docs-zh');
@@ -1574,9 +1907,9 @@ test('GET /p/:name: drawer jump-to-doc chip disabled when current_page_id is nul
   }
 });
 
-test('GET /p/:name: Index tab JS reads ?focus=<id> from hash and scrolls/flashes the row (RFC 0002 T1-d follow-up)', async () => {
-  // Static-source assertion of the focus receiver. The receiver lives in
-  // langSwitchScript so it ships when the explorer renders at all.
+legacySsrTest('GET /p/:name: Index tab JS reads ?focus=<id> from hash and scrolls/flashes the row (RFC 0002 T1-d follow-up)', async () => {
+  // The Index workspace is a React island. Assert both the SSR mount and the
+  // client-side hash receiver that preserves Feedback → Index jumps.
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -1603,15 +1936,13 @@ test('GET /p/:name: Index tab JS reads ?focus=<id> from hash and scrolls/flashes
       registry: makeRegistry(),
     });
     const body = await (await app.request('/p/docs-zh')).text();
-    // Receiver hooks into hashchange + initial.
-    assert.match(body, /\[?focus=/);
-    assert.match(body, /window\.addEventListener\('hashchange', applyFocus\)/);
-    assert.match(body, /applyFocus\(\);/);
-    // Flash highlight uses the accent outline style — sanity-check the
-    // exact style string so a future refactor doesn't silently drop it.
-    assert.match(body, /outline = '2px solid var\(--accent\)'/);
-    // Row carries data-page-id for the focus query.
-    assert.match(body, /data-page-id="auth"/);
+    assert.match(body, /id="index-explorer-root"/);
+    assert.match(body, /src="\/console\/static\/index-app\.js"/);
+    assert.equal(readIndexBootstrap(body).langs[0]?.pages[0]?.id, 'auth');
+    const source = await fs.readFile(join(process.cwd(), 'src', 'console-ui', 'index-explorer.tsx'), 'utf8');
+    assert.match(source, /window\.addEventListener\('hashchange', applyFocus\)/);
+    assert.match(source, /data-page-id=\{page\.id\}/);
+    assert.match(source, /scrollIntoView/);
   } finally {
     await cleanup();
   }
@@ -1623,8 +1954,7 @@ test('GET /p/:name: Index tab JS reads ?focus=<id> from hash and scrolls/flashes
 
 test('GET /p/:name: Index tab — per-page ask-usage badge renders when ≥3 hits (RFC 0002 T4)', async () => {
   // Set up: a project with nav→page=auth-jwt, 4 fresh runs all hitting
-  // that page with high confidence. The badge should render with the
-  // neutral (◷) glyph and a count of 4.
+  // that page. The badge should render a count of 4.
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -1655,7 +1985,7 @@ test('GET /p/:name: Index tab — per-page ask-usage badge renders when ≥3 hit
       makeRunRecord({ answer_id: 'a4', confidence: 0.8 }),
     ].map((r, i) => ({
       ...r,
-      retrieval: { fused: [{ chunk_id: i + 1, page: 'auth-jwt', rrf_score: 0.5, final_score: 0.5, vec_rank: 1, bm25_rank: 1, nav_index: null, nav_index_boost: 0 }], subtree_ask_triggered: false },
+      retrieval: { fused: [{ chunk_id: i + 1, page: 'auth-jwt', rrf_score: 0.5, final_score: 0.5, vec_rank: 1, bm25_rank: 1, nav_index: null }], subtree_ask_triggered: false },
     })));
 
     const app = createConsoleApp({
@@ -1664,16 +1994,15 @@ test('GET /p/:name: Index tab — per-page ask-usage badge renders when ≥3 hit
       registry: makeRegistry(),
     });
     const body = await (await app.request('/p/docs-zh')).text();
-    // Badge present with neutral glyph + count + ask-count attribute.
-    assert.match(body, /data-page-id="auth-jwt"[\s\S]*?data-ask-mark="ok"/);
-    assert.match(body, /data-ask-count="4"/);
-    assert.match(body, /◷\s*4 asks/);
+    const page = readIndexBootstrap(body).langs[0]?.pages[0];
+    assert.equal(page?.id, 'auth-jwt');
+    assert.deepEqual(page?.askStats, { count: 4 });
   } finally {
     await cleanup();
   }
 });
 
-test('GET /p/:name: Index tab — warn tint when median confidence < 0.5 (RFC 0002 T4)', async () => {
+test('GET /p/:name: Index tab — legacy confidence values do not alter usage counts', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -1701,7 +2030,7 @@ test('GET /p/:name: Index tab — warn tint when median confidence < 0.5 (RFC 00
       makeRunRecord({ answer_id: 'a3', confidence: 0.4 }),
     ].map((r, i) => ({
       ...r,
-      retrieval: { fused: [{ chunk_id: i + 1, page: 'shaky-page', rrf_score: 0.5, final_score: 0.5, vec_rank: 1, bm25_rank: 1, nav_index: null, nav_index_boost: 0 }], subtree_ask_triggered: false },
+      retrieval: { fused: [{ chunk_id: i + 1, page: 'shaky-page', rrf_score: 0.5, final_score: 0.5, vec_rank: 1, bm25_rank: 1, nav_index: null }], subtree_ask_triggered: false },
     })));
 
     const app = createConsoleApp({
@@ -1710,8 +2039,9 @@ test('GET /p/:name: Index tab — warn tint when median confidence < 0.5 (RFC 00
       registry: makeRegistry(),
     });
     const body = await (await app.request('/p/docs-zh')).text();
-    assert.match(body, /data-page-id="shaky-page"[\s\S]*?data-ask-mark="warn"/);
-    assert.match(body, /⚠\s*3 asks/);
+    const page = readIndexBootstrap(body).langs[0]?.pages[0];
+    assert.equal(page?.id, 'shaky-page');
+    assert.deepEqual(page?.askStats, { count: 3 });
   } finally {
     await cleanup();
   }
@@ -1744,7 +2074,7 @@ test('GET /p/:name: Index tab — no badge when hit count < 3 (RFC 0002 T4 noise
       makeRunRecord({ answer_id: 'a2', confidence: 0.9 }),
     ].map((r, i) => ({
       ...r,
-      retrieval: { fused: [{ chunk_id: i + 1, page: 'quiet-page', rrf_score: 0.5, final_score: 0.5, vec_rank: 1, bm25_rank: 1, nav_index: null, nav_index_boost: 0 }], subtree_ask_triggered: false },
+      retrieval: { fused: [{ chunk_id: i + 1, page: 'quiet-page', rrf_score: 0.5, final_score: 0.5, vec_rank: 1, bm25_rank: 1, nav_index: null }], subtree_ask_triggered: false },
     })));
 
     const app = createConsoleApp({
@@ -1753,16 +2083,15 @@ test('GET /p/:name: Index tab — no badge when hit count < 3 (RFC 0002 T4 noise
       registry: makeRegistry(),
     });
     const body = await (await app.request('/p/docs-zh')).text();
-    // Row exists, but no badge attribute should appear for it.
-    assert.match(body, /data-page-id="quiet-page"/);
-    // Tighter assertion: the badge data-attrs don't co-occur with this page.
-    assert.equal(/data-page-id="quiet-page"[^>]*>[^<]*<[^<]*data-ask-mark/.test(body), false);
+    const page = readIndexBootstrap(body).langs[0]?.pages[0];
+    assert.equal(page?.id, 'quiet-page');
+    assert.equal(page?.askStats, undefined);
   } finally {
     await cleanup();
   }
 });
 
-test('GET /p/:name: renders Settings tab with prompt + LLM + retrieval + feedback fields', async () => {
+legacySsrTest('GET /p/:name: renders Settings tab with prompt + LLM + retrieval + feedback fields', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -1806,7 +2135,7 @@ test('GET /p/:name: renders Settings tab with prompt + LLM + retrieval + feedbac
   }
 });
 
-test('GET /p/:name: Settings tab does NOT prefill fields absent from anydocs.ask.json', async () => {
+legacySsrTest('GET /p/:name: Settings tab does NOT prefill fields absent from anydocs.ask.json', async () => {
   // Regression: prefilling DEFAULTS made unset fields look like real values;
   // a Save would then pin them into the file and shadow env overrides
   // (e.g. ANTHROPIC_MODEL). Verify unset fields render with empty value
@@ -1843,7 +2172,7 @@ test('GET /p/:name: Settings tab does NOT prefill fields absent from anydocs.ask
   }
 });
 
-test('GET /p/:name: Settings tab surfaces validation warnings inline', async () => {
+legacySsrTest('GET /p/:name: Settings tab surfaces validation warnings inline', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -2087,7 +2416,7 @@ test('POST /api/projects/:name/feedback: 404 unknown project', async () => {
   }
 });
 
-test('GET /p/:name: live project renders Ask feedback bar (👍/👎)', async () => {
+legacySsrTest('GET /p/:name: live project renders Ask feedback bar (👍/👎)', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -2109,7 +2438,7 @@ test('GET /p/:name: live project renders Ask feedback bar (👍/👎)', async ()
   }
 });
 
-test('GET /p/:name: bootstrap <script type=module> parses + carries citeSectionLabel helper', async () => {
+legacySsrTest('GET /p/:name: bootstrap <script type=module> parses + carries citeSectionLabel helper', async () => {
   // The project page emits BOOTSTRAP_SCRIPT inside a TS template literal.
   // PR #16 shipped a syntax error there (a stray real newline from an
   // unescaped \n) that killed every button. This guards the whole script
@@ -3575,7 +3904,7 @@ test('GET /api/projects/:name/reports: returns the listing newest first', async 
   }
 });
 
-test('GET /p/:name/reports/:file: renders report inside <pre>', async () => {
+legacySsrTest('GET /p/:name/reports/:file: renders report inside <pre>', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -3586,12 +3915,14 @@ test('GET /p/:name/reports/:file: renders report inside <pre>', async () => {
       workspacePath: ws,
       consolePort: 4100,
       registry: makeRegistry(),
+      publicRootPath: '/rag-console/',
     });
     const res = await app.request('/p/docs-zh/reports/2026-05-08-eval.md');
     assert.equal(res.status, 200);
     const body = await res.text();
     assert.match(body, /<pre[^>]*>[^<]*# Eval/);
     assert.match(body, /R@5=0\.78/);
+    assert.match(body, /href="\/rag-console\/">projects<\/a>/);
   } finally {
     await cleanup();
   }
@@ -3680,7 +4011,7 @@ test('GET /api/projects/:name/runs: returns recent jsonl entries', async () => {
   }
 });
 
-test('GET /p/:name/runs: renders runs table with newest first', async () => {
+legacySsrTest('GET /p/:name/runs: renders runs table with newest first', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -3715,6 +4046,7 @@ test('GET /p/:name/runs: renders runs table with newest first', async () => {
       workspacePath: ws,
       consolePort: 4100,
       registry: makeRegistry(),
+      publicRootPath: '/rag-console/',
     });
     const res = await app.request('/p/docs-zh/runs');
     const body = await res.text();
@@ -3722,12 +4054,13 @@ test('GET /p/:name/runs: renders runs table with newest first', async () => {
     assert.match(body, /security\/jwt/);
     assert.match(body, /1234ms/);
     assert.match(body, /tag ok[^>]*>answer/);
+    assert.match(body, /href="\/rag-console\/">projects<\/a>/);
   } finally {
     await cleanup();
   }
 });
 
-test('GET /p/:name/runs: empty state shows hint', async () => {
+legacySsrTest('GET /p/:name/runs: empty state shows hint', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     await makeWorkspaceWithProjects(ws, ['docs-zh']);
@@ -3951,7 +4284,7 @@ test('GET /api/projects/:name/feedback/:id: drawer citations carry semanticCheck
   }
 });
 
-test('GET /p/:name: Feedback tab SSR — semantic_check_failed chip is in the chip bar + cit-check KPI tile', async () => {
+legacySsrTest('GET /p/:name: Feedback tab SSR — semantic_check_failed chip is in the chip bar + cit-check KPI tile', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     const { db } = await seedFeedbackProject(ws, 'docs-zh');
@@ -4172,7 +4505,7 @@ test('GET /api/projects/:name/feedback/:id: drawer detail carries SUGGESTION blo
   }
 });
 
-test('GET /p/:name: Feedback tab SSR — aplus_candidates chip + KPI render (RFC 0006 A7)', async () => {
+legacySsrTest('GET /p/:name: Feedback tab SSR — aplus_candidates chip + KPI render (RFC 0006 A7)', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     const { stateRoot, db } = await seedFeedbackProject(ws, 'docs-zh');
@@ -4205,7 +4538,7 @@ test('GET /p/:name: Feedback tab SSR — aplus_candidates chip + KPI render (RFC
   }
 });
 
-test('GET /p/:name: Feedback tab SSR — KPI placeholder when no suggestions dir', async () => {
+legacySsrTest('GET /p/:name: Feedback tab SSR — KPI placeholder when no suggestions dir', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
     const { db } = await seedFeedbackProject(ws, 'docs-zh');

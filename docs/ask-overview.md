@@ -85,31 +85,29 @@ API 协议见 [ARCHITECTURE §5](../ARCHITECTURE.md)；CORS / 段落 anchor 等�
 ### 3.2 查询管线（ARCH §6）
 
 ```
-1.  入参验证（question ≤ 500 字；scope_id 必须命中 pages.subtree_root，否则 400）
+1.  入参验证（question ≤ 20,000 字；scope_id 必须命中 pages.subtree_root，否则 400）
+1.25 意图路由：无历史短问题或含 endpoint / 错误码 / 异常名时走确定性快路径；需要上下文消解或语义压缩时调用可独立配置的小模型；结果按问题 + 最近三轮历史缓存
+1.3  长问题/诊断输入预处理：本地脱敏并保留 endpoint、错误码、字段与精确线索；Router 失败时使用确定性摘要
 1.5 query lang 检测：scope_id > current_page_id.lang > 文本 CJK 比例（≥0.30 → zh）
 2.  边界过滤：status='published' [AND subtree_root=scope_id]（lang 不在硬过滤里）
-3.  混合召回 K=20：vec0 余弦 top-20 ∪ FTS5 BM25 top-20 → RRF(k=60) 融合 top-20
-4.  结构重排：final_score = rrf_score × (1 + lang_boost + same_subtree_boost
-                                           + nav_index_boost + title_match_boost)
-       lang_boost          +0.30  chunk.lang == query_lang
-       same_subtree_boost  +0.20  chunk.subtree_root == current_page 的 subtree_root
-       nav_index_boost     +0.10 × 1/log(nav_index + 2)
-       title_match_boost   +0.30  query 含 chunk 所在页 title（≥5 字符；影子抑制）
+3.  混合召回：向量、FTS5 BM25、精确标识符三条独立路径，各取 `retrieval.topK`，
+    再用 `retrieval.rrfK` 做同权 RRF，最终受 `retrieval.maxChunksHardCap` 限制
+4.  排序：保持 RRF 顺序与分数；启用 cross-encoder 时，由它重排 top-N 并覆盖 final_score。
+       不再按语言、导航位置、当前页、标题、实体或 API 类型叠加规则权重。
 5.  子树聚合 + lang 路径：
        同 lang 充分（top10_same_lang 非空且 max(rrf) ≥ 0.01）：
          max(subtree share) ≥ 0.55   → 直答（dominant subtree）
-         top-2 subtree Δ < 0.25       → 仍直答（保留同 lang 多子树上下文；
-                                           current-page/title-match 只影响 dominant subtree）
+         top-2 subtree Δ < 0.25       → 仍直答（保留同 lang 多子树上下文）
          其他                          → 直答（按主导子树）
        同 lang 不足                 → 跨 lang 翻译降级，answer_lang=query_lang，
                                       citation snippet 保留原 lang **不翻译**
 6.  生成：prompt 含格式 hint（比较→表格 / 操作→列表 / 概念→段落 + bullet），
-         注入 top-8 chunk（带 [breadcrumb (lang)] 前缀），LLM = claude-sonnet-4-6
+         使用 top-8 chunk（带 [breadcrumb (lang)] 前缀），LLM = claude-sonnet-4-6
 7.  后处理：citation 合法性 / lang 填充 / 幻觉过滤 / 4000 字截断
-8.  落 answer 缓存（24h TTL）+ append 一行 runs.jsonl（dry_run 跳过）
+8.  落 answer 缓存（24h TTL）+ append 一行 runs.jsonl（含 router / embedding / retrieval / rerank / generation 分段耗时；dry_run 跳过）
 ```
 
-**置信度代理** `answer.confidence = top1.final_score / sum(top-5.final_score)`，∈ [0, 1]，是 analyze D1 `confidenceFloor` 的判定依据。原始 `top_final_score` 仅在内部 trace 用、不出 API。
+`rrf_score` 可由 `vec_rank / bm25_rank / exact_rank` 和 `retrieval.rrfK` 完整复算；系统不再输出容易被误解为答案正确率的 confidence 指标。
 
 ### 3.3 引用 / 立体溯源（PRD §4.7）
 
@@ -126,7 +124,7 @@ PRD §12 + ARCH §16 的实现已上线。冷启动期严禁乱调权重，只�
 | 目录 / 文件 | 内容 | 写者 |
 |---|---|---|
 | `index.db` | SQLite + sqlite-vec + FTS5；chunks / pages / embedding_cache / feedback / answers | indexer / `/v1/ask` |
-| `runs/<YYYY-Www>.jsonl` | 每次 `/v1/ask` append 一行（含 trace、citations、confidence、latency、source） | `server/app.ts:appendRun` |
+| `runs/<YYYY-Www>.jsonl` | 每次 `/v1/ask` append 一行（含 trace、citations、latency、source） | `server/app.ts:appendRun` |
 | `golden/cases.jsonl` + `cases.candidate.jsonl` | 已批准的评测 case 与待审候选 | `golden generate / review` |
 | `reports/<date>-{baseline,eval,analyze}.md` | 评测报告（含 `<!-- EVAL_SUMMARY {...} -->` 注释行供 history 表读取） | `eval` / `analyze runs` |
 
@@ -172,7 +170,7 @@ Console 体验台 persist 落的 runs 自带 `source=console`，`analyze` / `gol
 
 ### 5.1 v1 立即可调（无需上游字段）
 
-- **检索权重**：`anydocs.ask.json` 的 `retrieval.{rrfK,rerankSameSubtreeBoost,navOrderBoost,maxChunksHardCap}`。先看 eval / analyze 指标再动手；冷启动期一律默认值（PRD §12.6）。子树聚合阈值（dominance / spread）现固化为 `src/query/aggregate.ts` 的代码常量；spread 只作为近似子树 tie-breaker，不再自动触发 clarify。
+- **检索参数**：`anydocs.ask.json` 的 `retrieval.{topK,rrfK,maxChunksHardCap}`。先看 eval / analyze 指标再调整；冷启动期使用默认值。子树聚合阈值（dominance / spread）固化为 `src/query/aggregate.ts` 的代码常量，不再自动触发 clarify。
 - **chunk 边界**：`indexing.{chunkMaxTokens,chunkHardCap}`；analyze D2 显示 "long queries + many candidates 慢" → 多半是 chunk 过大触发 token 爆。
 - **embedding 量化**：`embedding.preferQuantized: true` 走 int8 版 bge-m3，冷启快 5-6× / 磁盘 ~191MB vs 1.2GB（ARCH §8 spike 实测）。VPS / 小内存场景推荐。
 - **navigation 编排**：D3 歧义高发 → 合并 / 拆分子树。R@5 偏低 → 给重要 section 显式写 `id`（ARCH §2.2.2 推荐）+ 调整 nav 顺序（`nav_index` 作权重）。
@@ -217,7 +215,7 @@ Console 体验台 persist 落的 runs 自带 `source=console`，`analyze` / `gol
 | [dogfood-2026-05-24-widget.md](./dogfood-2026-05-24-widget.md) | RFC 0004 Widget alpha.0-alpha.3 真机 | F1-F6 全过；F10/F11/F12 三个 polish ✅ 已修（alpha.3） |
 | [dogfood-2026-05-23-alpha2.md](./dogfood-2026-05-23-alpha2.md) | RFC 0005 alpha.2 citation 语义校验 | F1-F5 全过；F6 maxTokens CJK ✅ PR #73；F7 dedup ✅ PR #75；F8 V5 等 ✅ PR #74 |
 | [dogfood-2026-05-23.md](./dogfood-2026-05-23.md) | 0.2.0 真机回归 | F1-F6 反馈回路 / multi-turn / Studio / Reader UI / citation schema 全过；F7 generated 空 / F8 drawer "no citations" / F9 HISTORY 抽屉延迟 ✅ 0.3.0 修完 |
-| [dogfood-2026-05-14.md](./dogfood-2026-05-14.md) | 0.1.0-alpha 真机 | F1-F5 ✅ PR #18/#19/#21/#23/#24；F6 confidence floor 📋 观察；O1 LLM timeout 📋 观察 |
+| [dogfood-2026-05-14.md](./dogfood-2026-05-14.md) | 0.1.0-alpha 真机 | F1-F5 已处理；当时记录的 confidence floor 后续已移除；O1 LLM timeout 持续观察 |
 
 0.1.0-alpha findings 详表（保留）：
 
@@ -228,7 +226,7 @@ Console 体验台 persist 落的 runs 自带 `source=console`，`analyze` / `gol
 | F3 LLM gateway error message 留 `undefined` | ✅ PR #21 已合 | `AnthropicLLM` 错误现在带 status / type / requestID / body（截断 ~200B） |
 | F4 同页两 chunk citation 视觉重复 | ✅ PR #23 已合 | `citeSectionLabel()` 把 `in_page_path` 章节段拼到 Console Ask 卡 title 同级（Reader `web-ask.ts` 0.2.0 PR #63 同步） |
 | F5 Ask 卡停止态中英混排 | ✅ PR #24 已合 | 停止态 heading 英文化；后续 IA 进一步把 start-gate 收进 next-action banner |
-| F6 analyze D1 在小项目上 9/9 命中召回失败 | 📋 观察 | confidence floor 待真实数据校准 |
+| F6 analyze D1 在小项目上 9/9 命中召回失败 | ✅ 已处理 | 删除误导性的 confidence 代理，D1 改用无引用和短时间重问信号 |
 | O1 LLM 单次调用 timeout 偏长（~30s × 重试） | 📋 观察 | 配置项 `singleCallTimeoutMs` 待评估 |
 
 ---

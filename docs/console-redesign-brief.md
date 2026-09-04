@@ -51,8 +51,10 @@ The redesign must make these feel natural and obvious. Numbered in priority orde
 2. **Dogfood a question**: I made some doc edits. I want to ask 3 questions, see if citations are right, and iterate.
 3. **Run an eval**: My golden case set has 30 questions. I want to run them all, see R@5 / Citation / Answer-rule pass rates, and compare against the last report.
 4. **Manage the golden case set**: I want to generate candidate questions from doc structure, approve/reject them one by one, and flush approved ones into the active case set.
-5. **Diagnose live traffic**: My Reader integration is in production. I want to see this week's confidence / latency / error trends and drill into the worst requests.
-6. **Close the feedback loop** *(new — RFC 0002, T1-a → T1-d + T4 shipped)*: I open the Feedback tab to see this week's β/γ rows; KPI tiles show explicit share + mean confidence + non-answer rate; chips narrow to 👍/👎/implicit/no-citations. Click a row → drawer shows the full question, retrieval trace, and three cross-journey actions: **replay in Ask**, **add to golden case**, **jump to doc section** (which scrolls the Index tab to the matching page row and flashes it). Index tab itself shows reverse marks per page — "X asks · warn" when the past 7d's median confidence on that page dipped below 0.5 — so I can spot which docs are getting visited a lot but answered badly without leaving the explorer. A+ failure-cluster grouping still pending 0.3 (PRD §10.3 ≥ 50 threshold).
+5. **Diagnose live traffic**: My Reader integration is in production. I want to see this week's latency / error / non-answer trends and drill into the worst requests.
+6. **Close the feedback loop** *(new — RFC 0002, T1-a → T1-d + T4 shipped)*: I open the Feedback tab to see this week's β/γ rows; KPI tiles show explicit share + citation issues + non-answer rate; chips narrow to 👍/👎/implicit/no-citations. Click a row → drawer shows the full question, retrieval trace, and three cross-journey actions: **replay in Ask**, **add to golden case**, **jump to doc section** (which scrolls the Index tab to the matching page row and flashes it). Index rows show the past 7d Ask count so frequently retrieved pages remain visible without pretending that rank concentration measures answer correctness. A+ failure-cluster grouping still pending 0.3 (PRD §10.3 ≥ 50 threshold).
+
+Traffic drill-down uses a dedicated page rather than a drawer. `/p/:project/runs/:requestId` gives long questions, answers, pipeline timing, candidates, expanded generation context, citations, and current index metadata enough horizontal and vertical space for serious diagnosis. Returning to Traffic restores its range, filters, search query, and page.
 
 ---
 
@@ -206,7 +208,7 @@ For each page, deliver **all listed states**. Each "state" is a separate mockup.
   - **Answer**: rendered markdown
   - **Clarify**: when LLM asks back instead of answering (different visual treatment)
   - **Citations**: numbered chips, each with page title + snippet
-  - **Meta**: kind / confidence / retrieval set / latency / fused top-5 table
+  - **Meta**: kind / retrieval set / latency / fused top-5 table
 
 **Sidebar STATUS card**:
 - `path` (short form, ellipsis), optional `id` (only when ≠ name)
@@ -272,7 +274,7 @@ For each page, deliver **all listed states**. Each "state" is a separate mockup.
 **Role**: 7-day rolling traffic dashboard + analyze tool.
 
 **Sections**:
-1. **Health strip** (KPI cards, hidden when 0 runs): `queries·7d (split reader/console)` · `mean confidence` · `p95 latency / p50` · `non-answer rate (split error / clarify)`. Each card has a 7-day sparkline.
+1. **Health strip** (KPI cards, hidden when 0 runs): selectable `queries·7d/30d/90d/all (split reader/console/mcp)` · `error rate` · `p95 latency / p50` · `non-answer rate (split error / clarify)`. Query rows are filtered server-side and paginated at 25/50/100 per page.
 2. **Runs table** (when ≥1 run): filterable by query text / source / kind. Row expand on click to show fused retrieval table + answer markdown + re-ask shortcut.
 3. **Empty state** (no runs): friendly card explaining dogfood vs real-traffic ways to produce data.
 4. **ANALYZE RUNS** card (hidden until ≥1 run or ≥1 prior analyze report): `▶ run analyze · 7d` button + `include console traffic` checkbox. Inline latest report markdown when present, history details below.
@@ -290,15 +292,15 @@ For each page, deliver **all listed states**. Each "state" is a separate mockup.
 **Layout**: three columns. Left KPI rail (240px) · middle list (flex) · right detail drawer (toggled, 480px).
 
 **Left KPI rail**:
-- This-week tiles: `feedback count · explicit % · mean confidence · non-answer rate · A+ candidates`
+- This-week tiles: `feedback count · explicit % · citation issues · non-answer rate · A+ candidates`
 - 7-day mini sparklines per tile
 - Last refresh timestamp + manual refresh button
 - A+ candidates tile is empty-stated until 0.3 (PRD §10.3 threshold ≥ 50)
 
 **Middle list**:
 - Filter chips: `all | 👍 | 👎 | implicit | no_citations | semantic_check_failed` (last two reflect RFC 0005 once landed)
-- Each row: question (truncated) · rating badge · confidence pill · breadcrumb of the dominant nav subtree · timestamp
-- Sort: newest first; secondary sort by confidence ascending available
+- Each row: question (truncated) · rating badge · breadcrumb of the dominant nav subtree · timestamp
+- Sort: newest first; filters remain explicit and server-side
 
 **Right detail drawer** (opens on row click):
 - Question (full) + answer (rendered markdown)

@@ -1,6 +1,6 @@
 /**
  * Unit tests for the pure-function modules of the query pipeline:
- * lang detection, FTS5 sanitization, rerank, aggregate, postprocess.
+ * lang detection, FTS5 sanitization, RRF ranking, aggregate, postprocess.
  *
  * Each module is exercised standalone — no DB and no LLM — so the e2e
  * suite (tests/ask.test.ts) can stay focused on PRD §8 acceptance #11/#12/#13.
@@ -9,12 +9,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detectLangFromText, langFromScopeId } from '../src/query/lang.ts';
-import { sanitizeFtsQuery } from '../src/query/sanitize.ts';
-import { rerank, computeTitleMatches } from '../src/query/rerank.ts';
+import { extractExactIdentifiers, sanitizeFtsQuery } from '../src/query/sanitize.ts';
+import { rankByRrf } from '../src/query/rerank.ts';
 import { aggregate } from '../src/query/aggregate.ts';
 import { postprocess } from '../src/query/postprocess.ts';
 import { buildPrompt, detectFormatHint } from '../src/query/prompt.ts';
 import { LLMIntentRouter } from '../src/query/intent-router.ts';
+import {
+  buildDiagnosticPromptQuestion,
+  prepareDiagnosticInput,
+  redactSensitiveText,
+} from '../src/query/diagnostic-input.ts';
 import type { LLM, LLMGenerateInput, LLMGenerateOutput } from '../src/llm/types.ts';
 import type { RerankedChunk } from '../src/query/rerank.ts';
 import type { RetrievedChunk } from '../src/query/retrieval.ts';
@@ -109,7 +114,21 @@ test('langFromScopeId: unsupported lang prefix returns null', () => {
 // extractEntityTerms (answer.ts internal helper)
 // ---------------------------------------------------------------------------
 
-import { extractEntityTerms, answerMentionsEndpointPath } from '../src/query/answer.ts';
+import {
+  apiReferencePagePrefixForProduct,
+  extractEntityTerms,
+} from '../src/query/answer.ts';
+
+test('apiReferencePagePrefixForProduct: explicit Team API context overrides a broad WaaS route', () => {
+  assert.equal(
+    apiReferencePagePrefixForProduct('waas', 'Team API 查询 wallet_id 字段'),
+    'api-team-api-',
+  );
+  assert.equal(
+    apiReferencePagePrefixForProduct('unknown', 'POST /openapi/v1/wallet_balance'),
+    'api-team-api-',
+  );
+});
 
 test('extractEntityTerms: comma-separated triple', () => {
   assert.deepEqual(
@@ -174,45 +193,6 @@ test('extractEntityTerms: plain 2-entity question without compare hint still ski
 });
 
 // ---------------------------------------------------------------------------
-// answerMentionsEndpointPath — substance guard for mandatory API citation
-// ---------------------------------------------------------------------------
-
-test('answerMentionsEndpointPath: answer that names the endpoint path -> true', () => {
-  const answer = '调用 `POST /api/v1/address/create` 接口为用户创建充值子地址。';
-  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/address/create'), true);
-});
-
-test('answerMentionsEndpointPath: answer that recommends a different endpoint -> false (anti-gaming)', () => {
-  // Y-group: the answer talks about sub_address_withdrawal, so injecting a
-  // /api/v1/collection citation would contradict the prose. Guard must refuse.
-  const answer = 'The endpoint used for sweeping funds is `POST /api/v1/sub_address_withdrawal`.';
-  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/collection'), false);
-});
-
-test('answerMentionsEndpointPath: match is case-insensitive on the path', () => {
-  const answer = 'Use /API/V1/COINS to list supported tokens.';
-  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/coins'), true);
-});
-
-test('answerMentionsEndpointPath: endpoint string without an /api path -> false', () => {
-  assert.equal(answerMentionsEndpointPath('any answer body', 'create sub address'), false);
-});
-
-test('answerMentionsEndpointPath: a longer sibling path does not satisfy a shorter endpoint (prefix-collision guard)', () => {
-  // The answer only names /api/v1/payout/query; the /api/v1/payout reference
-  // must NOT be considered "mentioned" just because it is a string prefix.
-  const answer = '查询历史交易请用 `POST /api/v1/payout/query`。';
-  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/payout'), false);
-  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/payout/query'), true);
-});
-
-test('answerMentionsEndpointPath: trailing punctuation on the extracted endpoint still matches clean prose', () => {
-  const answer = 'Call `/api/v1/address/create` to create a deposit sub-address.';
-  // Endpoint extracted from a chunk may carry a trailing period.
-  assert.equal(answerMentionsEndpointPath(answer, 'POST /api/v1/address/create.'), true);
-});
-
-// ---------------------------------------------------------------------------
 // sanitize.ts
 // ---------------------------------------------------------------------------
 
@@ -255,6 +235,22 @@ test('sanitizeFtsQuery: returns null when nothing useful survives', () => {
   assert.equal(sanitizeFtsQuery('   '), null);
   assert.equal(sanitizeFtsQuery('?!'), null);
   assert.equal(sanitizeFtsQuery('AND OR'), null);
+});
+
+test('extractExactIdentifiers: finds addresses, API paths, and error codes in order', () => {
+  assert.deepEqual(
+    extractExactIdentifiers(
+      '调用 /api/v2/order/info 返回 A0403，地址 0x9e5aac1ba1a2e6aed6b32689dfcf62a509ca96f3。',
+    ),
+    ['/api/v2/order/info', 'A0403', '0x9e5aac1ba1a2e6aed6b32689dfcf62a509ca96f3'],
+  );
+});
+
+test('extractExactIdentifiers: folds case-insensitive duplicates', () => {
+  assert.deepEqual(
+    extractExactIdentifiers('/API/v1/coins and /api/v1/coins'),
+    ['/API/v1/coins'],
+  );
 });
 
 // CamelCase identifiers expand to both the original token AND a phrase form
@@ -326,6 +322,86 @@ class RouterTestLLM implements LLM {
   }
 }
 
+function routerUsingLlm(llm: LLM): LLMIntentRouter {
+  return new LLMIntentRouter(llm, { fastPathMaxChars: 0, cacheTtlMs: 0 });
+}
+
+test('LLMIntentRouter: short standalone questions skip the router LLM', async () => {
+  const llm = new RouterTestLLM('not used');
+  const route = await new LLMIntentRouter(llm, { fastPathMaxChars: 240 }).route({
+    question: '如何配置 API 签名？',
+    lang: 'zh',
+  });
+
+  assert.equal(llm.calls.length, 0);
+  assert.equal(route.routerStrategy, 'fast_path');
+  assert.equal(route.effectiveQuestion, '如何配置 API 签名？');
+});
+
+test('LLMIntentRouter: exact diagnostic anchors skip the router LLM', async () => {
+  const llm = new RouterTestLLM('not used');
+  const route = await new LLMIntentRouter(llm, { fastPathMaxChars: 20 }).route({
+    question: `${'request log '.repeat(80)} POST /api/v1/payout returned E0008`,
+    lang: 'en',
+  });
+
+  assert.equal(llm.calls.length, 0);
+  assert.equal(route.routerStrategy, 'fast_path');
+  assert.ok(route.apiReferenceHints.includes('/api/v1/payout'));
+  assert.deepEqual(route.diagnostic?.errorCodes, ['E0008']);
+});
+
+test('LLMIntentRouter: caches contextual routes by question and recent history', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'follow_up',
+    effective_question: '/api/v2/checkout valid_time 怎么设置？',
+    intent: 'api_reference',
+    product: 'payment_engine',
+    retrieval: { prefer_api_reference: true, api_reference_hints: ['valid_time'] },
+  }));
+  let now = 1_000;
+  const router = new LLMIntentRouter(llm, {
+    fastPathMaxChars: 240,
+    cacheTtlMs: 1_000,
+    now: () => now,
+  });
+  const firstHistory = [{
+    question: 'checkout_url 是什么？',
+    answer_summary: '它来自 POST /api/v2/checkout。',
+  }];
+
+  const first = await router.route({ question: '那有效期呢？', lang: 'zh', history: firstHistory });
+  const cached = await router.route({ question: '那有效期呢？', lang: 'zh', history: firstHistory });
+  assert.equal(first.routerStrategy, 'llm');
+  assert.equal(cached.routerStrategy, 'cache');
+  assert.equal(llm.calls.length, 1);
+
+  await router.route({
+    question: '那有效期呢？',
+    lang: 'zh',
+    history: [{ question: '另一个主题', answer_summary: '另一个答案' }],
+  });
+  assert.equal(llm.calls.length, 2, 'different history must not share a cached route');
+
+  now += 1_001;
+  await router.route({ question: '那有效期呢？', lang: 'zh', history: firstHistory });
+  assert.equal(llm.calls.length, 3, 'expired entries must be routed again');
+});
+
+test('LLMIntentRouter: failed routes are not cached', async () => {
+  const llm = new RouterTestLLM('not json');
+  const router = new LLMIntentRouter(llm, { cacheTtlMs: 60_000 });
+  const args = {
+    question: '那应该怎么处理？',
+    lang: 'zh' as const,
+    history: [{ question: '请求失败了', answer_summary: '需要进一步排查。' }],
+  };
+
+  assert.equal((await router.route(args)).routerStrategy, 'fallback');
+  assert.equal((await router.route(args)).routerStrategy, 'fallback');
+  assert.equal(llm.calls.length, 2);
+});
+
 test('LLMIntentRouter: follows the LLM route for checkout follow-up rewrites', async () => {
   const llm = new RouterTestLLM(JSON.stringify({
     conversation_mode: 'follow_up',
@@ -340,7 +416,7 @@ test('LLMIntentRouter: follows the LLM route for checkout follow-up rewrites', a
       api_versions: ['v2'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: '那它过期时间怎么设置？',
     lang: 'zh',
@@ -361,7 +437,7 @@ test('LLMIntentRouter: follows the LLM route for checkout follow-up rewrites', a
   assert.ok(route.apiReferenceHints.includes('POST /api/v2/checkout'));
   assert.ok(route.apiReferenceHints.includes('checkout'));
   assert.deepEqual(route.apiReferenceVersionPrefs, ['v2']);
-  assert.match(llm.calls[0]!.systemPrompt, /ANYDOCS_INTENT_ROUTER_V1/);
+  assert.match(llm.calls[0]!.systemPrompt, /ANYDOCS_INTENT_ROUTER_V2/);
   assert.match(llm.calls[0]!.userPrompt, /checkout_url/);
 });
 
@@ -379,7 +455,7 @@ test('LLMIntentRouter: standalone signature route can ignore unrelated history',
       api_versions: [],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'Cregis API 签名参数怎么拼接？',
     lang: 'zh',
@@ -417,7 +493,7 @@ test('LLMIntentRouter: adds intent default pages when the LLM omits them', async
       api_versions: [],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'Can I use localhost as my callback_url while testing Cregis webhooks?',
     lang: 'en',
@@ -445,7 +521,7 @@ test('LLMIntentRouter: does not turn generic error troubleshooting into API-refe
       api_versions: [],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'Cregis API 返回不是 00000 时应该先看哪些错误码？',
     lang: 'zh',
@@ -474,7 +550,7 @@ test('LLMIntentRouter: keeps endpoint-specific signature questions API-aware', a
       api_versions: ['v1'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'For a WaaS /api/v1/payout request, show the ordered MD5 string.',
     lang: 'en',
@@ -501,7 +577,7 @@ test('LLMIntentRouter: keeps endpoint-specific webhook status questions API-awar
       api_versions: ['v2'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'event_type 和 data.status 为什么名字不一样？',
     lang: 'zh',
@@ -529,7 +605,7 @@ test('LLMIntentRouter: promotes an explicit endpoint typed in the question when 
       api_versions: [],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'For a WaaS `/api/v1/payout` request, can you show the exact ordered string used before MD5 signature computation?',
     lang: 'en',
@@ -556,7 +632,7 @@ test('LLMIntentRouter: a topical question with no endpoint in the text and empty
       api_versions: [],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'Should the `sign` field itself be included when building the MD5 string for a WaaS API request?',
     lang: 'en',
@@ -579,7 +655,7 @@ test('LLMIntentRouter: normalizes token identifier routes to include the coins e
       api_versions: ['v1'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'How do I find token_id and chain_id for USDT payouts?',
     lang: 'en',
@@ -604,7 +680,7 @@ test('LLMIntentRouter: infers WaaS product for USDT network token questions', as
       api_versions: [],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'USDT-TRC20、USDT-ERC20、USDT-Polygon 都是 USDT，请求里怎么区分网络？',
     lang: 'zh',
@@ -631,7 +707,7 @@ test('LLMIntentRouter: payment-engine webhook defaults include PE flow pages', a
       api_versions: ['v2'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: '同一笔支付引擎订单可能先部分支付再补款吗？回调里我应该怎么做幂等和状态映射？',
     lang: 'zh',
@@ -660,7 +736,7 @@ test('LLMIntentRouter: normalizes sub-address balance routes to the balance endp
       api_versions: ['v1'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: '我要在出款前查某个子地址的可用余额，currency 参数怎么填？',
     lang: 'zh',
@@ -686,7 +762,7 @@ test('LLMIntentRouter: expands bare API paths into searchable operation hints', 
       api_versions: ['v1'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'For a WaaS /api/v1/payout request, show the ordered MD5 string.',
     lang: 'en',
@@ -710,7 +786,7 @@ test('LLMIntentRouter: maps valid_time questions back to the checkout endpoint',
       api_versions: ['v2'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'If a Payment Engine user does not pay before `valid_time`, how should I confirm the final order status by callback or API?',
     lang: 'en',
@@ -736,7 +812,7 @@ test('LLMIntentRouter: normalizes user-deposit-address withdrawal routes to sub_
       api_versions: ['v1'],
     },
   }));
-  const router = new LLMIntentRouter(llm);
+  const router = routerUsingLlm(llm);
   const route = await router.route({
     question: 'Withdraw from a specific user deposit address instead of default payout wallet.',
     lang: 'en',
@@ -748,7 +824,7 @@ test('LLMIntentRouter: normalizes user-deposit-address withdrawal routes to sub_
 });
 
 test('LLMIntentRouter: malformed route falls back to standalone general docs', async () => {
-  const router = new LLMIntentRouter(new RouterTestLLM('not json'));
+  const router = routerUsingLlm(new RouterTestLLM('not json'));
   const route = await router.route({
     question: '怎么配置？',
     lang: 'zh',
@@ -760,6 +836,114 @@ test('LLMIntentRouter: malformed route falls back to standalone general docs', a
   assert.equal(route.effectiveQuestion, '怎么配置？');
   assert.equal(route.intent, 'general_docs');
   assert.equal(route.apiIntent, false);
+});
+
+test('diagnostic input redacts secrets while preserving exact troubleshooting clues', () => {
+  const question = 'POST /api/v1/payout request {"to_address":"TSabc ","sign":"secret-sign","token":"secret-token"} '
+    + 'response {"code":"E0008","msg":"Address is invalid"} 这是什么问题';
+  const prepared = prepareDiagnosticInput(question);
+
+  assert.doesNotMatch(prepared.safeQuestion, /secret-sign|secret-token/);
+  assert.match(prepared.safeQuestion, /"sign":"\[REDACTED\]"/);
+  assert.deepEqual(prepared.diagnostic.endpoints, ['/api/v1/payout']);
+  assert.deepEqual(prepared.diagnostic.errorCodes, ['E0008']);
+  assert.ok(prepared.diagnostic.importantFields.includes('to_address'));
+  assert.ok(prepared.diagnostic.exactClues.includes('"to_address":"TSabc "'));
+  assert.match(prepared.fallbackRetrievalQuestion, /\/api\/v1\/payout E0008 Address is invalid/);
+});
+
+test('diagnostic input redacts credential headers and bare assignments', () => {
+  const safe = redactSensitiveText([
+    'Authorization: Bearer top-secret',
+    'Access-Key: key-secret',
+    "--header 'Access-Signature: curl-signature'",
+    'sign=signature-secret',
+    'password: password-secret',
+  ].join('\n'));
+
+  assert.doesNotMatch(safe, /top-secret|key-secret|curl-signature|signature-secret|password-secret/);
+  assert.match(safe, /--header 'Access-Signature: \[REDACTED\]'/);
+  assert.equal((safe.match(/\[REDACTED\]/g) ?? []).length, 5);
+});
+
+test('LLMIntentRouter redacts secrets from conversation history', async () => {
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'follow_up',
+    effective_question: 'Why did the previous payout fail?',
+    intent: 'error_troubleshooting',
+    product: 'waas',
+    retrieval: {},
+  }));
+
+  await routerUsingLlm(llm).route({
+    question: 'Why did that fail?',
+    lang: 'en',
+    history: [{
+      question: 'Request sign=history-secret failed',
+      answer_summary: 'Authorization: Bearer history-token',
+    }],
+  });
+
+  assert.doesNotMatch(llm.calls[0]!.userPrompt, /history-secret|history-token/);
+  assert.equal((llm.calls[0]!.userPrompt.match(/\[REDACTED\]/g) ?? []).length, 2);
+});
+
+test('LLMIntentRouter structures long diagnostics and rejects invented exact clues', async () => {
+  const exactAddress = '"to_address":"TSabc "';
+  const question = `${'log line '.repeat(80)} POST /api/v1/payout request {${exactAddress},"sign":"secret"} `
+    + 'response {"code":"E0008","msg":"Address is invalid"} 这是什么问题';
+  const llm = new RouterTestLLM(JSON.stringify({
+    conversation_mode: 'standalone',
+    effective_question: 'WaaS payout E0008 Address is invalid to_address trailing whitespace',
+    intent: 'error_troubleshooting',
+    product: 'waas',
+    retrieval: {
+      prefer_api_reference: true,
+      api_reference_hints: ['POST /api/v1/payout', 'to_address'],
+      supplemental_context_hints: ['E0008 Address is invalid'],
+      supplemental_page_ids: ['error-codes'],
+      api_versions: ['v1'],
+    },
+    diagnostic: {
+      summary: 'The destination address may contain trailing whitespace.',
+      endpoints: ['/api/v1/payout'],
+      error_codes: ['E0008'],
+      exception_names: [],
+      important_fields: ['to_address'],
+      exact_clues: [exactAddress, 'invented evidence'],
+    },
+  }));
+  const route = await routerUsingLlm(llm).route({ question, lang: 'zh' });
+
+  assert.equal(route.intent, 'error_troubleshooting');
+  assert.equal(route.effectiveQuestion, 'WaaS payout E0008 Address is invalid to_address trailing whitespace');
+  assert.equal(route.diagnostic?.summary, 'The destination address may contain trailing whitespace.');
+  assert.ok(route.diagnostic?.exactClues.includes(exactAddress));
+  assert.equal(route.diagnostic?.exactClues.includes('invented evidence'), false);
+  assert.doesNotMatch(llm.calls[0]!.userPrompt, /"sign":"secret"/);
+  assert.match(llm.calls[0]!.userPrompt, /\[REDACTED\]/);
+
+  const promptQuestion = buildDiagnosticPromptQuestion(
+    prepareDiagnosticInput(question),
+    route.diagnostic!,
+    route.effectiveQuestion,
+  );
+  assert.match(promptQuestion, /Resolved question: WaaS payout E0008/);
+  assert.match(promptQuestion, /"to_address":"TSabc "/);
+  assert.doesNotMatch(promptQuestion, /invented evidence|"sign":"secret"/);
+});
+
+test('LLMIntentRouter uses compact deterministic retrieval query when routing fails', async () => {
+  const question = `${'irrelevant log noise '.repeat(100)} /api/v1/payout `
+    + '{"to_address":"TSabc ","code":"E0008","msg":"Address is invalid"} 这是什么问题';
+  const route = await routerUsingLlm(new RouterTestLLM('not json')).route({ question, lang: 'zh' });
+
+  assert.equal(route.intent, 'error_troubleshooting');
+  assert.equal(route.rewritten, true);
+  assert.ok(route.effectiveQuestion.length <= 600);
+  assert.match(route.effectiveQuestion, /\/api\/v1\/payout/);
+  assert.match(route.effectiveQuestion, /E0008/);
+  assert.match(route.effectiveQuestion, /Address is invalid/);
 });
 
 // ---------------------------------------------------------------------------
@@ -1026,276 +1210,25 @@ test('buildPrompt: adds grounded answer checklist for test-token environment lim
   assert.match(prompt.user, /不能直接用于生产环境/);
 });
 
-test('rerank: lang_boost +0.30 applied when chunk.lang == query_lang', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, lang: 'zh', rrf_score: 0.1, nav_index: 1000 }),
-      fakeRetrieved({ chunk_id: 2, lang: 'en', rrf_score: 0.1, nav_index: 1000 }),
-    ],
-    { queryLang: 'zh', currentSubtreeRoot: null },
-  );
-  // Find both by id; zh should score higher than en.
-  const zh = out.find((c) => c.chunk_id === 1)!;
-  const en = out.find((c) => c.chunk_id === 2)!;
-  assert.ok(zh.final_score > en.final_score, 'zh chunk must beat en chunk under same RRF');
-  assert.ok(zh.final_score >= 0.1 * (1 + 0.3), 'lang boost adds at least +0.30 multiplicatively');
+test('rankByRrf: final score and order come only from RRF', () => {
+  const out = rankByRrf([
+    fakeRetrieved({ chunk_id: 1, lang: 'zh', page_title: 'Exact title', nav_index: 0, rrf_score: 0.05 }),
+    fakeRetrieved({ chunk_id: 2, lang: 'en', page_title: 'Other', nav_index: 100, rrf_score: 0.20 }),
+    fakeRetrieved({ chunk_id: 3, subtree_root: 'current', rrf_score: 0.10 }),
+  ]);
+
+  assert.deepEqual(out.map((chunk) => chunk.chunk_id), [2, 3, 1]);
+  assert.deepEqual(out.map((chunk) => chunk.final_score), [0.20, 0.10, 0.05]);
 });
 
-test('rerank: same_subtree_boost +0.20 when current subtree matches', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, subtree_root: 'A', nav_index: 1000 }),
-      fakeRetrieved({ chunk_id: 2, subtree_root: 'B', nav_index: 1000 }),
-    ],
-    { queryLang: 'zh', currentSubtreeRoot: 'A' },
-  );
-  const a = out.find((c) => c.chunk_id === 1)!;
-  const b = out.find((c) => c.chunk_id === 2)!;
-  assert.ok(a.final_score > b.final_score);
-});
+test('rankByRrf: metadata cannot break an RRF tie', () => {
+  const out = rankByRrf([
+    fakeRetrieved({ chunk_id: 1, lang: 'zh', page_title: 'Named in query', nav_index: 0, rrf_score: 0.1 }),
+    fakeRetrieved({ chunk_id: 2, lang: 'en', page_title: 'Unrelated', nav_index: 999, rrf_score: 0.1 }),
+  ]);
 
-test('rerank: current_page_boost prefers exact current page over same-subtree sibling', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({
-        chunk_id: 1,
-        page_id: 'authentication',
-        page_title: 'Authentication & Signature',
-        subtree_root: 'get-started',
-        rrf_score: 0.1,
-        nav_index: 1000,
-      }),
-      fakeRetrieved({
-        chunk_id: 2,
-        page_id: 'webhook-mechanism',
-        page_title: 'Webhook Callback Mechanism',
-        subtree_root: 'get-started',
-        rrf_score: 0.12,
-        nav_index: 1000,
-      }),
-    ],
-    {
-      queryLang: 'en',
-      currentSubtreeRoot: 'get-started',
-      currentPageId: 'authentication',
-      query: 'How do I calculate sign?',
-    },
-  );
-
-  assert.equal(out[0]?.page_id, 'authentication');
-});
-
-test('rerank: api_reference_boost prefers API reference chunks for API-intent questions', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({
-        chunk_id: 1,
-        page_id: 'payment-engine-quickstart-30min',
-        page_title: '支付引擎 30 分钟接入实战',
-        page_url: '/zh/payment-engine-quickstart-30min',
-        text: '创建订单后跳转托管收银台。',
-        rrf_score: 0.12,
-        nav_index: 1000,
-      }),
-      fakeRetrieved({
-        chunk_id: 2,
-        page_id: 'api-payment-engine-api-post-api-v2-checkout',
-        page_title: 'POST /api/v2/checkout — 创建订单',
-        page_url: '/zh/reference/payment-engine-api/post-api-v2-checkout',
-        text: 'API reference: Payment Engine API\nEndpoint: POST `/api/v2/checkout`',
-        rrf_score: 0.1,
-        nav_index: 1000,
-      }),
-    ],
-    {
-      queryLang: 'zh',
-      currentSubtreeRoot: null,
-      query: '创建订单接口 POST /api/v2/checkout 返回哪些字段？',
-      apiIntent: true,
-    },
-  );
-
-  assert.equal(out[0]?.page_id, 'api-payment-engine-api-post-api-v2-checkout');
-});
-
-test('rerank: api_reference_boost skips API chunks that miss hint terms or preferred version', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({
-        chunk_id: 1,
-        page_id: 'api-waas-api-post-api-v1-payout',
-        page_title: 'POST /api/v1/payout — 发起钱包提币',
-        text: 'API reference: WaaS API. HTTP Request POST /api/v1/payout.',
-        rrf_score: 0.1,
-        nav_index: 1000,
-      }),
-      fakeRetrieved({
-        chunk_id: 2,
-        page_id: 'api-waas-api-post-api-v2-payout',
-        page_title: 'POST /api/v2/payout — 发起钱包提币',
-        text: 'API reference: WaaS API. HTTP Request POST /api/v2/payout.',
-        rrf_score: 0.1,
-        nav_index: 1000,
-      }),
-      fakeRetrieved({
-        chunk_id: 3,
-        page_id: 'api-waas-api-post-api-v1-coins',
-        page_title: 'POST /api/v1/coins — 查询币种',
-        text: 'API reference: WaaS API. HTTP Request POST /api/v1/coins.',
-        rrf_score: 0.1,
-        nav_index: 1000,
-      }),
-    ],
-    {
-      queryLang: 'zh',
-      currentSubtreeRoot: null,
-      query: 'WaaS API 出款流程',
-      apiIntent: true,
-      apiReferenceHintTerms: ['api', 'v1', 'payout'],
-      apiReferenceVersionPrefs: ['v1'],
-      apiReferencePagePrefix: 'api-waas-',
-    },
-  );
-  const v1 = out.find((c) => c.page_id === 'api-waas-api-post-api-v1-payout')!;
-  const v2 = out.find((c) => c.page_id === 'api-waas-api-post-api-v2-payout')!;
-  const coins = out.find((c) => c.page_id === 'api-waas-api-post-api-v1-coins')!;
-  assert.ok(v1.final_score > v2.final_score);
-  assert.ok(v1.final_score > coins.final_score);
-});
-
-test('rerank: nav_index_boost decays with depth', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, nav_index: 0 }),
-      fakeRetrieved({ chunk_id: 2, nav_index: 100 }),
-    ],
-    { queryLang: 'zh', currentSubtreeRoot: null },
-  );
-  const shallow = out.find((c) => c.chunk_id === 1)!;
-  const deep = out.find((c) => c.chunk_id === 2)!;
-  assert.ok(shallow.final_score > deep.final_score, 'lower nav_index ranks higher');
-});
-
-test('rerank: title_match_boost +0.30 when query contains page_title (word-aligned)', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, page_id: 'home-assistant', page_title: 'Home Assistant', rrf_score: 0.04, nav_index: 1000 }),
-      fakeRetrieved({ chunk_id: 2, page_id: 'mattermost', page_title: 'Mattermost', rrf_score: 0.045, nav_index: 1000 }),
-    ],
-    { queryLang: 'en', currentSubtreeRoot: null, query: 'How do I integrate Home Assistant?' },
-  );
-  const ha = out.find((c) => c.chunk_id === 1)!;
-  const mm = out.find((c) => c.chunk_id === 2)!;
-  // ha: 0.04 × (1+0.3 lang+0.3 title+~0 nav) = 0.064
-  // mm: 0.045 × (1+0.3 lang) = 0.0585  → ha wins
-  assert.ok(ha.final_score > mm.final_score, 'title-matched chunk wins despite lower rrf');
-});
-
-test('rerank: title_match_boost suppressed when longer matched title contains shorter', () => {
-  // Both "Installation" and "Installation on Termux" appear in query;
-  // only the longer-titled page should keep the boost.
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, page_id: 'install', page_title: 'Installation', rrf_score: 0.10, nav_index: 1000 }),
-      fakeRetrieved({ chunk_id: 2, page_id: 'install-termux', page_title: 'Installation on Termux', rrf_score: 0.10, nav_index: 1000 }),
-    ],
-    { queryLang: 'en', currentSubtreeRoot: null, query: 'tell me about Installation on Termux please' },
-  );
-  const generic = out.find((c) => c.chunk_id === 1)!;
-  const specific = out.find((c) => c.chunk_id === 2)!;
-  assert.ok(specific.final_score > generic.final_score, 'specific (longer) title wins, generic suppressed');
-});
-
-// entity_match_boost: chunks whose page_id or page_title contains a known
-// entity term get a +0.20 boost. This rescues compare-style queries where
-// the verb (`compare`/`vs`) dominates vector ranking and entity-specific
-// pages would otherwise drop below the prompt-context cap.
-test('rerank: entity_match_boost +0.20 when chunk.page_id matches entity term', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, page_id: 'checkpoints', page_title: 'Filesystem Checkpoints', rrf_score: 0.05, nav_index: 1000 }),
-      fakeRetrieved({ chunk_id: 2, page_id: 'random-page', page_title: 'Other Topic', rrf_score: 0.05, nav_index: 1000 }),
-    ],
-    { queryLang: 'en', currentSubtreeRoot: null, query: 'compare sessions and checkpoints', entityTerms: ['sessions', 'checkpoints'] },
-  );
-  const ckpt = out.find((c) => c.chunk_id === 1)!;
-  const other = out.find((c) => c.chunk_id === 2)!;
-  assert.ok(ckpt.final_score > other.final_score, 'entity-matched page wins');
-});
-
-test('rerank: entity_match_boost off when entityTerms not provided', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, page_id: 'checkpoints', page_title: 'Checkpoints', rrf_score: 0.05, nav_index: 1000 }),
-      fakeRetrieved({ chunk_id: 2, page_id: 'random', page_title: 'Random', rrf_score: 0.05, nav_index: 1000 }),
-    ],
-    { queryLang: 'en', currentSubtreeRoot: null, query: 'something unrelated' },
-  );
-  // No entity terms → no entity boost; final_scores equal modulo nav_index_boost.
-  const ckpt = out.find((c) => c.chunk_id === 1)!;
-  const random = out.find((c) => c.chunk_id === 2)!;
-  assert.equal(ckpt.final_score, random.final_score);
-});
-
-test('rerank: title_match_boost skipped for titles below min length', () => {
-  // Title "TTS" (3 chars) is below TITLE_MATCH_MIN_LEN; no boost even on exact match.
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, page_id: 'tts', page_title: 'TTS', rrf_score: 0.05, nav_index: 1000 }),
-      fakeRetrieved({ chunk_id: 2, page_id: 'voice', page_title: 'Voice', rrf_score: 0.05, nav_index: 1000 }),
-    ],
-    { queryLang: 'en', currentSubtreeRoot: null, query: 'how does TTS work' },
-  );
-  const tts = out.find((c) => c.chunk_id === 1)!;
-  const voice = out.find((c) => c.chunk_id === 2)!;
-  // No title-match boost on either; final_scores tie or differ only on lang_boost.
-  assert.equal(tts.final_score, voice.final_score, 'short titles get no title boost');
-});
-
-// Singular/plural tolerance in title matching — query types "tool" but the
-// title is "Tools Runtime" (or vice versa). Both directions should match.
-// Regression for codex clarify follow-up: `tool` query failed to title-match
-// `Tools Runtime` so the title-match tiebreaker never fired.
-test('computeTitleMatches: query singular hits title plural via trailing -s', () => {
-  const out = computeTitleMatches(
-    [fakeRetrieved({ chunk_id: 1, page_id: 'tools-runtime', page_title: 'Tools Runtime' })],
-    'how do I create a custom tool safely?',
-  );
-  assert.ok(out.has('tools-runtime'), 'expected `tool` query to match `Tools Runtime` title');
-});
-
-test('computeTitleMatches: query plural hits title singular via trailing -s', () => {
-  const out = computeTitleMatches(
-    [fakeRetrieved({ chunk_id: 1, page_id: 'session', page_title: 'Session Management' })],
-    'how do sessions work?',
-  );
-  assert.ok(out.has('session'));
-});
-
-// Regression for codex codeGroup clarify case. Query `codeGroup` (camelCase,
-// no whitespace) used to be opaque to word-boundary matching, so it never
-// aligned with "Code Blocks and Code Groups". Normalizing the query by
-// splitting on case boundaries lets `code` and `groups` words hit naturally.
-test('computeTitleMatches: camelCase query token splits before word-boundary match', () => {
-  const out = computeTitleMatches(
-    [fakeRetrieved({ chunk_id: 1, page_id: 'code-blocks', page_title: 'Code Blocks and Code Groups' })],
-    'does the Markdown conversion path support codeGroup?',
-  );
-  assert.ok(out.has('code-blocks'), 'expected `codeGroup` query to title-match `Code Blocks and Code Groups`');
-});
-
-test('rerank: sorted descending by final_score', () => {
-  const out = rerank(
-    [
-      fakeRetrieved({ chunk_id: 1, rrf_score: 0.05 }),
-      fakeRetrieved({ chunk_id: 2, rrf_score: 0.20 }),
-      fakeRetrieved({ chunk_id: 3, rrf_score: 0.10 }),
-    ],
-    { queryLang: 'zh', currentSubtreeRoot: null, query: '' },
-  );
-  for (let i = 1; i < out.length; i++) {
-    assert.ok(out[i - 1]!.final_score >= out[i]!.final_score);
-  }
+  assert.deepEqual(out.map((chunk) => chunk.chunk_id), [1, 2]);
+  assert.ok(out.every((chunk) => chunk.final_score === chunk.rrf_score));
 });
 
 // ---------------------------------------------------------------------------
@@ -1777,19 +1710,19 @@ test('postprocess: citation URL appends heading anchor when in_page_path encodes
   assert.equal(out.citations[0]!.url, '/frontend/auth#bearer-token');
 });
 
-test('postprocess: OpenAPI synthetic citations link to public Scalar source route', () => {
+test('postprocess: OpenAPI synthetic citations keep the operation page route', () => {
   const chunkById = new Map<string, RerankedChunk>([
     [
       'cit_1',
       fakeReranked({
         page_id: 'api-payment-engine-api-post-api-v2-order-info',
-        page_url: '/zh/reference/payment-engine-api/post-api-v2-order-info',
+        page_url: '/zh/reference/payment-engine-api/queryOrder',
         in_page_path: 'response-fields/p[1]',
       }),
     ],
   ]);
   const out = postprocess({ answerLang: 'zh', rawAnswer: '... [cit_1]', chunkById });
-  assert.equal(out.citations[0]!.url, '/zh/reference/payment-engine-api#api-post-api-v2-order-info');
+  assert.equal(out.citations[0]!.url, '/zh/reference/payment-engine-api/queryOrder');
 });
 
 test('postprocess: cit_N markers renumbered to 1..K matching citations[] order', () => {

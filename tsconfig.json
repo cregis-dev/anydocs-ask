@@ -20,5 +20,5 @@
     "resolveJsonModule": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "tests", "fixtures"]
+  "exclude": ["node_modules", "dist", "tests", "fixtures", "src/console-ui"]
 }

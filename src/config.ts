@@ -41,23 +41,31 @@ export type LLMConfig = {
   apiKeyEnv: string;
 };
 
+export type RouterConfig = {
+  /** Disable semantic routing entirely and always use the deterministic route. */
+  enabled: boolean;
+  /** Optional lightweight model override. null reuses llm.model. */
+  model: string | null;
+  /** Standalone questions at or below this size skip the router LLM. */
+  fastPathMaxChars: number;
+  /** In-memory route-cache TTL. Zero disables caching. */
+  cacheTtlMs: number;
+  /** Maximum cached routes retained by one server process. */
+  cacheMaxEntries: number;
+};
+
 export type RetrievalConfig = {
   topK: number;
   rrfK: number;
-  rerankSameSubtreeBoost: number;
-  navOrderBoost: number;
   maxChunksHardCap: number;
 };
 
 /**
- * Cross-encoder reranker — runs after the rule-based rerank to re-score top-K
- * candidates as (query, doc) pairs. Disabled by default so v1 pipeline stays
- * byte-equivalent unless explicitly enabled.
+ * Cross-encoder reranker — optionally re-scores the top RRF candidates as
+ * (query, doc) pairs. Disabled by default.
  *
  * When enabled, the reranker re-sorts the top {@link rerankTopK} candidates
- * from rule rerank before aggregation. The size matters: too small and a
- * bug-pushed-down chunk (e.g. an API page demoted by same-page boost) never
- * reaches the cross-encoder; too large and inference latency grows linearly.
+ * before aggregation. The size balances recall against linear inference cost.
  */
 export type RerankerConfig = {
   enabled: boolean;
@@ -66,9 +74,8 @@ export type RerankerConfig = {
   preferQuantized: boolean;
   /** Tokens per (query, doc) pair fed into the cross-encoder. 512 = model native. */
   maxLength: number;
-  /** Size of the candidate window pulled from rule rerank for cross-encoder
-   *  re-scoring. 20 catches typical retrieval losses where the right chunk
-   *  ranks 10-15 after rule rerank. Inference is O(N) in this number. */
+  /** Size of the RRF candidate window sent to the cross-encoder. Inference is
+   *  O(N) in this number. */
   rerankTopK: number;
 };
 
@@ -104,8 +111,6 @@ export type AnalyzeConfig = {
   lookbackDays: number;
   /** D2 fires when latency_ms exceeds this (ms). */
   latencyP95Threshold: number;
-  /** D1 confidence floor — runs at-or-below count as low-confidence. */
-  confidenceFloor: number;
 };
 
 /**
@@ -142,13 +147,9 @@ export type FeedbackConfig = {
  * behaviour is byte-equivalent to single-turn — no extra latency, no extra
  * Claude tokens.
  *
- * Architecture (RFC 0003 §2.1, B.2 path locked 2026-05-21): the existing
- * primary LLM (Claude / Anthropic provider) consumes a short session
- * history alongside chunks in a single call. No external small-model
- * runtime, no separate reformulation step. anydocs-ask therefore takes
- * **zero new dependencies** to enable multi-turn — authors flip
- * `enabled` and the pipeline starts feeding the existing LLM provider
- * with prior turns.
+ * Multi-turn questions may use the configured lightweight intent router to
+ * resolve references before retrieval. The answer model still receives the
+ * bounded conversation history and selected documentation context.
  */
 export type MultiTurnConfig = {
   enabled: boolean;
@@ -270,6 +271,7 @@ export const PROMPT_SYSTEM_INSTRUCTION_MAX_CHARS = 500;
 export type ResolvedConfig = {
   embedding: EmbeddingConfig;
   llm: LLMConfig;
+  router: RouterConfig;
   retrieval: RetrievalConfig;
   reranker: RerankerConfig;
   server: ServerConfig;
@@ -306,11 +308,16 @@ const DEFAULTS: ResolvedConfig = {
     model: 'claude-sonnet-4-6',
     apiKeyEnv: 'ANTHROPIC_API_KEY',
   },
+  router: {
+    enabled: true,
+    model: null,
+    fastPathMaxChars: 240,
+    cacheTtlMs: 300_000,
+    cacheMaxEntries: 512,
+  },
   retrieval: {
     topK: 20,
     rrfK: 60,
-    rerankSameSubtreeBoost: 0.2,
-    navOrderBoost: 0.1,
     maxChunksHardCap: 20,
   },
   reranker: {
@@ -340,7 +347,6 @@ const DEFAULTS: ResolvedConfig = {
   analyze: {
     lookbackDays: 7,
     latencyP95Threshold: 3000,
-    confidenceFloor: 0.4,
   },
   feedback: {
     enabled: false,
@@ -463,6 +469,10 @@ export function applyEnvOverrides(config: ResolvedConfig): void {
   if (envModel && envModel.length > 0 && config.llm.provider === 'anthropic') {
     config.llm.model = envModel;
   }
+  const routerModel = process.env.ANYDOCS_ROUTER_MODEL?.trim();
+  if (routerModel && routerModel.length > 0) {
+    config.router.model = routerModel;
+  }
   const envMaxConcurrentAsk = process.env.ANYDOCS_ASK_MAX_CONCURRENT?.trim();
   if (envMaxConcurrentAsk && envMaxConcurrentAsk.length > 0) {
     const parsed = Number(envMaxConcurrentAsk);
@@ -501,7 +511,8 @@ function mergeWithDefaults(
   const out = structuredClone(DEFAULTS);
   applySection(user.embedding, out.embedding, 'embedding', warnings);
   applySection(user.llm, out.llm, 'llm', warnings);
-  applySection(user.retrieval, out.retrieval, 'retrieval', warnings);
+  applyRouter(user.router, out.router, warnings);
+  applyRetrieval(user.retrieval, out.retrieval, warnings);
   applySection(user.reranker, out.reranker, 'reranker', warnings);
   applyServer(user.server, out.server, warnings);
   applySection(user.indexing, out.indexing, 'indexing', warnings);
@@ -926,7 +937,7 @@ function applyAnalyze(value: unknown, target: AnalyzeConfig, warnings: string[])
     return;
   }
   const obj = value as Record<string, unknown>;
-  for (const key of ['lookbackDays', 'latencyP95Threshold', 'confidenceFloor'] as const) {
+  for (const key of ['lookbackDays', 'latencyP95Threshold'] as const) {
     if (obj[key] === undefined) continue;
     const v = obj[key];
     if (typeof v === 'number' && Number.isFinite(v) && v >= 0) {
@@ -999,6 +1010,81 @@ function applySection(
       continue;
     }
     target[key] = v;
+  }
+}
+
+function applyRetrieval(
+  value: unknown,
+  target: RetrievalConfig,
+  warnings: string[],
+): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'retrieval' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  const limits: Record<keyof RetrievalConfig, { min: number; max: number }> = {
+    topK: { min: 1, max: 100 },
+    rrfK: { min: 1, max: 10_000 },
+    maxChunksHardCap: { min: 1, max: 100 },
+  };
+  for (const key of Object.keys(limits) as Array<keyof RetrievalConfig>) {
+    if (obj[key] === undefined) continue;
+    const valueForKey = obj[key];
+    const { min, max } = limits[key];
+    if (
+      typeof valueForKey !== 'number'
+      || !Number.isInteger(valueForKey)
+      || valueForKey < min
+      || valueForKey > max
+    ) {
+      warnings.push(
+        `anydocs.ask.json: retrieval.${key} must be an integer from ${min} to ${max}; using default`,
+      );
+      continue;
+    }
+    target[key] = valueForKey;
+  }
+}
+
+function applyRouter(value: unknown, target: RouterConfig, warnings: string[]): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'router' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.enabled !== undefined) {
+    if (typeof obj.enabled === 'boolean') target.enabled = obj.enabled;
+    else warnings.push(`anydocs.ask.json: router.enabled must be boolean; using default`);
+  }
+  if (obj.model !== undefined) {
+    if (obj.model === null) target.model = null;
+    else if (typeof obj.model === 'string' && obj.model.trim()) target.model = obj.model.trim();
+    else warnings.push(`anydocs.ask.json: router.model must be a non-empty string or null; using default`);
+  }
+  const limits: Record<'fastPathMaxChars' | 'cacheTtlMs' | 'cacheMaxEntries', { min: number; max: number }> = {
+    fastPathMaxChars: { min: 0, max: 2_000 },
+    cacheTtlMs: { min: 0, max: 86_400_000 },
+    cacheMaxEntries: { min: 1, max: 10_000 },
+  };
+  for (const key of Object.keys(limits) as Array<keyof typeof limits>) {
+    if (obj[key] === undefined) continue;
+    const valueForKey = obj[key];
+    const { min, max } = limits[key];
+    if (
+      typeof valueForKey !== 'number'
+      || !Number.isInteger(valueForKey)
+      || valueForKey < min
+      || valueForKey > max
+    ) {
+      warnings.push(
+        `anydocs.ask.json: router.${key} must be an integer from ${min} to ${max}; using default`,
+      );
+      continue;
+    }
+    target[key] = valueForKey;
   }
 }
 

@@ -5,8 +5,8 @@
  *
  * The reranker layer is opt-in via `reranker.enabled = true` in
  * anydocs.ask.json. When disabled, callers should pass `null` through to
- * `answer.ts` and the cross-encoder rerank step is skipped (the existing
- * rule rerank remains the only ranking authority).
+ * `answer.ts` and the cross-encoder rerank step is skipped, leaving RRF as
+ * the ranking authority.
  */
 
 import { resolveTransformersCacheDir, type ResolvedConfig } from '../config.ts';

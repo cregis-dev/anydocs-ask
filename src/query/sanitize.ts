@@ -96,6 +96,20 @@ const EN_STOP_WORDS = new Set([
 // unicode61 tokenizer do its own segmentation downstream.
 const TOKEN_SPLIT = /[\s,.!?;。，！？；：、（）「」『』《》【】~“”‘’`/\\|]+/u;
 const CJK_RE = /[\u3400-\u9fff]/u;
+const EXACT_IDENTIFIER_PATTERNS = [
+  // Transaction hashes before addresses so a 64-hex hash is captured whole.
+  /\b0x[a-fA-F0-9]{64}\b/g,
+  /\b[a-fA-F0-9]{64}\b/g,
+  /\b0x[a-fA-F0-9]{40}\b/g,
+  /\bT[1-9A-HJ-NP-Za-km-z]{33}\b/g,
+  /\b[A-Z]\d{4}\b/g,
+  /\/(?:openapi|api)\/v\d+(?:\/[A-Za-z0-9_.{}:-]+)+/gi,
+  /\bAccess-(?:Key|Timestamp|Nonce|Signature)\b/gi,
+  /\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+(?:\[\])?(?:\.[A-Za-z][A-Za-z0-9_]*(?:\[\])?)*\b/g,
+  /\b(?:data|request|response)(?:\.[A-Za-z][A-Za-z0-9_]*(?:\[\])?)+\b/gi,
+  /\b[a-z]+(?:[A-Z][A-Za-z0-9]+){2,}\b/g,
+  /\b(?=[1-9A-HJ-NP-Za-km-z]{32,50}\b)(?=[1-9A-HJ-NP-Za-km-z]*\d)[1-9A-HJ-NP-Za-km-z]{32,50}\b/g,
+] as const;
 
 // SQLite's unicode61 tokenizer does not segment Chinese into the domain terms
 // authors actually use. A user phrase like "签名应该怎么拼接参数" otherwise stays
@@ -176,6 +190,42 @@ export function sanitizeFtsQuery(text: string): string | null {
 
   if (useful.length === 0) return null;
   return useful.join(' OR ');
+}
+
+/**
+ * Extract opaque identifiers that should be matched literally rather than
+ * entrusted to semantic similarity or FTS tokenization. The order follows
+ * their first appearance in the question and duplicates are folded
+ * case-insensitively.
+ */
+export function extractExactIdentifiers(text: string): string[] {
+  const matches: Array<{ value: string; index: number }> = [];
+  for (const pattern of EXACT_IDENTIFIER_PATTERNS) {
+    pattern.lastIndex = 0;
+    for (const match of text.matchAll(pattern)) {
+      const value = trimIdentifierPunctuation(match[0]);
+      if (value) matches.push({ value, index: match.index ?? 0 });
+    }
+  }
+  matches.sort((a, b) => a.index - b.index || b.value.length - a.value.length);
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const match of matches) {
+    const key = match.value.toLowerCase();
+    if (seen.has(key)) continue;
+    // A 64-hex transaction hash also contains shorter address-shaped
+    // substrings. Word boundaries usually prevent those matches; this guard
+    // keeps the behavior correct if a future pattern becomes more permissive.
+    if (out.some((value) => value.toLowerCase().includes(key))) continue;
+    seen.add(key);
+    out.push(match.value);
+  }
+  return out;
+}
+
+function trimIdentifierPunctuation(value: string): string {
+  return value.replace(/[),.;:!?，。；：！？]+$/u, '');
 }
 
 function isEnglishStopWord(token: string): boolean {

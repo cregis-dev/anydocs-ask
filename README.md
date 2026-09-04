@@ -94,9 +94,9 @@ curl http://127.0.0.1:4100/         # 应返回工作区首页 HTML
 
 项目页加 **Feedback** / **Traffic** tab + **Index** tab 反向标注，把反馈数据消费成可行动信号（RFC 0002 T1–T4）：
 
-- **Feedback tab** — 4 状态视图（disabled / enabled-empty / onboarding / healthy）+ 6 KPI tile（feedback·7d / explicit% / mean confidence / non-answer rate / A+ candidates / cit-check failed）+ 5 filter chip（all / 👍 / 👎 / implicit / no_citations / ⚠ cit-check）+ 行级 breadcrumb + Drawer META/ANSWER/CORRECTION/CITATIONS（含 verdict 徽章）/RETRIEVAL/ACTIONS。
-- **Traffic tab** — 最近 7 天 query 列表 + Re-ask + jump-to-Ask；Console 写入 runs 默认排除分析。
-- **Index tab** — 每行末尾显示"近 7 天命中 N 次 + 中位 confidence"，可跳到对应 Traffic 过滤。
+- **Feedback tab** — 4 状态视图（disabled / enabled-empty / onboarding / healthy）+ KPI tile（feedback·7d / explicit% / citation issues / non-answer rate / A+ candidates / cit-check failed）+ filter chip（all / 👍 / 👎 / implicit / no_citations / ⚠ cit-check）+ 行级 breadcrumb + Drawer META/ANSWER/CORRECTION/CITATIONS（含 verdict 徽章）/RETRIEVAL/ACTIONS。
+- **Traffic tab** — 7/30/90 天或全部历史 query 列表，支持服务端筛选、分页、Re-ask 与 jump-to-Ask；Console 写入 runs 默认排除分析。
+- **Index tab** — 每行末尾显示“近 7 天命中 N 次”，可跳到对应 Traffic 过滤。
 
 打开方式：在 anydocs.ask.json 设 `feedback.enabled=true`（写库 + 反馈先验上线）。详见 [ARCHITECTURE.md §15](./ARCHITECTURE.md)。
 
@@ -117,6 +117,25 @@ curl http://127.0.0.1:4100/         # 应返回工作区首页 HTML
 ```
 
 子进程端口从 `[childPortRangeStart, childPortRangeEnd]` 顺序分配，控制台自身的端口必须落在该范围之外。
+
+### 远程访问鉴权
+
+Console 默认仍只监听 `127.0.0.1`。容器或反向代理部署需要监听非回环地址时，必须配置至少 16 位的管理员 Token，否则 Console 会拒绝启动：
+
+```bash
+export ANYDOCS_CONSOLE_HOST=0.0.0.0
+export ANYDOCS_CONSOLE_AUTH_TOKEN='<random-token-at-least-16-characters>'
+anydocs-ask console --workspace /runtime --port 4100
+```
+
+浏览器在 `/login` 输入 Token 后会获得 12 小时有效的 `HttpOnly` 签名会话 Cookie。Token 不会写入 Cookie；修改 Token 并重启 Console 会立即使旧会话失效。生产环境应始终经 HTTPS 反向代理访问。
+
+单项目容器可通过 `ANYDOCS_CONSOLE_ATTACHED_PROJECT` 与 `ANYDOCS_CONSOLE_ATTACHED_PORT` 将 Console 附着到同一网络命名空间中已经运行的 Ask 服务，避免加载第二份 embedding 模型：
+
+```bash
+export ANYDOCS_CONSOLE_ATTACHED_PROJECT=docs
+export ANYDOCS_CONSOLE_ATTACHED_PORT=3100
+```
 
 ---
 
@@ -169,7 +188,7 @@ pnpm dev serve /Users/me/work/product-docs
 ```jsonc
 // 请求
 {
-  "question": "如何鉴权？",          // 必填，≤ 500 字
+  "question": "如何鉴权？",          // 必填，≤ 20,000 字
   "lang": "zh",                      // 必填，"zh" | "en"
   "context": {                       // 可选
     "current_page_id": "auth",       // 用户当前所在页面
@@ -238,6 +257,12 @@ pnpm dev serve /Users/me/work/product-docs
   }
 }
 ```
+
+独立的 Intent Router 只处理需要上下文消解或语义压缩的问题。无历史的短问题，以及
+带明确 API 路径、错误码或异常名的诊断输入，会直接走确定性快路径，避免回答前再调用
+一次大模型；其余路由结果按“问题 + 最近三轮历史”做进程内 TTL 缓存。长日志仍会先
+脱敏，本地提取器保留接口路径、错误码、字段名和首尾空格等原始线索。密钥、Token、
+签名和密码不会发送给 Router、Embedding 或回答模型，也不会以明文写入 Traffic 日志。
 
 鉴权用 bearer token，走环境变量 `ANYDOCS_MCP_TOKEN`（密钥不入配置文件）；设置后调用须带 `Authorization: Bearer <token>`，否则 401。未设置则端点开放——仅适合 loopback / 可信内网（此时端口无关的 DNS-rebinding Host 守卫生效）。在 MCP 客户端里注册（以 Claude Code 为例）：
 
@@ -316,6 +341,15 @@ the runtime workspace under `<workspace>/state/<projectId>/golden/cases.jsonl`.
 
 ```jsonc
 {
+  // Intent Router（默认 ON）；model=null 时复用主回答模型
+  "router": {
+    "enabled": true,
+    "model": null,                    // 可填网关支持的更小、更快模型
+    "fastPathMaxChars": 240,          // 0 = 关闭确定性快路径
+    "cacheTtlMs": 300000,
+    "cacheMaxEntries": 512
+  },
+
   // RFC 0001 §3 — β 显式 + γ 隐式反馈通道（写库 + reranker 先验）
   "feedback": {
     "enabled": false,                  // 整段开关

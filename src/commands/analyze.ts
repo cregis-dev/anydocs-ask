@@ -27,7 +27,7 @@ export type AnalyzeRunsOptions = {
   since?: string;
   /**
    * Include `source=console` runs in analysis. Defaults to false — console
-   * dogfood queries skew confidence / latency distributions and would lie
+   * dogfood queries skew latency/error distributions and would lie
    * to the author about real reader health. ARCH §17.8.
    */
   includeConsole?: boolean;
@@ -82,7 +82,6 @@ export async function runAnalyzeRuns(opts: AnalyzeRunsOptions): Promise<number> 
 
   const findings = analyzeDimensions({
     runs: records,
-    confidenceFloor: config.analyze.confidenceFloor,
     latencyP95Threshold: config.analyze.latencyP95Threshold,
   });
 

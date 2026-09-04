@@ -16,12 +16,16 @@ import { loadConfig, resolveTransformersCacheDir } from '../src/config.ts';
 // Pin a clean baseline for the whole file; the two tests that exercise the
 // override path (L186, L200) still save/restore their own values.
 const ORIG_ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL;
+const ORIG_ROUTER_MODEL = process.env.ANYDOCS_ROUTER_MODEL;
 before(() => {
   delete process.env.ANTHROPIC_MODEL;
+  delete process.env.ANYDOCS_ROUTER_MODEL;
 });
 after(() => {
   if (ORIG_ANTHROPIC_MODEL === undefined) delete process.env.ANTHROPIC_MODEL;
   else process.env.ANTHROPIC_MODEL = ORIG_ANTHROPIC_MODEL;
+  if (ORIG_ROUTER_MODEL === undefined) delete process.env.ANYDOCS_ROUTER_MODEL;
+  else process.env.ANYDOCS_ROUTER_MODEL = ORIG_ROUTER_MODEL;
 });
 
 async function withTmpProject(setup: (root: string) => Promise<void>): Promise<{
@@ -41,6 +45,13 @@ test('loadConfig: missing file -> defaults, source = null', async () => {
     assert.deepEqual(r.warnings, []);
     assert.equal(r.config.embedding.model, 'bge-m3');
     assert.equal(r.config.llm.provider, 'anthropic');
+    assert.deepEqual(r.config.router, {
+      enabled: true,
+      model: null,
+      fastPathMaxChars: 240,
+      cacheTtlMs: 300_000,
+      cacheMaxEntries: 512,
+    });
     assert.equal(r.config.server.port, 3100);
     assert.equal(r.config.server.maxConcurrentAsk, 12);
     assert.deepEqual(r.config.server.cors.allowedOrigins, []);
@@ -214,6 +225,79 @@ test('loadConfig: type-mismatched fields are warned (not thrown), defaults prese
     assert.equal(r.config.server.port, 3100, 'default preserved when section is wrong type');
     assert.ok(r.warnings.length >= 2);
   } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: retrieval tuning is accepted and invalid bounds keep defaults', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        retrieval: { topK: 12, rrfK: 0, maxChunksHardCap: 8.5 },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.deepEqual(r.config.retrieval, {
+      topK: 12,
+      rrfK: 60,
+      maxChunksHardCap: 20,
+    });
+    assert.ok(r.warnings.some((warning) => warning.includes('retrieval.rrfK')));
+    assert.ok(r.warnings.some((warning) => warning.includes('retrieval.maxChunksHardCap')));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: router tuning is accepted and invalid bounds keep defaults', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        router: {
+          enabled: false,
+          model: 'fast-router-model',
+          fastPathMaxChars: 0,
+          cacheTtlMs: -1,
+          cacheMaxEntries: 128,
+        },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.deepEqual(r.config.router, {
+      enabled: false,
+      model: 'fast-router-model',
+      fastPathMaxChars: 0,
+      cacheTtlMs: 300_000,
+      cacheMaxEntries: 128,
+    });
+    assert.ok(r.warnings.some((warning) => warning.includes('router.cacheTtlMs')));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: ANYDOCS_ROUTER_MODEL overrides router.model only', async () => {
+  const prev = process.env.ANYDOCS_ROUTER_MODEL;
+  process.env.ANYDOCS_ROUTER_MODEL = 'fast-router-from-env';
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ llm: { model: 'answer-model' }, router: { model: 'router-from-file' } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.llm.model, 'answer-model');
+    assert.equal(r.config.router.model, 'fast-router-from-env');
+  } finally {
+    if (prev === undefined) delete process.env.ANYDOCS_ROUTER_MODEL;
+    else process.env.ANYDOCS_ROUTER_MODEL = prev;
     await cleanup();
   }
 });

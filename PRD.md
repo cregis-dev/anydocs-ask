@@ -154,7 +154,7 @@ v1 实现：`published` 状态硬过滤 + 单 anydocs 项目隔离（一进程�
 | query 是 zh，且 zh 文档有充分命中 | 用 zh chunks 生成 zh 答案；citations 全是 zh |
 | query 是 zh，但 zh 文档无命中（仅 en 有） | 用 en chunks 生成 zh 答案；citations 仍含 `lang: en` 的原文片段（snippet **不翻译**）；正文开头加一句"原文为英文文档，已为您翻译要点："提示 |
 | query 是 zh，跨多个 zh 子树命中分散 | 走 §4.4 树状反问；反问选项**只显示 zh 子树**，反问文案也用 zh |
-| query 是 zh，zh 与 en 子树都有命中 | 同 lang 优先（lang_boost）；如果 lang_boost 之后仍是 zh 主导子树 → 直答 zh；如果 zh 完全没命中才走翻译降级 |
+| query 是 zh，zh 与 en 子树都有命中 | 聚合阶段优先选择同 lang；zh 有充分命中时直答 zh，zh 没有充分命中时走跨语言翻译降级 |
 
 **实现要点：**
 
@@ -364,7 +364,7 @@ v1 立项时的叙事是"读懂目录结构的文档问答服务"。0.1.0 上线
 
 [console-redesign-brief](./docs/console-redesign-brief.md) 已经把 Console 定位为主要接口，列了 5 个 user journey。本次修订**新增 Journey 6 "Close the feedback loop"**（详见 RFC 0002），并把它升级为 Studio 化叙事的主轴：
 
-- 反馈数据可视化（no_citations / 低 confidence / 显式 👎）
+- 反馈数据可视化（no_citations / error / 显式 👎）
 - 失败 query 聚类视图，挂回 nav 子树
 - 文档章节页显示"过去 7 天用户在附近问的问题 + 命中率"
 - Journey 之间的穿透式跳转（traffic → golden case / eval 回归 → trace + 文档章节）
@@ -592,7 +592,7 @@ anydocs-ask feedback diagnose  # 触发 A+ 失败查询诊断
 | 阶段 | 来源 | 工具 | 量级 |
 |---|---|---|---|
 | Day 0（冷启动） | **结构反向 + LLM 改写**：遍历 navigation，每页生成 3-5 个候选 Q（"什么是 X / X 和 Y 区别 / X 怎么用"），LLM 改写为自然语言；人工 30 分钟筛掉 ~50% | `anydocs-ask golden generate <project> --from structure` | 50–200 |
-| v1 ≥2 周 | **从 runs 历史挑**：confidence ≥0.7 + 用户未重问 + answer 简洁 → 候选；人工补 `must_cite_pages` / `must_contain` | `... --from runs --since 14d` | 30–100/周 |
+| v1 ≥2 周 | **从 runs 历史挑**：answer 有引用 + 用户未重问 + answer 简洁 → 候选；近似问题优先保留引用覆盖更完整者，人工补 `must_cite_pages` / `must_contain` | `... --from runs --since 14d` | 30–100/周 |
 | v1.5 后 | **失败修补**：analyze 报告里"无 citation / 离场快"的 query → 人工补 expected | `... --from inbox` | 长尾 |
 
 Golden case schema（jsonl，每行）：
@@ -623,7 +623,7 @@ Golden case schema（jsonl，每行）：
 
 **位置**：`<workspace>/state/<projectId>/runs/<YYYY-Www>.jsonl`（runtime 侧，与 sqlite 同位），按 ISO 周切片，避免单文件无限增长。
 
-**默认开启**，`runs.enabled=false` opt-out。每行记录一次 `/v1/ask`：query、filters、context、检索 trace（fused chunks + RRF/BM25/vec rank + nav_index_boost）、answer、citations、confidence、latency、tokens、model。详细 schema 见 ARCHITECTURE §16.4。
+**默认开启**，`runs.enabled=false` opt-out。每行记录一次 `/v1/ask`：query、filters、context、检索 trace（fused chunks + RRF/BM25/vector/exact rank + nav_index）、Router 策略、Router/Embedding/Retrieval/Rerank/Generation 分段耗时、answer、citations、总 latency、tokens、model。详细 schema 见 ARCHITECTURE §16.4。
 
 **隐私**：v1 默认不写 IP / UA / 用户标识；脱敏 hook 留 v1.5（PRD §9 已留口子）。`feedback.beta` / `feedback.gamma` 字段在 runs 中预留为 null，由 v1.5 §11 反馈回路异步回填。
 
@@ -631,7 +631,7 @@ Golden case schema（jsonl，每行）：
 
 ### 12.6 冷启动评测协议
 
-无 β/γ 信号、无积累 runs 时**严禁乱调权重**——只用 v1 默认（vec+BM25 RRF + nav_index_boost + 子树聚合反问 + sonnet-4-6 默认 prompt，详见 §4.2 / ARCHITECTURE §6）。
+无 β/γ 信号、无积累 runs 时**严禁增加经验权重**——使用默认的 vec+BM25+Exact Identifier RRF、子树聚合和默认 prompt（详见 §4.2 / ARCHITECTURE §6）。
 
 **Day 0 必做**：
 
@@ -655,7 +655,7 @@ Golden case schema（jsonl，每行）：
 
 | # | 维度 | 触发条件 | 输出动作 | v1 / v1.5 |
 |---|---|---|---|---|
-| 1 | **召回失败** | confidence<0.4 ∨ 无 citation ∨ 30s 内重问 | 列 query + 高频缺失 page → 给作者"应补文档"建议 | v1 |
+| 1 | **召回失败** | 无 citation ∨ 30s 内重问 | 列 query + 高频缺失 page → 给作者"应补文档"建议 | v1 |
 | 2 | **延迟异常** | latency_ms p95 超阈值的 query 模式 | 提示 chunk 过大 / token 爆 → 调 chunking 配置 | v1 |
 | 3 | **歧义高发** | 反问触发率 / 未被 disambiguate 命中 | 提示 navigation 调整（合并/拆分子树） | v1 |
 | 4 | **引用错配** | β=negative 的 citation | 反查 chunk → 是否拆分；进 feedback inbox | v1.5（依赖 β） |
@@ -739,7 +739,7 @@ Golden case schema（jsonl，每行）：
 #### 13.4.2 Ask 体验台
 
 - 文本框 + 提交按钮，调子进程的 `/v1/ask`，**默认 dry-run**：不落 runs jsonl，不进 answer-cache，仅在 console 内存里返回结果。
-- 显示：检索 fused top-5（page / rrf_score / vec_rank / bm25_rank / nav_index_boost）、最终 answer markdown、citations、confidence、latency、model。
+- 显示：检索 fused top-5（page / rrf_score / final_score / vec_rank / bm25_rank / exact_rank / nav_index）、最终 answer markdown、citations、latency、model。
 - 子树反问触发时显示反问选项树（与 Reader 一致）。
 - 不提供"标记 bad"按钮（v1 不引入 feedback inbox 写入；详见 §13.6 与 v1.5 扩展点）。
 - **persist 开关**（2026-05-11 加入）：右上 checkbox，默认 **OFF**，开启时该次提交反代到 `/v1/ask?source=console`，子进程**落 runs，进 answer-cache**，`source` 字段标记 `"console"`。
@@ -782,11 +782,11 @@ Golden case schema（jsonl，每行）：
 - 首次设置引导：totalPages=0 时显大字 + 文件树骨架 + 路径
 - 内容探索器：按 lang 切换 → 导航树（按 breadcrumb 自动分块）→ 每页 id/slug/status；missing file 红字；orphan（pages/ 有但 navigation/ 没引用）红色分组
 
-#### 13.4.6 Traffic tab（7d 健康度 + runs 详情 + Re-ask）
+#### 13.4.6 Traffic tab（可选时间范围健康度 + runs 详情 + Re-ask）
 
-- 4 KPI 卡 + 按日分桶 sparkline：queries · 7d / mean confidence / P95 latency (含 P50) / non-answer rate (error + clarify)
-- 筛选条：query / source(reader|console) / kind / minConf
-- runs 表（SSR）：行展开看完整 fused top-8 + answer markdown 渲染 + citations + meta(model/answer_id/request_id/tokens)
+- 4 KPI 卡 + 按日分桶 sparkline：queries · 7d/30d/90d/all / error rate / P95 latency (含 P50) / non-answer rate (error + clarify)
+- 服务端筛选条：query / source(reader|console|mcp) / kind
+- runs 表（SSR）：筛选后按 25/50/100 条分页；行展开看完整 fused top-8 + answer markdown 渲染 + citations + meta(model/answer_id/request_id/tokens)
 - **Re-ask 按钮**：行展开里点 ↩ 把 query 写回 Ask tab textarea + 切到 Ask tab；用当前 cfg 重跑该问题做对比
 - console 与 reader 流量在 Traffic 视图里都纳入并以 src-pill 区分（与 analyze 默认排除 console 不同——这里需要可见对照）
 

@@ -129,7 +129,6 @@ export type EvalTraceChunkDiagnostic = {
   vec_rank: number | null;
   bm25_rank: number | null;
   nav_index: number | null;
-  nav_index_boost: number;
 };
 
 export type EvalProgressEvent =
@@ -386,7 +385,10 @@ function delay(ms: number): Promise<void> {
 }
 
 export function askDepsForEval(
-  runtime: Pick<Runtime, 'db' | 'embedder' | 'llm' | 'config'> & { reranker?: Runtime['reranker'] },
+  runtime: Pick<Runtime, 'db' | 'embedder' | 'llm' | 'config'> & {
+    reranker?: Runtime['reranker'];
+    intentRouter?: IntentRouter;
+  },
 ): AskDeps {
   return {
     db: runtime.db,
@@ -394,14 +396,16 @@ export function askDepsForEval(
     llm: runtime.llm,
     reranker: runtime.reranker ?? null,
     rerankerConfig: runtime.config.reranker,
+    retrievalConfig: runtime.config.retrieval,
     promptConfig: runtime.config.prompt,
+    intentRouter: runtime.intentRouter,
   };
 }
 
 export function askDepsForRetrievalEval(
   runtime: Pick<Runtime, 'db' | 'embedder' | 'config'> &
     Partial<Pick<Runtime, 'llm'>> &
-    { reranker?: Runtime['reranker'] },
+    { reranker?: Runtime['reranker']; intentRouter?: IntentRouter },
   opts: { noRouter?: boolean } = {},
 ): AskDeps {
   if (opts.noRouter === true) {
@@ -411,11 +415,15 @@ export function askDepsForRetrievalEval(
       llm: RETRIEVAL_EVAL_UNUSED_LLM,
       reranker: runtime.reranker ?? null,
       rerankerConfig: runtime.config.reranker,
+      retrievalConfig: runtime.config.retrieval,
       promptConfig: runtime.config.prompt,
       intentRouter: RAW_RETRIEVAL_EVAL_ROUTER,
     };
   }
-  return askDepsForEval(runtime as Pick<Runtime, 'db' | 'embedder' | 'llm' | 'config'> & { reranker?: Runtime['reranker'] });
+  return askDepsForEval(runtime as Pick<Runtime, 'db' | 'embedder' | 'llm' | 'config'> & {
+    reranker?: Runtime['reranker'];
+    intentRouter?: IntentRouter;
+  });
 }
 
 const RAW_RETRIEVAL_EVAL_ROUTER: IntentRouter = {
@@ -540,7 +548,6 @@ function buildChunkDiagnostic(
     vec_rank: chunk.vec_rank,
     bm25_rank: chunk.bm25_rank,
     nav_index: chunk.nav_index,
-    nav_index_boost: chunk.nav_index_boost,
   };
 }
 

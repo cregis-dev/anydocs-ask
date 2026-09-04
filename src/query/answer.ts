@@ -9,7 +9,7 @@
  *   2. Boundary filter is applied inside retrieval SQL (status='published',
  *      optional subtree_root match)
  *   3. Hybrid retrieve (vector + BM25 + RRF)
- *   4. Structural rerank (lang_boost / same_subtree_boost / nav_index_boost)
+ *   4. Keep RRF order; optionally replace it with cross-encoder scores
  *   5. Subtree aggregate → answer-same-lang | translate-fallback
  *   6. Build prompt + generate via LLM
  *   7. Postprocess (citation legality, lang fill, truncation, hallucination)
@@ -24,26 +24,33 @@ import type { DbHandle } from '../db/index.ts';
 import type { Embedder } from '../embedding/types.ts';
 import type { LLM } from '../llm/types.ts';
 import type { Reranker } from '../reranker/types.ts';
-import type { PromptConfig, RerankerConfig } from '../config.ts';
+import type { PromptConfig, RerankerConfig, RetrievalConfig } from '../config.ts';
 import type { DocsLang } from '../anydocs/types.ts';
 import { detectLangFromText, langFromScopeId } from './lang.ts';
-import { sanitizeFtsQuery } from './sanitize.ts';
+import { extractExactIdentifiers, sanitizeFtsQuery } from './sanitize.ts';
 import { retrieveWithTrace, type RetrievalTrace, type RetrievedChunk } from './retrieval.ts';
-import { computeTitleMatches } from './rerank.ts';
-import { rerank, type RerankedChunk } from './rerank.ts';
-import {
-  apiReferenceChunkMatchesVersion,
-  isApiReferenceChunk,
-} from './api-intent.ts';
-import { aggregate, TOP_K_FOR_AGGREGATION, type AggregateOutcome } from './aggregate.ts';
+import { rankByRrf, type RerankedChunk } from './rerank.ts';
+import { aggregate, TOP_K_FOR_AGGREGATION } from './aggregate.ts';
 import { buildPrompt, detectFormatHint } from './prompt.ts';
 import { LLMIntentRouter, type IntentProduct, type IntentRoute, type IntentRouter } from './intent-router.ts';
 import { postprocess, searchHitFromChunk } from './postprocess.ts';
 import type { AskRequest, AskResult, SearchResult } from './types.ts';
+import {
+  buildDiagnosticPromptQuestion,
+  MAX_QUESTION_CHARS,
+  prepareDiagnosticInput,
+  QUESTION_REWRITE_THRESHOLD_CHARS,
+  redactSensitiveText,
+} from './diagnostic-input.ts';
 
-const MAX_QUESTION_CHARS = 500;
-const HARD_MAX_CHUNKS = 20;
+const DEFAULT_RETRIEVAL_CONFIG: RetrievalConfig = {
+  topK: 20,
+  rrfK: 60,
+  maxChunksHardCap: 20,
+};
 const DEFAULT_MAX_CHUNKS = 8;
+const DEFAULT_CONTEXT_TOKEN_BUDGET = 8000;
+const DEFAULT_PARENT_TOKEN_LIMIT = 1600;
 /**
  * Number of times we retry an LLM call when postprocess strips every
  * citation. Bumped 1 → 2 after codex round-11 found ~10 % of the
@@ -58,15 +65,16 @@ export type AskDeps = {
   embedder: Embedder;
   llm: LLM;
   /**
-   * Cross-encoder reranker. Optional — when null/omitted the cross-encoder
-   * rerank stage is skipped and the rule rerank is the only ranking
-   * authority. answer.ts gates the entire stage on this being non-null so
-   * v1 callers stay byte-equivalent.
+   * Cross-encoder reranker. Optional — when null/omitted, RRF is the only
+   * ranking authority. answer.ts gates the entire stage on this being
+   * non-null.
    */
   reranker?: Reranker | null;
   /** Cross-encoder rerank config (window size etc). Optional; defaults
    *  applied inline so test deps don't need to construct one. */
   rerankerConfig?: RerankerConfig;
+  /** Hybrid retrieval limits. Runtime callers pass config.retrieval. */
+  retrievalConfig?: RetrievalConfig;
   promptConfig?: PromptConfig;
   intentRouter?: IntentRouter | null;
 };
@@ -85,10 +93,10 @@ export type AskStreamHooks = {
  * commands read this back to compute recall-failure / latency / etc. metrics.
  */
 export type AskTrace = {
-  /** Reranked chunks (sorted descending by final_score). Empty on early-error
-   *  paths (validation / invalid_scope). */
+  /** Ranked chunks (RRF order, or cross-encoder order when enabled). Empty on
+   *  early-error paths (validation / invalid_scope). */
   fused: AskTraceFusedChunk[];
-  /** Query text used by title/rerank/context hint logic after intent routing. */
+  /** Query text used by retrieval and context hint logic after intent routing. */
   search_question?: string;
   /** Query text embedded for retrieval; may include rewritten multi-turn context. */
   retrieve_question?: string;
@@ -96,13 +104,10 @@ export type AskTrace = {
   selected_context?: AskTraceContextChunk[];
   /** True when aggregate decided to fire a clarify (subtree-aggregation ask). */
   subtree_ask_triggered: boolean;
-  /** Top final_score from rerank — raw RRF + nav-boost output. Kept for
-   *  analyze diagnostics; not the value persisted as `answer.confidence`. */
+  /** Top final_score from RRF or the optional cross-encoder. */
   top_final_score: number;
-  /** Normalized confidence: top1.final_score / sum(top-K.final_score), K=5.
-   *  In [0,1]; `1.0` when only one candidate, `0` when no candidates.
-   *  This is what runs.jsonl `answer.confidence` carries (ARCH §16.4). */
-  confidence: number;
+  /** Wall-clock latency for each pipeline stage. */
+  timings: AskStageTimings;
   /** LLM token counts when the provider exposes them. v1 leaves these null;
    *  later stages can set them when the LLM interface is widened. */
   tokens_in: number | null;
@@ -124,17 +129,33 @@ export type AskTrace = {
   history_window?: number;
 };
 
+export type AskStageTimings = {
+  router_ms: number;
+  embedding_ms: number;
+  retrieval_ms: number;
+  rerank_ms: number;
+  generation_ms: number;
+};
+
 export type AskTraceFusedChunk = {
   chunk_id: number;
   page_id: string;
+  content_hash?: string;
+  lang?: DocsLang;
+  page_title?: string;
+  page_url?: string | null;
+  in_page_path?: string;
+  text_preview?: string;
+  token_count?: number;
+  parent_id?: number | null;
+  chunk_kind?: string;
+  object_path?: string | null;
   rrf_score: number;
   final_score: number;
   vec_rank: number | null;
   bm25_rank: number | null;
+  exact_rank: number | null;
   nav_index: number | null;
-  /** Same formula as rerank.ts navIndexBoostFor. Captured here so analyze can
-   *  inspect "why did this chunk win" without re-running the math. */
-  nav_index_boost: number;
 };
 
 export type AskTraceContextChunk = AskTraceFusedChunk & {
@@ -143,6 +164,18 @@ export type AskTraceContextChunk = AskTraceFusedChunk & {
   page_url: string | null;
   in_page_path: string;
   text_preview: string;
+  context_rank: number;
+  context_token_count: number;
+  expanded_parent: AskTraceExpandedParent | null;
+};
+
+export type AskTraceExpandedParent = {
+  parent_id: number;
+  content_hash: string;
+  parent_path: string;
+  heading_path: string[];
+  token_count: number;
+  child_count: number;
 };
 
 /**
@@ -213,7 +246,7 @@ export async function retrieveOnlyWithTrace(
 
 /** Default / hard ceiling for `search()` hit count (RFC 0007 `search` tool). */
 export const SEARCH_DEFAULT_TOP_K = 8;
-export const SEARCH_MAX_TOP_K = HARD_MAX_CHUNKS;
+export const SEARCH_MAX_TOP_K = 100;
 
 /**
  * RFC 0007 — retrieval-only entry point behind the MCP `search` tool. Runs the
@@ -252,8 +285,9 @@ export async function search(
     };
   }
 
+  const hardCap = retrievalConfigFor(deps).maxChunksHardCap;
   const limit = Number.isFinite(topK)
-    ? Math.min(SEARCH_MAX_TOP_K, Math.max(1, Math.floor(topK)))
+    ? Math.min(SEARCH_MAX_TOP_K, hardCap, Math.max(1, Math.floor(topK)))
     : SEARCH_DEFAULT_TOP_K;
   const queryLang = resolveQueryLang(deps.db, question, req);
   const retrieval = await runRetrievalPipeline(deps, req, question, queryLang);
@@ -266,32 +300,26 @@ function emptyTrace(): AskTrace {
     fused: [],
     subtree_ask_triggered: false,
     top_final_score: 0,
-    confidence: 0,
+    timings: emptyStageTimings(),
     tokens_in: null,
     tokens_out: null,
   };
 }
 
 type RetrievalPipelineOutput = {
-  activeHistory: NonNullable<AskRequest['context']>['history'];
-  apiIntent: boolean;
-  apiReferenceHintTerms: string[];
-  apiReferenceVersionPrefs: string[];
-  confidence: number;
+  safeHistory: NonNullable<AskRequest['context']>['history'];
   entityTerms: string[] | undefined;
   fusedTrace: AskTraceFusedChunk[];
   historyWindow: number;
   intentRoute: IntentRoute;
-  projectSetupIntent: boolean;
   queryVector: Float32Array;
   retrievalTrace: RetrievalTrace;
   retrieved: RetrievedChunk[];
   reranked: RerankedChunk[];
   retrieveQuestion: string;
   searchQuestion: string;
-  signatureAuthIntent: boolean;
-  supplementalPageIds: string[];
   top_final_score: number;
+  timings: AskStageTimings;
   trace: AskTrace;
 };
 
@@ -303,88 +331,81 @@ async function runRetrievalPipeline(
   signal?: AbortSignal,
 ): Promise<RetrievalPipelineOutput> {
   const scopeId = req.context?.scope_id ?? null;
-  const currentSubtreeRoot = null;
   // RFC 0003 §4.2 — multi-turn history-aware retrieve query (M1).
   // A single LLM intent router owns the semantic decisions that feed
   // retrieval. Retrieval-only eval uses this exact helper so it measures the
   // same route/rewrite/rank path as production Ask.
   const history = req.context?.history ?? [];
   const intentRouter = deps.intentRouter ?? new LLMIntentRouter(deps.llm);
+  const timings = emptyStageTimings();
+  const routerStartedAt = performance.now();
   const intentRoute = await intentRouter.route({ question, history, lang: queryLang });
+  timings.router_ms = elapsedMs(routerStartedAt);
   const activeHistory = intentRoute.usesHistory ? history : [];
+  const safeHistory = activeHistory.map((turn) => ({
+    question: redactSensitiveText(turn.question),
+    answer_summary: redactSensitiveText(turn.answer_summary),
+  }));
   const historyWindow = activeHistory.length;
-  const searchQuestion = intentRoute.effectiveQuestion || question;
-  const apiIntent = intentRoute.apiIntent;
-  const signatureAuthIntent = intentRoute.signatureAuthIntent;
+  const safeQuestion = intentRoute.safeQuestion ?? redactSensitiveText(question);
+  const searchQuestion = intentRoute.effectiveQuestion || safeQuestion;
   const retrieveQuestion = intentRoute.usesHistory
     ? intentRoute.rewritten
       ? intentRoute.effectiveQuestion
-      : `${activeHistory.map((h) => h.question).join('\n')}\n${question}`
+      : `${safeHistory.map((h) => h.question).join('\n')}\n${redactSensitiveText(question)}`
     : searchQuestion;
 
-  const embedInputs = retrieveQuestion === question ? [question] : [question, retrieveQuestion];
+  const compactLongInput = question.length > QUESTION_REWRITE_THRESHOLD_CHARS
+    || intentRoute.diagnostic?.structured === true;
+  const embedInputs = compactLongInput
+    ? [retrieveQuestion]
+    : retrieveQuestion === safeQuestion ? [safeQuestion] : [safeQuestion, retrieveQuestion];
+  const embeddingStartedAt = performance.now();
   const embedded = await deps.embedder.embed(embedInputs);
+  timings.embedding_ms = elapsedMs(embeddingStartedAt);
   const queryVector = embedded[0]!.vector;
-  const retrieveVector = embedded[1]?.vector ?? queryVector;
+  const retrieveVector = compactLongInput ? queryVector : embedded[1]?.vector ?? queryVector;
   throwIfAborted(signal);
 
   const ftsQuery = sanitizeFtsQuery(searchQuestion);
+  const exactIdentifiers = extractExactIdentifiers(`${safeQuestion}\n${searchQuestion}`);
   const entityTerms = extractEntityTerms(searchQuestion);
-  const projectSetupIntent = intentRoute.projectSetupIntent;
-  const apiReferenceHints = intentRoute.apiReferenceHints;
-  const supplementalContextHints = intentRoute.supplementalContextHints;
-  const supplementalPageIds = intentRoute.supplementalPageIds;
-  const apiReferenceVersionPrefs = intentRoute.apiReferenceVersionPrefs;
-  const apiReferencePagePrefix = apiReferencePagePrefixForProduct(intentRoute.product);
-  const apiReferenceHintTerms = apiReferenceHints
-    .flatMap((hint) => hint.toLowerCase().split(/\s+/))
-    .filter(Boolean);
-  const apiReferenceFtsQueries = apiReferenceHints
-    .map((hint) => sanitizeFtsQuery(hint))
-    .filter((hint): hint is string => !!hint);
-  const supplementalFtsQueries = supplementalContextHints
-    .map((hint) => sanitizeFtsQuery(hint))
-    .filter((hint): hint is string => !!hint);
+  const apiReferencePagePrefix = apiReferencePagePrefixForProduct(
+    intentRoute.product,
+    `${safeQuestion}\n${searchQuestion}`,
+  );
+  const retrievalConfig = retrievalConfigFor(deps);
+  const retrievalStartedAt = performance.now();
   const { chunks: retrieved, trace: retrievalTrace } = retrieveWithTrace(deps.db, {
     queryVector: retrieveVector,
     ftsQuery,
     scopeId,
-    entityTerms,
-    currentPageId: null,
+    perPathK: retrievalConfig.topK,
+    finalK: Math.min(retrievalConfig.topK, retrievalConfig.maxChunksHardCap),
+    rrfK: retrievalConfig.rrfK,
     currentPageLang: queryLang,
-    apiIntent,
-    apiReferenceFtsQueries,
-    supplementalFtsQueries,
-    supplementalPageIds,
     apiReferencePagePrefix,
+    exactIdentifiers,
   });
+  timings.retrieval_ms = elapsedMs(retrievalStartedAt);
 
-  const ruleReranked = rerank(retrieved, {
-    queryLang,
-    currentSubtreeRoot,
-    currentPageId: null,
-    query: searchQuestion,
-    entityTerms,
-    apiIntent,
-    apiReferenceHintTerms,
-    apiReferenceVersionPrefs,
-    apiReferencePagePrefix,
-  });
+  const rrfRanked = rankByRrf(retrieved);
 
+  const rerankStartedAt = performance.now();
   const reranked = deps.reranker
-    ? await applyCrossEncoderRerank(deps.reranker, searchQuestion, ruleReranked, deps.rerankerConfig)
-    : ruleReranked;
+    ? await applyCrossEncoderRerank(deps.reranker, searchQuestion, rrfRanked, deps.rerankerConfig)
+    : rrfRanked;
+  timings.rerank_ms = elapsedMs(rerankStartedAt);
 
   const fusedTrace = buildFusedTrace(reranked, retrievalTrace);
   const top_final_score = reranked[0]?.final_score ?? 0;
-  const confidence = computeConfidence(reranked);
   const trace: AskTrace = {
     fused: fusedTrace,
     search_question: searchQuestion,
     retrieve_question: retrieveQuestion,
     subtree_ask_triggered: false,
     top_final_score,
-    confidence,
+    timings,
     tokens_in: null,
     tokens_out: null,
     intent_route: intentRoute,
@@ -392,25 +413,19 @@ async function runRetrievalPipeline(
   };
 
   return {
-    activeHistory,
-    apiIntent,
-    apiReferenceHintTerms,
-    apiReferenceVersionPrefs,
-    confidence,
+    safeHistory,
     entityTerms,
     fusedTrace,
     historyWindow,
     intentRoute,
-    projectSetupIntent,
     queryVector,
     retrievalTrace,
     retrieved,
     reranked,
     retrieveQuestion,
     searchQuestion,
-    signatureAuthIntent,
-    supplementalPageIds,
     top_final_score,
+    timings,
     trace,
   };
 }
@@ -485,68 +500,63 @@ async function askWithTraceInternal(
   const retrieval = await runRetrievalPipeline(deps, req, question, queryLang, hooks.signal);
   throwIfAborted(hooks.signal);
   const {
-    activeHistory,
-    apiIntent,
-    apiReferenceHintTerms,
-    apiReferenceVersionPrefs,
-    confidence,
+    safeHistory,
     entityTerms,
     fusedTrace,
     historyWindow,
     intentRoute,
-    projectSetupIntent,
     queryVector,
     retrievalTrace,
     retrieved,
     reranked,
     retrieveQuestion,
     searchQuestion,
-    signatureAuthIntent,
-    supplementalPageIds,
     top_final_score,
+    timings,
   } = retrieval;
-  const currentSubtreeRoot = null;
-
   // 5. Aggregate.
-  // Derive title-match subtrees so aggregate can skip clarify when the user's
-  // query explicitly names a page.
-  const aggregationCandidates = pickAggregationCandidates(reranked, {
-    apiIntent,
-    signatureAuthIntent,
+  const retrievalConfig = retrievalConfigFor(deps);
+  const outcome = aggregate(reranked, {
+    queryLang,
+    topK: Math.min(retrievalConfig.topK, retrievalConfig.maxChunksHardCap),
   });
-  const titleMatchedPageIds = computeTitleMatches(retrieved, searchQuestion);
-  const titleMatchedSubtrees = new Set<string>();
-  for (const c of aggregationCandidates) {
-    if (titleMatchedPageIds.has(c.page_id) && c.subtree_root) {
-      titleMatchedSubtrees.add(c.subtree_root);
-    }
-  }
-  const outcome = aggregate(aggregationCandidates, { queryLang, currentSubtreeRoot, titleMatchedSubtrees });
 
   // 6 + 7. Generate + postprocess.
   const isCrossLang = outcome.kind === 'translate-fallback';
-  const pickedChunks = pickContextChunks(outcome, req.options?.max_chunks, entityTerms, {
-    apiIntent,
-    apiReferenceCandidates: reranked,
-    apiReferenceHintTerms,
-    apiReferencePagePrefix: apiReferencePagePrefixForProduct(intentRoute.product),
-    apiReferenceVersionPrefs,
-    projectSetupIntent,
-    supplementalPageIds,
-    queryLang,
+  const contextCap = contextChunkCap(
+    req.options?.max_chunks,
+    entityTerms,
+    retrievalConfig.maxChunksHardCap,
+  );
+  // Preserve aggregate/RRF order. The only transformation after ranking is
+  // structural parent expansion below, which changes context granularity but
+  // never promotes a lower-ranked child over a higher-ranked one.
+  const contextCandidates = outcome.pick.slice(0, retrievalConfig.maxChunksHardCap);
+  const pickedChunks = selectContextWithParents(deps.db, contextCandidates, {
+    maxItems: contextCap,
+    maxTotalTokens: DEFAULT_CONTEXT_TOKEN_BUDGET,
+    maxParentTokens: DEFAULT_PARENT_TOKEN_LIMIT,
   });
   const selectedContextTrace = buildSelectedContextTrace(pickedChunks, retrievalTrace);
   const formatHint = detectFormatHint(question);
+  const preparedPromptInput = prepareDiagnosticInput(question);
+  const promptQuestion = buildDiagnosticPromptQuestion(
+    preparedPromptInput,
+    intentRoute.diagnostic ?? preparedPromptInput.diagnostic,
+    intentRoute.effectiveQuestion,
+  );
   const prompt = buildPrompt({
-    question,
-    ...(intentRoute.rewritten ? { resolvedQuestion: intentRoute.effectiveQuestion } : {}),
+    question: promptQuestion,
+    ...(intentRoute.rewritten && !intentRoute.diagnostic
+      ? { resolvedQuestion: intentRoute.effectiveQuestion }
+      : {}),
     chunks: pickedChunks,
     answerLang: queryLang,
     isCrossLang,
     formatHint,
     ...(deps.promptConfig ? { promptConfig: deps.promptConfig } : {}),
     ...(entityTerms ? { entityTerms } : {}),
-    ...(historyWindow > 0 ? { history: activeHistory } : {}),
+    ...(historyWindow > 0 ? { history: safeHistory } : {}),
   });
 
   let llmOutput;
@@ -557,6 +567,7 @@ async function askWithTraceInternal(
     userPrompt: prompt.user,
   };
   const isStreaming = !!(hooks.onDelta && deps.llm.streamGenerate);
+  const generationStartedAt = performance.now();
   try {
     llmOutput = isStreaming
       ? await deps.llm.streamGenerate!(llmInput, {
@@ -565,6 +576,7 @@ async function askWithTraceInternal(
         })
       : await deps.llm.generate(llmInput);
   } catch (err) {
+    timings.generation_ms = elapsedMs(generationStartedAt);
     // LLM call failure (gateway returned garbage / timed out / threw mid-
     // stream). Distinct from `llm_unavailable` which is the *construction*
     // failure (no API key / bad config) — that one short-circuits before
@@ -584,7 +596,7 @@ async function askWithTraceInternal(
         selected_context: selectedContextTrace,
         subtree_ask_triggered: false,
         top_final_score,
-        confidence,
+        timings,
         tokens_in: null,
         tokens_out: null,
         intent_route: intentRoute,
@@ -596,11 +608,7 @@ async function askWithTraceInternal(
 
   let post = postprocess({
     answerLang: queryLang,
-    rawAnswer: withMandatoryApiReferenceCitation(llmOutput.text, prompt.chunkById, {
-      apiIntent,
-      apiReferenceHintTerms,
-      answerLang: queryLang,
-    }),
+    rawAnswer: llmOutput.text,
     chunkById: prompt.chunkById,
     question,
   });
@@ -628,11 +636,7 @@ async function askWithTraceInternal(
         const retryOutput = await deps.llm.generate(retryInput);
         const retryPost = postprocess({
           answerLang: queryLang,
-          rawAnswer: withMandatoryApiReferenceCitation(retryOutput.text, prompt.chunkById, {
-            apiIntent,
-            apiReferenceHintTerms,
-            answerLang: queryLang,
-          }),
+          rawAnswer: retryOutput.text,
           chunkById: prompt.chunkById,
           question,
         });
@@ -648,6 +652,7 @@ async function askWithTraceInternal(
       }
     }
   }
+  timings.generation_ms = elapsedMs(generationStartedAt);
 
   // Guard: if postprocess stripped every citation (LLM produced no valid
   // citation markers, retry included), surface as an error so the caller
@@ -666,7 +671,7 @@ async function askWithTraceInternal(
         selected_context: selectedContextTrace,
         subtree_ask_triggered: false,
         top_final_score,
-        confidence,
+        timings,
         tokens_in: null,
         tokens_out: null,
         citation_retry_count: citationRetryCount,
@@ -711,7 +716,7 @@ async function askWithTraceInternal(
       selected_context: selectedContextTrace,
       subtree_ask_triggered: false,
       top_final_score,
-      confidence,
+      timings,
       tokens_in: null,
       tokens_out: null,
       citation_retry_count: citationRetryCount,
@@ -722,7 +727,182 @@ async function askWithTraceInternal(
   };
 }
 
-function apiReferencePagePrefixForProduct(product: IntentProduct): string | null {
+function emptyStageTimings(): AskStageTimings {
+  return {
+    router_ms: 0,
+    embedding_ms: 0,
+    retrieval_ms: 0,
+    rerank_ms: 0,
+    generation_ms: 0,
+  };
+}
+
+function elapsedMs(startedAt: number): number {
+  return Number((performance.now() - startedAt).toFixed(1));
+}
+
+/**
+ * Children win retrieval; bounded structural parents supply generation context.
+ * Multiple hits from the same parent collapse to one context item, preventing
+ * repeated prefixes and arbitrary field-boundary cuts in the prompt.
+ */
+export function expandParentContext(
+  db: DbHandle,
+  chunks: RerankedChunk[],
+  maxParentChars = 6000,
+): RerankedChunk[] {
+  return selectContextWithParents(db, chunks, {
+    maxItems: chunks.length,
+    maxTotalTokens: Number.POSITIVE_INFINITY,
+    maxParentTokens: Number.POSITIVE_INFINITY,
+    maxParentChars,
+  });
+}
+
+export type ContextSelectionOptions = {
+  maxItems: number;
+  maxTotalTokens?: number;
+  maxParentTokens?: number;
+  /** Compatibility guard for callers that still express the parent bound in characters. */
+  maxParentChars?: number;
+};
+
+export type SelectedContextChunk = RerankedChunk & {
+  /** Non-null only when this child was replaced by its structural parent. */
+  expanded_parent: AskTraceExpandedParent | null;
+  context_token_count: number;
+};
+
+/**
+ * Materialize ranked child candidates into prompt context units.
+ *
+ * Expand a structural parent at most once, keep the complete context under a
+ * global token budget, and continue scanning candidates after duplicate child
+ * hits collapse. This makes the item limit apply to actual prompt citations,
+ * not to the pre-expansion child list.
+ */
+export function selectContextWithParents(
+  db: DbHandle,
+  candidates: RerankedChunk[],
+  options: ContextSelectionOptions,
+): SelectedContextChunk[] {
+  const maxItems = Math.max(0, Math.floor(options.maxItems));
+  if (maxItems === 0 || candidates.length === 0) return [];
+  const maxTotalTokens = options.maxTotalTokens ?? DEFAULT_CONTEXT_TOKEN_BUDGET;
+  const maxParentTokens = options.maxParentTokens ?? DEFAULT_PARENT_TOKEN_LIMIT;
+  const maxParentChars = options.maxParentChars ?? Number.POSITIVE_INFINITY;
+  const parentIds = [...new Set(candidates.map((chunk) => chunk.parent_id).filter((id): id is number => id !== null))];
+  if (parentIds.length === 0) {
+    return takeWithinTokenBudget(candidates, maxItems, maxTotalTokens);
+  }
+  const placeholders = parentIds.map(() => '?').join(',');
+  const rows = db.prepare(
+    `SELECT cp.parent_id, cp.text, cp.content_hash, cp.parent_path,
+            cp.heading_path, cp.token_count, COUNT(c.chunk_id) AS child_count
+       FROM chunk_parents cp
+       LEFT JOIN chunks c ON c.parent_id = cp.parent_id
+      WHERE cp.parent_id IN (${placeholders})
+      GROUP BY cp.parent_id, cp.text, cp.token_count`,
+  ).all(...parentIds) as Array<{
+    parent_id: number;
+    text: string;
+    content_hash: string;
+    parent_path: string;
+    heading_path: string;
+    token_count: number;
+    child_count: number;
+  }>;
+  const parents = new Map(rows.map((row) => [row.parent_id, row] as const));
+  const emittedParents = new Set<number>();
+  const emittedParentFallbacks = new Set<number>();
+  const emittedChildren = new Set<number>();
+  const out: SelectedContextChunk[] = [];
+  let usedTokens = 0;
+  for (const chunk of candidates) {
+    if (out.length >= maxItems) break;
+    if (emittedChildren.has(chunk.chunk_id)) continue;
+    emittedChildren.add(chunk.chunk_id);
+
+    let expandedParent: AskTraceExpandedParent | null = null;
+    let selected: RerankedChunk = chunk;
+    let selectedTokens = estimateContextTokens(chunk.text);
+    let parentFallbackId: number | null = null;
+    const parent = chunk.parent_id === null ? undefined : parents.get(chunk.parent_id);
+    if (
+      parent &&
+      parent.child_count >= 2 &&
+      parent.token_count <= maxParentTokens &&
+      parent.text.length <= maxParentChars
+    ) {
+      if (emittedParents.has(parent.parent_id)) continue;
+      if (usedTokens + parent.token_count <= maxTotalTokens) {
+        emittedParents.add(parent.parent_id);
+        selected = { ...chunk, text: parent.text };
+        selectedTokens = parent.token_count;
+        expandedParent = {
+          parent_id: parent.parent_id,
+          content_hash: parent.content_hash,
+          parent_path: parent.parent_path,
+          heading_path: parseHeadingPath(parent.heading_path),
+          token_count: parent.token_count,
+          child_count: parent.child_count,
+        };
+      } else {
+        // The full parent no longer fits. Keep only its best-ranked child so
+        // later siblings do not consume the slots that refill should use for
+        // distinct context units.
+        if (emittedParentFallbacks.has(parent.parent_id)) continue;
+        parentFallbackId = parent.parent_id;
+      }
+    }
+
+    if (usedTokens + selectedTokens > maxTotalTokens) continue;
+    if (parentFallbackId !== null) emittedParentFallbacks.add(parentFallbackId);
+    out.push({ ...selected, expanded_parent: expandedParent, context_token_count: selectedTokens });
+    usedTokens += selectedTokens;
+  }
+  return out;
+}
+
+function takeWithinTokenBudget(
+  candidates: RerankedChunk[],
+  maxItems: number,
+  maxTotalTokens: number,
+): SelectedContextChunk[] {
+  const out: SelectedContextChunk[] = [];
+  const seen = new Set<number>();
+  let usedTokens = 0;
+  for (const chunk of candidates) {
+    if (out.length >= maxItems) break;
+    if (seen.has(chunk.chunk_id)) continue;
+    seen.add(chunk.chunk_id);
+    const tokens = estimateContextTokens(chunk.text);
+    if (usedTokens + tokens > maxTotalTokens) continue;
+    out.push({ ...chunk, expanded_parent: null, context_token_count: tokens });
+    usedTokens += tokens;
+  }
+  return out;
+}
+
+function parseHeadingPath(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === 'string')
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function estimateContextTokens(text: string): number {
+  const cjk = text.match(/[\u3400-\u9fff]/gu)?.length ?? 0;
+  const nonCjkLength = text.replace(/[\u3400-\u9fff]/gu, '').length;
+  return Math.max(1, cjk + Math.ceil(nonCjkLength / 4));
+}
+
+export function apiReferencePagePrefixForProduct(product: IntentProduct, query = ''): string | null {
+  if (/\/openapi\/|\bteam\s+api\b|团队\s*API/i.test(query)) return 'api-team-api-';
   if (product === 'payment_engine') return 'api-payment-engine-api-';
   if (product === 'waas') return 'api-waas-api-';
   return null;
@@ -748,23 +928,6 @@ function citationReinforcementFor(lang: DocsLang): string {
   ].join('\n');
 }
 
-/**
- * Confidence proxy: share of top-1 within the top-K (K=5) reranked pool.
- * Bounded [0,1]; clarify gating still uses aggregate's subtree thresholds —
- * this number is for downstream eval / display only.
- */
-const CONFIDENCE_TOP_K = 5;
-function computeConfidence(reranked: RerankedChunk[]): number {
-  if (reranked.length === 0) return 0;
-  const top1 = reranked[0]!.final_score;
-  if (reranked.length === 1) return top1 > 0 ? 1 : 0;
-  let sum = 0;
-  for (let i = 0; i < Math.min(CONFIDENCE_TOP_K, reranked.length); i++) {
-    sum += reranked[i]!.final_score;
-  }
-  return sum > 0 ? top1 / sum : 0;
-}
-
 function buildFusedTrace(
   reranked: RerankedChunk[],
   retrievalTrace: RetrievalTrace,
@@ -772,20 +935,30 @@ function buildFusedTrace(
   return reranked.map((c) => ({
     chunk_id: c.chunk_id,
     page_id: c.page_id,
+    content_hash: c.content_hash,
+    lang: c.lang,
+    page_title: c.page_title,
+    page_url: c.page_url,
+    in_page_path: c.in_page_path,
+    text_preview: previewText(c.text),
+    token_count: c.token_count,
+    parent_id: c.parent_id,
+    chunk_kind: c.chunk_kind,
+    object_path: c.object_path,
     rrf_score: c.rrf_score,
     final_score: c.final_score,
     vec_rank: retrievalTrace.vecRanks.get(c.chunk_id) ?? null,
     bm25_rank: retrievalTrace.bm25Ranks.get(c.chunk_id) ?? null,
+    exact_rank: retrievalTrace.exactRanks.get(c.chunk_id) ?? null,
     nav_index: c.nav_index,
-    nav_index_boost: navIndexBoostForTrace(c.nav_index),
   }));
 }
 
 function buildSelectedContextTrace(
-  chunks: RerankedChunk[],
+  chunks: SelectedContextChunk[],
   retrievalTrace: RetrievalTrace,
 ): AskTraceContextChunk[] {
-  return chunks.map((c) => ({
+  return chunks.map((c, index) => ({
     chunk_id: c.chunk_id,
     page_id: c.page_id,
     lang: c.lang,
@@ -793,12 +966,20 @@ function buildSelectedContextTrace(
     page_url: c.page_url,
     in_page_path: c.in_page_path,
     text_preview: previewText(c.text),
+    token_count: c.token_count,
+    parent_id: c.parent_id,
+    chunk_kind: c.chunk_kind,
+    object_path: c.object_path,
+    content_hash: c.content_hash,
+    context_rank: index + 1,
+    context_token_count: c.context_token_count,
+    expanded_parent: c.expanded_parent,
     rrf_score: c.rrf_score,
     final_score: c.final_score,
     vec_rank: retrievalTrace.vecRanks.get(c.chunk_id) ?? null,
     bm25_rank: retrievalTrace.bm25Ranks.get(c.chunk_id) ?? null,
+    exact_rank: retrievalTrace.exactRanks.get(c.chunk_id) ?? null,
     nav_index: c.nav_index,
-    nav_index_boost: navIndexBoostForTrace(c.nav_index),
   }));
 }
 
@@ -806,17 +987,10 @@ function previewText(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 240);
 }
 
-function navIndexBoostForTrace(navIndex: number | null): number {
-  // Mirrors rerank.ts navIndexBoostFor (kept as a sibling to avoid leaking
-  // the internal helper through rerank.ts's public surface).
-  if (navIndex === null) return 0;
-  return 0.1 * (1 / Math.log(navIndex + 2));
-}
-
 const DEFAULT_RERANK_TOP_K = 20;
 
 /**
- * Cross-encoder rerank — feeds the top-N rule-reranked candidates to a
+ * Cross-encoder rerank — feeds the top-N RRF-ranked candidates to a
  * Reranker as (query, chunk_text) pairs and reorders by relevance score.
  *
  * The chunk text already carries its heading_path prefix (set in
@@ -826,23 +1000,21 @@ const DEFAULT_RERANK_TOP_K = 20;
  *
  * Score normalization: bge-reranker-v2-m3 emits raw logits in roughly
  * [-10, +10]. We sigmoid them into (0, 1) and overwrite `final_score` for
- * the reranked window so downstream code (computeConfidence, aggregate) sees
- * a coherent scale within the top-N. Chunks beyond rerankTopK keep their
- * rule-rerank final_score; this is rare in practice because the retrieval
- * top-K and rerankTopK both default to 20.
+ * the reranked window so aggregation sees one coherent scale within the
+ * top-N. Chunks beyond rerankTopK retain their RRF score.
  *
  * Returns a NEW array — input is not mutated.
  */
 async function applyCrossEncoderRerank(
   reranker: Reranker,
   query: string,
-  ruleReranked: RerankedChunk[],
+  rrfRanked: RerankedChunk[],
   config: RerankerConfig | undefined,
 ): Promise<RerankedChunk[]> {
   const topK = config?.rerankTopK ?? DEFAULT_RERANK_TOP_K;
-  if (ruleReranked.length === 0) return ruleReranked;
-  const window = ruleReranked.slice(0, topK);
-  const tail = ruleReranked.slice(topK);
+  if (rrfRanked.length === 0) return rrfRanked;
+  const window = rrfRanked.slice(0, topK);
+  const tail = rrfRanked.slice(topK);
   const docs = window.map((c) => ({ chunk_id: c.chunk_id, text: c.text }));
   const scores = await reranker.rerank(query, docs);
   const scoreByChunk = new Map<number | bigint, number>();
@@ -855,32 +1027,6 @@ async function applyCrossEncoderRerank(
 
 function sigmoid(x: number): number {
   return 1 / (1 + Math.exp(-x));
-}
-
-function preferNonApiContext(chunks: RerankedChunk[]): RerankedChunk[] {
-  const nonApi = chunks.filter((c) => !isApiReferenceChunk(c));
-  return nonApi.length > 0 ? nonApi : chunks;
-}
-
-function pickAggregationCandidates(
-  chunks: RerankedChunk[],
-  opts: { apiIntent: boolean; signatureAuthIntent: boolean },
-): RerankedChunk[] {
-  const allowApiReference = opts.apiIntent;
-  const pool = allowApiReference ? chunks : preferNonApiContext(chunks);
-  if (allowApiReference) return pool;
-  const nonApi = pool;
-  if (!opts.signatureAuthIntent) return nonApi;
-  const signatureContext = nonApi.filter(isSignatureAuthContext);
-  return signatureContext.length > 0 ? signatureContext : nonApi;
-}
-
-function isSignatureAuthContext(c: RerankedChunk): boolean {
-  const haystack = `${c.page_id} ${c.page_title} ${c.text}`.toLowerCase();
-  return (
-    /signature|sign field|md5|authentication|authenticate|auth|webhook/.test(haystack) ||
-    /签名|验签|认证|鉴权|字典序|升序/.test(haystack)
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -946,9 +1092,9 @@ function utilityAnswerFor(
 
   const assistantName = promptConfig?.assistantName?.trim() || 'Cregis AI Assistant';
   if (lang === 'zh') {
-    return `你好！我是 ${assistantName}，可以回答 Cregis 文档里的支付引擎、WaaS 钱包和 API 接入问题。你可以直接问具体接口、参数、签名、回调、错误码或接入步骤。`;
+    return `你好！我是 ${assistantName}，可以回答 Cregis 文档里的支付引擎、WaaS项目和 API 接入问题。你可以直接问具体接口、参数、签名、回调、错误码或接入步骤。`;
   }
-  return `Hi! I'm ${assistantName}. I can help with Cregis documentation for Payment Engine, WaaS Wallet, and API integration. Ask about endpoints, parameters, signatures, callbacks, error codes, or integration steps.`;
+  return `Hi! I'm ${assistantName}. I can help with Cregis documentation for Payment Engine, WaaS project, and API integration. Ask about endpoints, parameters, signatures, callbacks, error codes, or integration steps.`;
 }
 
 function normalizeUtilityQuestion(question: string): string {
@@ -958,185 +1104,6 @@ function normalizeUtilityQuestion(question: string): string {
     .replace(/[\s"'`~!@#$%^&*_\-+=|\\/.,;:?[{\]}，。！？、；：“”‘’（）【】《》<>]+/g, '');
 }
 
-const CITATION_MARKER_IN_ANSWER = /\[(cit_\d+)\]/g;
-
-function withMandatoryApiReferenceCitation(
-  rawAnswer: string,
-  chunkById: Map<string, RerankedChunk>,
-  opts: {
-    apiIntent: boolean;
-    apiReferenceHintTerms: string[];
-    answerLang: DocsLang;
-  },
-): string {
-  if (!opts.apiIntent) return rawAnswer;
-  const citedIds = new Set([...rawAnswer.matchAll(CITATION_MARKER_IN_ANSWER)].map((m) => m[1]!));
-  const matchingApiRefs = [...chunkById.entries()]
-    .filter(([, chunk]) => isApiReferenceChunk(chunk))
-    // allowGenericFallthrough: the path-mention substance guard below bounds
-    // over-injection, so a sibling endpoint the answer actually names stays
-    // eligible even under a special-token query.
-    .filter(([, chunk]) => apiReferenceMatchesHints(chunk, opts.apiReferenceHintTerms, true));
-  if (matchingApiRefs.length === 0) return rawAnswer;
-  let answer = rawAnswer;
-  const apiRefsByEndpoint = new Map<string, Array<[string, RerankedChunk]>>();
-  for (const ref of matchingApiRefs) {
-    const endpoint = extractEndpointForMandatoryCitation(ref[1]) ?? ref[1].page_id;
-    const key = normalizeEndpointKey(endpoint);
-    const refs = apiRefsByEndpoint.get(key) ?? [];
-    refs.push(ref);
-    apiRefsByEndpoint.set(key, refs);
-  }
-  for (const refs of apiRefsByEndpoint.values()) {
-    if (refs.some(([id]) => citedIds.has(id))) continue;
-    const [id, chunk] = refs[0]!;
-    const endpoint = extractEndpointForMandatoryCitation(chunk);
-    if (!rawAnswerHasApiAnswerSubstanceForEndpoint(answer, endpoint, opts.apiReferenceHintTerms)) {
-      continue;
-    }
-    const suffix = opts.answerLang === 'zh'
-      ? `\n\nAPI reference：${endpoint ? `\`${endpoint}\` ` : ''}[${id}]。`
-      : `\n\nAPI reference: ${endpoint ? `\`${endpoint}\` ` : ''}[${id}].`;
-    answer = answer.trimEnd() + suffix;
-    citedIds.add(id);
-  }
-  return withMandatoryApiParameterExamples(answer, matchingApiRefs, opts);
-}
-
-function withMandatoryApiParameterExamples(
-  rawAnswer: string,
-  apiRefs: Array<[string, RerankedChunk]>,
-  opts: { apiReferenceHintTerms: string[]; answerLang: DocsLang },
-): string {
-  if (
-    !opts.apiReferenceHintTerms.includes('payout') ||
-    !opts.apiReferenceHintTerms.includes('coins') ||
-    /\b195@195\b/.test(rawAnswer)
-  ) {
-    return rawAnswer;
-  }
-  const exampleRef = apiRefs.find(([, chunk]) => /\b195@195\b/.test(chunk.text));
-  if (!exampleRef) return rawAnswer;
-  const [id] = exampleRef;
-  const suffix = opts.answerLang === 'zh'
-    ? `\n\n参数示例：\`currency\` 使用 \`chain_id@token_id\` 格式，例如 \`195@195\` [${id}]。`
-    : `\n\nParameter example: \`currency\` uses the \`chain_id@token_id\` format, for example \`195@195\` [${id}].`;
-  return rawAnswer.trimEnd() + suffix;
-}
-
-function extractEndpointForMandatoryCitation(chunk: RerankedChunk): string | null {
-  const text = `${chunk.page_title}\n${chunk.text}`;
-  const match = text.match(/\b(GET|POST|PUT|PATCH|DELETE)\b\s+`?(\/api\/[A-Za-z0-9_./{}:-]+)/i);
-  if (!match) return null;
-  return `${match[1]!.toUpperCase()} ${match[2]!}`;
-}
-
-function normalizeEndpointKey(endpoint: string): string {
-  return endpoint.toLowerCase().replace(/\s+/g, ' ').trim();
-}
-
-function rawAnswerHasApiAnswerSubstanceForEndpoint(
-  rawAnswer: string,
-  endpoint: string | null,
-  terms: string[],
-): boolean {
-  const normalizedEndpoint = endpoint?.toLowerCase() ?? '';
-  if (normalizedEndpoint.includes('/api/v2/checkout')) {
-    return rawAnswerHasApiAnswerSubstance(rawAnswer, ['checkout']);
-  }
-  if (normalizedEndpoint.includes('/api/v2/order/info')) {
-    return rawAnswerHasApiAnswerSubstance(rawAnswer, ['order', 'info', 'status']) ||
-      /\/api\/v2\/order\/info\b|\bdata\.status\b|callback-first|query fallback/i.test(rawAnswer);
-  }
-  if (normalizedEndpoint.includes('/api/v1/sub_address_balance')) {
-    return rawAnswerHasApiAnswerSubstance(rawAnswer, ['sub_address_balance']);
-  }
-  if (normalizedEndpoint.includes('/api/v1/sub_address_withdrawal')) {
-    return rawAnswerHasApiAnswerSubstance(rawAnswer, ['sub_address_withdrawal']);
-  }
-  if (normalizedEndpoint.includes('/api/v1/coins')) {
-    return rawAnswerHasApiAnswerSubstance(rawAnswer, ['coins']);
-  }
-  if (/\/api\/v[0-9]+\/payout\b/.test(normalizedEndpoint)) {
-    return rawAnswerHasApiAnswerSubstance(rawAnswer, ['payout']);
-  }
-  // Generic fallthrough for endpoints without a tuned topic-substance branch
-  // (e.g. /api/v1/address/create, /api/v1/collection, /api/v1/trade/page).
-  // Require the answer to literally name this endpoint's path before injecting
-  // its reference citation. This fixes the "answer names the right endpoint
-  // but forgot to attach the reference page" case WITHOUT gaming the metric on
-  // answers that recommend a *different* endpoint (where the path is absent).
-  if (endpoint) {
-    return answerMentionsEndpointPath(rawAnswer, endpoint);
-  }
-  return rawAnswerHasApiAnswerSubstance(rawAnswer, terms);
-}
-
-/**
- * True when the answer text literally contains this endpoint's `/api/vN/...`
- * path. Used as the substance guard for endpoints without a tuned branch.
- * Exported for unit tests.
- */
-export function answerMentionsEndpointPath(rawAnswer: string, endpoint: string): boolean {
-  const match = endpoint.match(/\/api\/v[0-9]+\/[A-Za-z0-9_./{}:-]+/);
-  if (!match) return false;
-  // Trim trailing prose punctuation captured from a chunk (e.g. "…/create.").
-  const path = match[0].replace(/[.,:;)\]}]+$/, '').toLowerCase();
-  if (!path) return false;
-  const haystack = rawAnswer.toLowerCase();
-  // Boundary-aware containment: reject a prefix hit where the answer actually
-  // names a longer sibling endpoint (e.g. endpoint /api/v1/payout must NOT be
-  // satisfied by an answer that only mentions /api/v1/payout/query).
-  for (let from = 0; ; ) {
-    const idx = haystack.indexOf(path, from);
-    if (idx === -1) return false;
-    const next = haystack[idx + path.length];
-    if (next === undefined || !/[a-z0-9_/-]/.test(next)) return true;
-    from = idx + path.length;
-  }
-}
-
-function rawAnswerHasApiAnswerSubstance(rawAnswer: string, terms: string[]): boolean {
-  const text = rawAnswer.toLowerCase();
-  if (terms.includes('checkout')) {
-    return /\/api\/v2\/checkout\b/i.test(rawAnswer) ||
-      /\bcheckout_url\b/i.test(rawAnswer) ||
-      /\bcregis_id\b/i.test(rawAnswer) ||
-      /\bcallback_url\b/i.test(rawAnswer) ||
-      /\border_id\b/i.test(rawAnswer) ||
-      /\bpayer_id\b/i.test(rawAnswer) ||
-      /\bvalid_time\b/i.test(rawAnswer) ||
-      /\b(?:checkout|payment)[ -]?url\b/i.test(rawAnswer) ||
-      /\bpayment link\b/i.test(rawAnswer) ||
-      /\bhosted checkout\b/i.test(rawAnswer) ||
-      /创建订单|支付链接|付款链接|托管收银台|收银台/.test(rawAnswer) ||
-      /\border_currency\b/i.test(rawAnswer) ||
-      /\border_amount\b/i.test(rawAnswer) ||
-      /\busdt\b/i.test(rawAnswer) ||
-      /\bcrypto(?:currency)?\b/i.test(rawAnswer) ||
-      /\b(?:coinmarketcap|cmc)\b/i.test(rawAnswer);
-  }
-  if (terms.includes('order') && terms.includes('info') && terms.includes('status')) {
-    return (
-      /\bevent_type\b/i.test(rawAnswer) &&
-      (/\bdata\.status\b/i.test(rawAnswer) || /状态映射|当前状态/.test(rawAnswer))
-    );
-  }
-  if (terms.includes('payout')) {
-    return /\bpayout\b|\bwithdrawal\b|\bcid\b|提币|出款|提现/i.test(rawAnswer);
-  }
-  if (terms.includes('sub_address_balance')) {
-    return /\bsub_address_balance\b|\bsub[- ]address\b|\bbalance\b|\baddress\b|子地址|余额/i.test(rawAnswer);
-  }
-  if (terms.includes('sub_address_withdrawal')) {
-    return /\bsub_address_withdrawal\b|\bsub[- ]address\b|\bfrom_address\b/i.test(rawAnswer);
-  }
-  if (terms.includes('coins')) {
-    return /\bcoins\b|\bchain_id\b|\btoken_id\b|\bcurrency\b|币种|代币/i.test(rawAnswer);
-  }
-  return text.trim().length >= 80;
-}
-
 function isValidScopeId(db: DbHandle, scopeId: string): boolean {
   const row = db
     .prepare(`SELECT 1 AS hit FROM pages WHERE subtree_root = ? AND status = 'published' LIMIT 1`)
@@ -1144,410 +1111,23 @@ function isValidScopeId(db: DbHandle, scopeId: string): boolean {
   return !!row;
 }
 
-function pickContextChunks(
-  outcome: AggregateOutcome,
+function contextChunkCap(
   clientMax: number | undefined,
   entityTerms: string[] | undefined,
-  opts: {
-    apiIntent?: boolean;
-    apiReferenceCandidates?: RerankedChunk[];
-    apiReferenceHintTerms?: string[];
-    apiReferencePagePrefix?: string | null;
-    apiReferenceVersionPrefs?: string[];
-    projectSetupIntent?: boolean;
-    supplementalPageIds?: string[];
-    queryLang?: DocsLang;
-  } = {},
-): RerankedChunk[] {
-  // Multi-entity queries need more headroom in the prompt context — each
-  // named concept must have at least one supporting chunk reach the LLM,
-  // not just the candidate pool. Without this widening, entity injection
-  // got the right chunks into rerank top-15 but the default 8-chunk cap
-  // still left e.g. `checkpoints` outside the prompt. The lift is
-  // proportional to the entity count (3 entities → 15 chunks) and capped
-  // by HARD_MAX_CHUNKS so an unreasonable enumeration can't blow up cost.
+  hardMaxChunks: number,
+): number {
   const defaultCap =
     entityTerms && entityTerms.length >= 2
-      ? Math.min(HARD_MAX_CHUNKS, Math.max(DEFAULT_MAX_CHUNKS, entityTerms.length * 5))
+      ? Math.min(hardMaxChunks, Math.max(DEFAULT_MAX_CHUNKS, entityTerms.length * 5))
       : DEFAULT_MAX_CHUNKS;
-  const cap = Math.min(clientMax ?? defaultCap, HARD_MAX_CHUNKS);
-  let picked =
-    outcome.kind === 'translate-fallback'
-      ? outcome.pick.slice(0, cap)
-      : outcome.pick.slice(0, cap);
-
-  if (!opts.apiIntent) {
-    const nonApiPicked = picked.filter((c) => !isApiReferenceChunk(c));
-    if (nonApiPicked.length > 0) {
-      picked = nonApiPicked;
-    }
-  }
-
-  if (opts.projectSetupIntent) {
-    picked = preferProjectSetupContext(picked, opts.apiReferenceCandidates, opts.queryLang, cap);
-  }
-
-  if (opts.supplementalPageIds?.length && opts.apiReferenceCandidates?.length) {
-    picked = mergeSupplementalContextPages(
-      picked,
-      opts.apiReferenceCandidates,
-      opts.supplementalPageIds,
-      opts.queryLang,
-      cap,
-    );
-  }
-
-  if (opts.apiIntent && opts.apiReferenceCandidates?.length) {
-    const apiContextLimit = apiReferenceContextLimit(opts.apiReferenceHintTerms);
-    const allApiRefs = [...opts.apiReferenceCandidates]
-      .filter((c) => c.lang === opts.queryLang && isApiReferenceChunk(c))
-      .filter((c) => !opts.apiReferencePagePrefix || c.page_id.startsWith(opts.apiReferencePagePrefix));
-    const hasVersionPreferredApiRef = allApiRefs.some((c) =>
-      apiReferenceChunkMatchesVersion(c, opts.apiReferenceVersionPrefs),
-    );
-    if (hasVersionPreferredApiRef) {
-      picked = picked.filter(
-        (c) =>
-          !isApiReferenceChunk(c) ||
-          apiReferenceChunkMatchesVersion(c, opts.apiReferenceVersionPrefs),
-      );
-    }
-    picked = picked.filter(
-      (c) => !isApiReferenceChunk(c) || apiReferenceMatchesHints(c, opts.apiReferenceHintTerms),
-    );
-    const seen = new Set(picked.map((c) => c.chunk_id));
-    const apiRefs = allApiRefs
-      .filter(
-        (c) =>
-          !hasVersionPreferredApiRef ||
-          apiReferenceChunkMatchesVersion(c, opts.apiReferenceVersionPrefs),
-      )
-      .filter((c) => apiReferenceMatchesHints(c, opts.apiReferenceHintTerms))
-      .sort(
-        (a, b) =>
-          apiReferenceHintScore(b, opts.apiReferenceHintTerms) -
-            apiReferenceHintScore(a, opts.apiReferenceHintTerms) ||
-          b.final_score - a.final_score,
-      )
-      .filter(dedupeApiReferenceChunkByEndpoint())
-      .filter((c) => !seen.has(c.chunk_id))
-      .slice(0, apiContextLimit);
-    if (apiRefs.length > 0) {
-      const ordered = reorderApiReferenceContext(
-        [...apiRefs, ...picked].filter(
-          (c, idx, arr) => arr.findIndex((x) => x.chunk_id === c.chunk_id) === idx,
-        ),
-        opts,
-      );
-      picked = pruneCheckoutContextNoise(
-        limitApiReferenceContext(ordered, apiContextLimit),
-        opts,
-      ).slice(0, cap);
-    } else {
-      picked = pruneCheckoutContextNoise(
-        limitApiReferenceContext(
-          reorderApiReferenceContext(picked, opts),
-          apiContextLimit,
-        ),
-        opts,
-      ).slice(0, cap);
-    }
-  }
-
-  if (entityTerms && entityTerms.length >= 2) {
-    // Entity-coverage reorder: hoist the highest-ranked chunk matching each
-    // entity to the front of the picked list. LLMs disproportionately
-    // attend to early citation slots when assembling comparison-style
-    // answers — without this, `checkpoints` chunks ranked at cit_12 got
-    // ignored in favor of cit_1..cit_3 even when the entity-coverage
-    // prompt rule asked for full coverage. Codex round-9 follow-up.
-    const seen = new Set<number>();
-    const lead: RerankedChunk[] = [];
-    for (const term of entityTerms) {
-      const termLower = term.toLowerCase();
-      const candidate = picked.find(
-        (c) =>
-          !seen.has(c.chunk_id) &&
-          (c.page_id.toLowerCase().includes(termLower) ||
-            (c.page_title ?? '').toLowerCase().includes(termLower)),
-      );
-      if (candidate) {
-        lead.push(candidate);
-        seen.add(candidate.chunk_id);
-      }
-    }
-    if (lead.length > 0) {
-      const remaining = picked.filter((c) => !seen.has(c.chunk_id));
-      picked = [...lead, ...remaining];
-    }
-  }
-  if (opts.queryLang && outcome.kind !== 'translate-fallback') {
-    picked = dropCrossLanguageDuplicatePages(picked, opts.queryLang);
-  }
-  return picked;
+  const requested = clientMax !== undefined && Number.isFinite(clientMax)
+    ? Math.floor(clientMax)
+    : defaultCap;
+  return Math.min(hardMaxChunks, Math.max(1, requested));
 }
 
-function mergeSupplementalContextPages(
-  picked: RerankedChunk[],
-  candidates: RerankedChunk[],
-  pageIds: string[],
-  queryLang: DocsLang | undefined,
-  cap: number,
-): RerankedChunk[] {
-  const pageIdSet = new Set(pageIds);
-  const seen = new Set(picked.map((c) => c.chunk_id));
-  const supplemental = candidates
-    .filter((c) => (!queryLang || c.lang === queryLang) && !isApiReferenceChunk(c) && pageIdSet.has(c.page_id))
-    .filter((c) => !seen.has(c.chunk_id))
-    .slice(0, pageIdSet.size * 2);
-  if (supplemental.length === 0) return picked;
-  return [...supplemental, ...picked]
-    .filter((c, idx, arr) => arr.findIndex((x) => x.chunk_id === c.chunk_id) === idx)
-    .slice(0, cap);
-}
-
-function dropCrossLanguageDuplicatePages(chunks: RerankedChunk[], queryLang: DocsLang): RerankedChunk[] {
-  const sameLangPageIds = new Set(
-    chunks.filter((c) => c.lang === queryLang).map((c) => c.page_id),
-  );
-  if (sameLangPageIds.size === 0) return chunks;
-  return chunks.filter((c) => c.lang === queryLang || !sameLangPageIds.has(c.page_id));
-}
-
-function preferProjectSetupContext(
-  picked: RerankedChunk[],
-  candidates: RerankedChunk[] | undefined,
-  queryLang: DocsLang | undefined,
-  cap: number,
-): RerankedChunk[] {
-  const setupCandidates = (candidates ?? [])
-    .filter((c) => !queryLang || c.lang === queryLang)
-    .filter((c) => !isApiReferenceChunk(c))
-    .filter(isProjectSetupChunk)
-    .slice(0, 4);
-  const merged = [...setupCandidates, ...picked].filter(
-    (c, idx, arr) => arr.findIndex((x) => x.chunk_id === c.chunk_id) === idx,
-  );
-  const withoutQuickstart = merged.filter((c) => !isQuickstartChunk(c));
-  if (withoutQuickstart.some(isProjectSetupChunk)) {
-    return withoutQuickstart.slice(0, cap);
-  }
-  return merged.slice(0, cap);
-}
-
-function isProjectSetupChunk(c: RerankedChunk): boolean {
-  const haystack = `${c.page_id} ${c.page_title} ${c.text}`.toLowerCase();
-  return (
-    /\bsetup\b|\bintegration setup\b|\bintroduction\b|\boverview\b/.test(haystack) ||
-    /接入准备|集成准备|平台概览|概览/.test(haystack)
-  );
-}
-
-function isQuickstartChunk(c: RerankedChunk): boolean {
-  const haystack = `${c.page_id} ${c.page_title}`.toLowerCase();
-  return /quickstart|30[- ]?minute|30 分钟|30分鐘/.test(haystack);
-}
-
-function isPreferredApiReference(c: RerankedChunk, pagePrefix: string | null | undefined): boolean {
-  return isApiReferenceChunk(c) && (!pagePrefix || c.page_id.startsWith(pagePrefix));
-}
-
-function reorderApiReferenceContext(
-  chunks: RerankedChunk[],
-  opts: {
-    apiReferenceHintTerms?: string[];
-    apiReferencePagePrefix?: string | null;
-  },
-): RerankedChunk[] {
-  return chunks.sort(
-    (a, b) =>
-      Number(isPreferredApiReference(b, opts.apiReferencePagePrefix)) -
-        Number(isPreferredApiReference(a, opts.apiReferencePagePrefix)) ||
-      apiReferenceHintScore(b, opts.apiReferenceHintTerms) -
-        apiReferenceHintScore(a, opts.apiReferenceHintTerms) ||
-      b.final_score - a.final_score,
-  );
-}
-
-function apiReferenceHintScore(c: RerankedChunk, terms: string[] | undefined): number {
-  if (!terms?.length) return 0;
-  const haystack = `${c.page_id} ${c.page_title} ${c.text}`.toLowerCase();
-  let score = 0;
-  for (const term of terms) {
-    if (term && haystack.includes(term)) score += 1;
-  }
-  return score;
-}
-
-function dedupeApiReferenceChunkByEndpoint(): (chunk: RerankedChunk) => boolean {
-  const seen = new Set<string>();
-  return (chunk) => {
-    const key = normalizeEndpointKey(extractEndpointForMandatoryCitation(chunk) ?? chunk.page_id);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  };
-}
-
-/**
- * Whether an API-reference chunk is eligible for a hinted query.
- *
- * `allowGenericFallthrough` distinguishes the two call sites:
- * - Context selection (`pickContextChunks`, default `false`) keeps the original
- *   special-token EXCLUSIVITY: a checkout/payout/coins/… query only admits its
- *   matched pages. Falling through here would feed sibling endpoints into the
- *   prompt and can nudge the LLM to answer with the wrong endpoint.
- * - Citation injection (`withMandatoryApiReferenceCitation`, `true`) opts into a
- *   generic hint-overlap fallthrough so a genuinely-relevant sibling endpoint
- *   (e.g. /api/v1/address/create on a query that also carries a 'coins' hint)
- *   stays eligible. Over-injection there is bounded by the per-endpoint
- *   answer-path-mention substance guard (answerMentionsEndpointPath).
- */
-function apiReferenceMatchesHints(
-  c: RerankedChunk,
-  terms: string[] | undefined,
-  allowGenericFallthrough = false,
-): boolean {
-  if (!terms?.length) return true;
-  const haystack = `${c.page_id} ${c.page_title} ${c.text}`.toLowerCase();
-  const wantsCheckout = terms.includes('checkout');
-  const wantsOrderInfo = wantsOrderInfoApi(terms);
-  const wantsSubAddressWithdrawal = terms.includes('sub_address_withdrawal');
-  const wantsSubAddressBalance = terms.includes('sub_address_balance');
-  const wantsCoins = terms.includes('coins');
-  const wantsPayout = terms.includes('payout');
-  const wantsSpecial =
-    wantsCheckout ||
-    wantsOrderInfo ||
-    wantsSubAddressWithdrawal ||
-    wantsSubAddressBalance ||
-    wantsCoins ||
-    wantsPayout;
-  if (wantsSpecial) {
-    if (
-      (wantsCheckout && matchesCheckoutApi(haystack)) ||
-      (wantsOrderInfo && matchesOrderInfoApi(haystack)) ||
-      (wantsSubAddressWithdrawal && matchesSubAddressWithdrawalApi(haystack)) ||
-      (wantsSubAddressBalance && matchesSubAddressBalanceApi(haystack)) ||
-      (wantsCoins && matchesCoinsApi(haystack)) ||
-      (wantsPayout && matchesWalletPayoutApi(haystack))
-    ) {
-      return true;
-    }
-    if (!allowGenericFallthrough) return false;
-  }
-  return apiReferenceHintScore(c, terms) > 0;
-}
-
-function wantsOrderInfoApi(terms: string[]): boolean {
-  return (
-    (terms.includes('order') && terms.includes('info') &&
-      (terms.includes('status') || terms.includes('data.status'))) ||
-    terms.includes('/api/v2/order/info')
-  );
-}
-
-function matchesCheckoutApi(haystack: string): boolean {
-  return (
-    haystack.includes('/api/v2/checkout') ||
-    haystack.includes('api-v2-checkout') ||
-    haystack.includes('post-api-v2-checkout') ||
-    haystack.includes('create order') ||
-    haystack.includes('创建订单')
-  );
-}
-
-function matchesOrderInfoApi(haystack: string): boolean {
-  return (
-    haystack.includes('/order/info') ||
-    haystack.includes('/api/v2/order/info') ||
-    haystack.includes('api-v2-order-info') ||
-    haystack.includes('post-api-v2-order-info') ||
-    haystack.includes('order info') ||
-    haystack.includes('query order information') ||
-    haystack.includes('查询订单信息')
-  );
-}
-
-function matchesSubAddressWithdrawalApi(haystack: string): boolean {
-  return (
-    haystack.includes('sub_address_withdrawal') ||
-    haystack.includes('/api/v1/sub_address_withdrawal') ||
-    haystack.includes('sub-address withdrawal') ||
-    haystack.includes('子地址出款') ||
-    haystack.includes('发起子地址提币')
-  );
-}
-
-function matchesSubAddressBalanceApi(haystack: string): boolean {
-  return (
-    haystack.includes('sub_address_balance') ||
-    haystack.includes('/api/v1/sub_address_balance') ||
-    haystack.includes('sub-address balance') ||
-    haystack.includes('子地址余额')
-  );
-}
-
-function matchesCoinsApi(haystack: string): boolean {
-  return (
-    haystack.includes('/api/v1/coins') ||
-    haystack.includes('api-v1-coins') ||
-    haystack.includes('post-api-v1-coins') ||
-    haystack.includes('查询项目支持币种') ||
-    haystack.includes('supported project coins')
-  );
-}
-
-function matchesWalletPayoutApi(haystack: string): boolean {
-  return (
-    /\/api\/v[0-9]+\/payout\b/.test(haystack) ||
-    /api-v[0-9]+-payout\b/.test(haystack) ||
-    haystack.includes('create wallet payout') ||
-    haystack.includes('发起钱包提币')
-  );
-}
-
-function apiReferenceContextLimit(terms: string[] | undefined): number {
-  if (terms?.includes('checkout') && wantsOrderInfoApi(terms)) return 2;
-  if (terms?.includes('checkout')) return 1;
-  if (terms?.includes('sub_address_withdrawal')) {
-    return 1;
-  }
-  if (terms?.includes('coins') && terms.includes('payout')) return 2;
-  if (terms?.includes('sub_address_balance')) return 1;
-  if (terms?.includes('coins')) return 1;
-  return terms?.includes('payout') ? 2 : 3;
-}
-
-function limitApiReferenceContext(chunks: RerankedChunk[], maxApiRefs: number): RerankedChunk[] {
-  const out: RerankedChunk[] = [];
-  let apiRefs = 0;
-  for (const chunk of chunks) {
-    if (isApiReferenceChunk(chunk)) {
-      if (apiRefs >= maxApiRefs) continue;
-      apiRefs += 1;
-    }
-    out.push(chunk);
-  }
-  return out;
-}
-
-function pruneCheckoutContextNoise(
-  chunks: RerankedChunk[],
-  opts: {
-    apiReferenceHintTerms?: string[];
-  },
-): RerankedChunk[] {
-  if (!opts.apiReferenceHintTerms?.includes('checkout')) return chunks;
-  const allowedPages = new Set([
-    'supported-currencies',
-    'payment-engine-quickstart-30min',
-    'pe-business-flow',
-  ]);
-  const pruned = chunks.filter(
-    (chunk) => isApiReferenceChunk(chunk) || allowedPages.has(chunk.page_id),
-  );
-  return pruned.length > 0 ? pruned : chunks;
+function retrievalConfigFor(deps: AskDeps): RetrievalConfig {
+  return deps.retrievalConfig ?? DEFAULT_RETRIEVAL_CONFIG;
 }
 
 function translationNoticeFor(lang: DocsLang): string {
@@ -1567,13 +1147,12 @@ function translationNoticeFor(lang: DocsLang): string {
  *
  * Once split, leading conjunctions are stripped, the first significant word
  * of each segment is taken as the entity term, and stop-words are removed.
- * The result is undefined (injection skipped) unless ≥ 2 distinct terms
- * survive — a single-entity question shouldn't trigger entity injection.
+ * The result is undefined unless ≥ 2 distinct terms survive. The terms are
+ * used only to size context and guide the prompt; they never change rank.
  *
  * Codex round-8 surfaced two miss cases this widening covers:
- *   - "sessions、checkpoints、memory 有什么区别？" — Chinese 、 wasn't
- *     recognized; entity injection never fired and `checkpoints` dropped
- *     out of the candidate pool.
+ *   - "sessions、checkpoints、memory 有什么区别？" — Chinese 、 was not
+ *     recognized, so the prompt lost one of the comparison subjects.
  *   - "sessions, checkpoints and memory" — only one `,`, so the previous
  *     ≥2-comma gate rejected it.
  */
@@ -1581,9 +1160,8 @@ const ENTITY_SEGMENT_STRIP = /^\s*(and|or|nor|vs\.?|versus)\s+/i;
 const ENTITY_SPLIT_RE = /,|、|\s+(?:and|or|nor|vs\.?|versus)\s+/gi;
 // Comparative-intent hint: any of these words anywhere in the query means
 // the user is explicitly comparing entities, so a single separator is enough
-// to trigger entity injection. Without this gate relaxation, 2-entity
-// compare queries ("Compare sessions and checkpoints") had only 1 separator
-// and skipped injection entirely (codex round-9 finding).
+// to retain both subjects in prompt guidance. A two-entity comparison has only
+// one separator, unlike a longer comma-separated list.
 const ENTITY_COMPARE_HINT_RE = /\b(compare|compares|comparison|vs\.?|versus)\b/i;
 const ENTITY_STOP_WORDS = new Set([
   'the', 'and', 'for', 'with', 'from', 'into', 'your', 'this', 'that',
@@ -1624,8 +1202,7 @@ export function extractEntityTerms(question: string): string[] | undefined {
       }
     }
   }
-  // Deduplicate (repeating the same term in the prompt would inflate
-  // injection cost without adding signal).
+  // Deduplicate before adding the terms to prompt guidance.
   const unique = [...new Set(terms)];
   if (unique.length < 2) return undefined;
   return unique;

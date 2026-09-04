@@ -18,7 +18,7 @@ import {
   type NavigationDoc,
   type PageDoc,
 } from './types.ts';
-import { loadOpenApiPages } from './openapi.ts';
+import { attachOpenApiPagesToNavigation, loadOpenApiPages } from './openapi.ts';
 
 export type LoadedProject = {
   projectRoot: string;
@@ -116,6 +116,7 @@ export async function loadProject(projectRoot: string): Promise<LoadedProject> {
     }
     if (langMap.size > 0) pagesByLangAndId.set(lang, langMap);
   }
+  attachOpenApiPagesToNavigation(navigationsByLang, apiPagesByLang, warnings);
 
   const defaultLanguage = await readDefaultLanguage(root, warnings);
 

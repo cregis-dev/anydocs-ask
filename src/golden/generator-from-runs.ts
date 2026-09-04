@@ -1,17 +1,17 @@
 /**
  * `golden generate --from runs` — ARCH §16.5.3.
  *
- * Picks high-confidence successful runs as Golden regression candidates:
+ * Picks grounded successful runs as Golden regression candidates:
  *
- *   confidence ≥ 0.7
+ *   citations.length > 0
  *   AND no_re_ask_within_30s     (same-session edit-distance proxy)
  *   AND length(answer.md) ≤ 600
  *   AND answer.kind === 'answer' (not clarify/error)
  *
  * Then:
- *   1. Cluster by normalized query — keep the highest-confidence rep per
+ *   1. Cluster by normalized query — keep the most-grounded rep per
  *      cluster (no point seeding 5 near-duplicate candidates).
- *   2. Sort by confidence DESC.
+ *   2. Sort by timestamp for deterministic output.
  *   3. Apply --limit (default 50).
  *   4. Skip queries already covered by the project's approved cases.jsonl
  *      (Levenshtein ≤ 5 on normalized form).
@@ -32,8 +32,6 @@ import type { RunRecord } from '../runs/types.ts';
 import type { GoldenCase, GoldenCaseCandidate } from './types.ts';
 
 export type FromRunsOptions = {
-  /** Hard floor on run.answer.confidence. ARCH §16.5.3 fixes 0.7. */
-  minConfidence?: number;
   /** Cap on run.answer.md.length in chars. ARCH §16.5.3 fixes 600. */
   maxAnswerChars?: number;
   /** Re-ask exclusion window in ms; runs followed by a near-duplicate
@@ -45,7 +43,6 @@ export type FromRunsOptions = {
   existingCases?: GoldenCase[];
 };
 
-const DEFAULT_MIN_CONF = 0.7;
 const DEFAULT_MAX_ANSWER = 600;
 const DEFAULT_REASK_MS = 30_000;
 const DEFAULT_LIMIT = 50;
@@ -56,8 +53,8 @@ export type FromRunsStats = {
   total: number;
   /** Dropped because kind!=='answer'. */
   droppedNonAnswer: number;
-  /** Dropped because confidence < threshold. */
-  droppedLowConf: number;
+  /** Dropped because the answer had no validated citations. */
+  droppedNoCitations: number;
   /** Dropped because answer.md too long. */
   droppedLongAnswer: number;
   /** Dropped because same-session re-ask within window. */
@@ -74,7 +71,6 @@ export type FromRunsResult = {
 };
 
 export function generateFromRuns(runs: RunRecord[], opts: FromRunsOptions = {}): FromRunsResult {
-  const minConf = opts.minConfidence ?? DEFAULT_MIN_CONF;
   const maxAnswer = opts.maxAnswerChars ?? DEFAULT_MAX_ANSWER;
   const reaskMs = opts.reaskWindowMs ?? DEFAULT_REASK_MS;
   const limit = opts.limit ?? DEFAULT_LIMIT;
@@ -83,7 +79,7 @@ export function generateFromRuns(runs: RunRecord[], opts: FromRunsOptions = {}):
   const stats: FromRunsStats = {
     total: runs.length,
     droppedNonAnswer: 0,
-    droppedLowConf: 0,
+    droppedNoCitations: 0,
     droppedLongAnswer: 0,
     droppedReask: 0,
     droppedDuplicate: 0,
@@ -100,8 +96,8 @@ export function generateFromRuns(runs: RunRecord[], opts: FromRunsOptions = {}):
       stats.droppedNonAnswer++;
       continue;
     }
-    if (r.answer.confidence < minConf) {
-      stats.droppedLowConf++;
+    if (r.answer.citations.length === 0) {
+      stats.droppedNoCitations++;
       continue;
     }
     if ((r.answer.md?.length ?? 0) > maxAnswer) {
@@ -122,22 +118,17 @@ export function generateFromRuns(runs: RunRecord[], opts: FromRunsOptions = {}):
   const clusters = clusterByQuery(survivors, { queryOf: (r) => r.query });
   stats.clusters = clusters.length;
 
-  // One rep per cluster: the run with the highest confidence (tie-break by
-  // earliest ts so the result is stable across re-runs over the same data).
+  // One rep per cluster: prefer the answer with more validated citations,
+  // then the earliest timestamp for deterministic output.
   const reps: RunRecord[] = clusters.map((c) =>
     [...c.items].sort((a, b) => {
-      const dc = b.answer.confidence - a.answer.confidence;
-      if (dc !== 0) return dc;
+      const citationDelta = b.answer.citations.length - a.answer.citations.length;
+      if (citationDelta !== 0) return citationDelta;
       return Date.parse(a.ts) - Date.parse(b.ts);
     })[0]!
   );
 
-  // Sort all reps by confidence DESC then ts ASC for limit cut.
-  reps.sort((a, b) => {
-    const dc = b.answer.confidence - a.answer.confidence;
-    if (dc !== 0) return dc;
-    return Date.parse(a.ts) - Date.parse(b.ts);
-  });
+  reps.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
 
   const existingNorms = existing.map((e) => normalize(e.query));
   const candidates: GoldenCaseCandidate[] = [];

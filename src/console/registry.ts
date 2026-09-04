@@ -73,6 +73,16 @@ export type StartResult =
   | { ok: true; port: number; reused: boolean }
   | { ok: false; error: string };
 
+export interface ConsoleProcessRegistry {
+  start(name: string): Promise<StartResult>;
+  stop(name: string): boolean;
+  touch(name: string): void;
+  getPort(name: string): number | null;
+  list(): RegisteredProcess[];
+  reapIdle(): string[];
+  shutdownAll(): string[];
+}
+
 type Entry = {
   name: string;
   port: number;
@@ -82,7 +92,7 @@ type Entry = {
   exited: boolean;
 };
 
-export class ProcessRegistry {
+export class ProcessRegistry implements ConsoleProcessRegistry {
   private byName = new Map<string, Entry>();
   private now: () => number;
   private warn: (msg: string) => void;
@@ -271,5 +281,60 @@ export class ProcessRegistry {
       if (!used.has(p)) return p;
     }
     return null;
+  }
+}
+
+/**
+ * Registry facade for a Console sidecar attached to an already-running Ask
+ * server in the same network namespace. It never starts or stops the service;
+ * lifecycle remains owned by Docker/systemd.
+ */
+export class AttachedProcessRegistry implements ConsoleProcessRegistry {
+  private readonly startedAt = Date.now();
+  private lastUsedAt = this.startedAt;
+  private readonly name: string;
+  private readonly port: number;
+
+  constructor(name: string, port: number) {
+    this.name = name;
+    this.port = port;
+  }
+
+  async start(name: string): Promise<StartResult> {
+    if (name !== this.name) return { ok: false, error: `unknown attached project '${name}'` };
+    this.touch(name);
+    return { ok: true, port: this.port, reused: true };
+  }
+
+  stop(name: string): boolean {
+    void name;
+    return false;
+  }
+
+  touch(name: string): void {
+    if (name === this.name) this.lastUsedAt = Date.now();
+  }
+
+  getPort(name: string): number | null {
+    return name === this.name ? this.port : null;
+  }
+
+  list(): RegisteredProcess[] {
+    return [{
+      name: this.name,
+      pid: process.pid,
+      port: this.port,
+      startedAt: this.startedAt,
+      lastUsedAt: this.lastUsedAt,
+      exited: false,
+    }];
+  }
+
+  reapIdle(): string[] {
+    return [];
+  }
+
+  shutdownAll(): string[] {
+    return [];
   }
 }

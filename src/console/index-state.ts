@@ -29,8 +29,7 @@ export type IndexPageInfo = {
   /** True when nav references this page but the page file is missing. */
   missingFile?: true;
   /** Reverse mark (RFC 0002 T4): how often this page contributed to an
-   *  answer in the past N days + the median confidence across those
-   *  hits. Absent when no runs touched the page, OR when count is below
+   *  answer in the past N days. Absent when no runs touched the page, OR when count is below
    *  the noise threshold (kept undefined so the renderer can skip without
    *  hard-coding the threshold twice). */
   askStats?: AskUsageEntry;
@@ -41,9 +40,6 @@ export type IndexPageInfo = {
 export type AskUsageEntry = {
   /** Number of distinct runs whose `retrieval.fused` cited this page. */
   count: number;
-  /** Median of those runs' `answer.confidence`. null when every run had
-   *  null confidence (rare — usually only on errors). */
-  medianConfidence: number | null;
 };
 
 export type AskUsageStats = {
@@ -58,9 +54,6 @@ export type AskUsageStats = {
 /** RFC 0002 §5.3 + decision Q4: ≥ 3 hits before we show a mark. Below
  *  that the signal is too noisy to gripe at the author. */
 export const ASK_STATS_MIN_COUNT = 3;
-/** RFC 0002 §5.3: confidence median below this means "warn" tinting. */
-export const ASK_STATS_LOW_CONFIDENCE = 0.5;
-
 export type IndexLangSummary = {
   lang: DocsLang;
   pages: IndexPageInfo[];
@@ -237,9 +230,6 @@ export async function loadIndexSnapshot(
  * Walk runs.jsonl in [now-days, now) and bucket "which pages did each ask
  * surface in retrieval.fused?". One ask hitting the same page across
  * multiple fused chunks still counts as 1 hit (deduped per request). We
- * track confidence per hitting run so the renderer can show median-style
- * tinting per RFC 0002 §5.3.
- *
  * The scan is read-on-render — same cost class as Traffic / Feedback —
  * so we don't cache between requests. Pages below ASK_STATS_MIN_COUNT
  * are dropped to keep the renderer's branch logic simple.
@@ -247,7 +237,7 @@ export async function loadIndexSnapshot(
 export function loadAskUsageStats(stateRoot: string, days: number): AskUsageStats {
   const safeDays = Math.max(1, days);
   const sinceMs = Date.now() - safeDays * 86_400_000;
-  const acc: Map<string, { count: number; confs: number[] }> = new Map();
+  const acc = new Map<string, number>();
   for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
     if (!isRunRecord(line)) continue;
     const rec = line;
@@ -259,36 +249,21 @@ export function loadAskUsageStats(stateRoot: string, days: number): AskUsageStat
       seenPages.add(f.page);
     }
     if (seenPages.size === 0) continue;
-    const conf = typeof rec.answer?.confidence === 'number' ? rec.answer.confidence : null;
     for (const pageId of seenPages) {
-      const bucket = acc.get(pageId) ?? { count: 0, confs: [] };
-      bucket.count++;
-      if (conf !== null) bucket.confs.push(conf);
-      acc.set(pageId, bucket);
+      acc.set(pageId, (acc.get(pageId) ?? 0) + 1);
     }
   }
 
   const byPageId: Map<string, AskUsageEntry> = new Map();
-  for (const [pageId, bucket] of acc) {
-    if (bucket.count < ASK_STATS_MIN_COUNT) continue;
-    byPageId.set(pageId, {
-      count: bucket.count,
-      medianConfidence: bucket.confs.length > 0 ? median(bucket.confs) : null,
-    });
+  for (const [pageId, count] of acc) {
+    if (count < ASK_STATS_MIN_COUNT) continue;
+    byPageId.set(pageId, { count });
   }
   return {
     days: safeDays,
     sinceISO: new Date(sinceMs).toISOString().slice(0, 10),
     byPageId,
   };
-}
-
-function median(xs: number[]): number {
-  const sorted = [...xs].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0
-    ? (sorted[mid - 1]! + sorted[mid]!) / 2
-    : sorted[mid]!;
 }
 
 function walkNav(
@@ -300,7 +275,7 @@ function walkNav(
   for (const it of items) {
     if (!it || typeof it !== 'object') continue;
     const node = it as { type?: string; title?: string; pageId?: string; children?: unknown };
-    if (node.type === 'section') {
+    if (node.type === 'section' || node.type === 'folder') {
       walkNav(node.children, [...trail, node.title ?? ''], visit);
     } else if (node.type === 'page' && typeof node.pageId === 'string') {
       visit(node.pageId, trail);

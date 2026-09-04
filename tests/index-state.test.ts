@@ -4,7 +4,7 @@
  * Verifies the three boundaries that drive the §5.3 chip semantics:
  *   • dedupe per (run, page) so multi-chunk hits don't inflate the count;
  *   • drop pages below ASK_STATS_MIN_COUNT (noise floor);
- *   • median confidence math + null-confidence handling.
+ *   • count only actual Ask runs within the configured time window.
  */
 
 import { test } from 'node:test';
@@ -37,7 +37,7 @@ async function writeRuns(stateRoot: string, lines: Array<Record<string, unknown>
 function run(
   answerId: string,
   pages: string[],
-  opts: { confidence?: number | null; tsOffsetMs?: number } = {},
+  opts: { tsOffsetMs?: number } = {},
 ): Record<string, unknown> {
   const ts = new Date(Date.now() - (opts.tsOffsetMs ?? 0)).toISOString();
   return {
@@ -57,7 +57,6 @@ function run(
         vec_rank: i + 1,
         bm25_rank: i + 1,
         nav_index: null,
-        nav_index_boost: 0,
       })),
       subtree_ask_triggered: false,
     },
@@ -66,7 +65,6 @@ function run(
       answer_id: answerId,
       md: 'a',
       citations: [],
-      confidence: 'confidence' in opts ? opts.confidence : 0.7,
       latency_ms: 100,
       tokens_in: null,
       tokens_out: null,
@@ -110,41 +108,6 @@ test('loadAskUsageStats: dedupes pages within a single run (multi-chunk hits = 1
     ]);
     const stats = loadAskUsageStats(stateRoot, 7);
     assert.equal(stats.byPageId.get('pageX')?.count, 3);
-  } finally {
-    await cleanup();
-  }
-});
-
-test('loadAskUsageStats: median confidence is robust to nulls', async () => {
-  const { stateRoot, cleanup } = await withTmpStateRoot();
-  try {
-    // Three runs hitting pageY: confidences 0.2, 0.8, null.
-    // Median should be of the non-null values → median(0.2, 0.8) = 0.5.
-    await writeRuns(stateRoot, [
-      run('a1', ['pageY'], { confidence: 0.2 }),
-      run('a2', ['pageY'], { confidence: 0.8 }),
-      run('a3', ['pageY'], { confidence: null }),
-    ]);
-    const entry = loadAskUsageStats(stateRoot, 7).byPageId.get('pageY');
-    assert.ok(entry);
-    assert.equal(entry!.count, 3);
-    assert.equal(entry!.medianConfidence, 0.5);
-  } finally {
-    await cleanup();
-  }
-});
-
-test('loadAskUsageStats: medianConfidence is null when every hit had null confidence', async () => {
-  const { stateRoot, cleanup } = await withTmpStateRoot();
-  try {
-    await writeRuns(stateRoot, [
-      run('a1', ['pageZ'], { confidence: null }),
-      run('a2', ['pageZ'], { confidence: null }),
-      run('a3', ['pageZ'], { confidence: null }),
-    ]);
-    const entry = loadAskUsageStats(stateRoot, 7).byPageId.get('pageZ');
-    assert.equal(entry!.count, 3);
-    assert.equal(entry!.medianConfidence, null);
   } finally {
     await cleanup();
   }
