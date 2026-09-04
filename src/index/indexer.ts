@@ -238,6 +238,7 @@ export class Indexer {
         deleteVec.run(typeof chunk_id === 'bigint' ? chunk_id : BigInt(chunk_id));
       }
       this.db.prepare('DELETE FROM chunks').run();
+      this.db.prepare('DELETE FROM chunk_parents').run();
     })();
   }
 

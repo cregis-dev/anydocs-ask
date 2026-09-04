@@ -27,11 +27,20 @@ import type {
   IndexBootstrap,
   IndexedChunk,
   IndexedPageChunks,
+  IndexedParent,
   IndexLanguage,
   IndexPage,
 } from './types';
 
 type Props = { initial: IndexBootstrap };
+type IndexSelection =
+  | { kind: 'parent'; key: string }
+  | { kind: 'chunk'; id: number };
+type ParentGroup = {
+  key: string;
+  parent: IndexedParent | null;
+  children: IndexedChunk[];
+};
 
 export function IndexExplorer({ initial }: Props) {
   const firstLang = initial.langs[0]?.lang ?? '';
@@ -45,7 +54,8 @@ export function IndexExplorer({ initial }: Props) {
       .find((page) => page.id === focusPageId && !page.missingFile);
     return preferred ? pageKey(preferred) : firstSelectableKey(initial.langs[0]);
   });
-  const [selectedChunkId, setSelectedChunkId] = useState<number | null>(null);
+  const [selection, setSelection] = useState<IndexSelection | null>(null);
+  const [expandedParents, setExpandedParents] = useState<Set<string>>(() => new Set());
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
 
   const langData = initial.langs.find((entry) => entry.lang === language) ?? initial.langs[0];
@@ -91,24 +101,32 @@ export function IndexExplorer({ initial }: Props) {
   });
 
   const chunks = chunksQuery.data?.chunks ?? [];
+  const parentGroups = useMemo(() => buildParentGroups(chunksQuery.data), [chunksQuery.data]);
   useEffect(() => {
-    if (chunks.length === 0) {
-      setSelectedChunkId(null);
+    if (parentGroups.length === 0) {
+      setSelection(null);
       return;
     }
-    if (!chunks.some((chunk) => chunk.chunk_id === selectedChunkId)) {
-      setSelectedChunkId(chunks[0]!.chunk_id);
+    const valid = selection?.kind === 'parent'
+      ? parentGroups.some((group) => group.key === selection.key)
+      : selection?.kind === 'chunk'
+        ? chunks.some((chunk) => chunk.chunk_id === selection.id)
+        : false;
+    if (!valid) {
+      setSelection({ kind: 'parent', key: parentGroups[0]!.key });
     }
-  }, [chunks, selectedChunkId]);
+  }, [chunks, parentGroups, selection]);
 
-  const visibleChunks = useMemo(() => {
-    const query = chunkFilter.trim().toLowerCase();
-    if (!query) return chunks;
-    return chunks.filter((chunk) =>
-      `${chunk.in_page_path ?? ''} ${chunk.text} ${chunk.content_hash}`.toLowerCase().includes(query),
-    );
-  }, [chunkFilter, chunks]);
-  const selectedChunk = chunks.find((chunk) => chunk.chunk_id === selectedChunkId) ?? null;
+  const visibleParentGroups = useMemo(
+    () => filterParentGroups(parentGroups, chunkFilter),
+    [chunkFilter, parentGroups],
+  );
+  const selectedGroup = selection?.kind === 'parent'
+    ? parentGroups.find((group) => group.key === selection.key) ?? null
+    : null;
+  const selectedChunk = selection?.kind === 'chunk'
+    ? chunks.find((chunk) => chunk.chunk_id === selection.id) ?? null
+    : null;
 
   const reindex = useMutation({
     mutationFn: () => rebuildIndex(initial.projectName),
@@ -174,7 +192,8 @@ export function IndexExplorer({ initial }: Props) {
             onSelect={(page) => {
               setSelectedPageKey(pageKey(page));
               setChunkFilter('');
-              setSelectedChunkId(null);
+              setSelection(null);
+              setExpandedParents(new Set());
             }}
           />
 
@@ -184,18 +203,31 @@ export function IndexExplorer({ initial }: Props) {
             loading={chunksQuery.isLoading}
             error={chunksQuery.error}
             serviceLive={initial.childLive}
-            chunks={visibleChunks}
+            groups={visibleParentGroups}
+            totalParents={parentGroups.length}
+            totalChildren={chunks.length}
             filter={chunkFilter}
             setFilter={setChunkFilter}
-            selectedChunkId={selectedChunkId}
-            onSelect={(chunk) => {
-              setSelectedChunkId(chunk.chunk_id);
+            selection={selection}
+            expandedParents={expandedParents}
+            onToggleParent={(key) => setExpandedParents((current) => {
+              const next = new Set(current);
+              if (next.has(key)) next.delete(key);
+              else next.add(key);
+              return next;
+            })}
+            onSelectParent={(group) => {
+              setSelection({ kind: 'parent', key: group.key });
+              if (window.matchMedia('(max-width: 1180px)').matches) setMobileDetailOpen(true);
+            }}
+            onSelectChunk={(chunk) => {
+              setSelection({ kind: 'chunk', id: chunk.chunk_id });
               if (window.matchMedia('(max-width: 1180px)').matches) setMobileDetailOpen(true);
             }}
           />
 
-          <aside className="ix-inspector" aria-label="Chunk metadata">
-            <ChunkInspector data={chunksQuery.data} chunk={selectedChunk} />
+          <aside className="ix-inspector" aria-label="Index node metadata">
+            <IndexInspector data={chunksQuery.data} parentGroup={selectedGroup} chunk={selectedChunk} />
           </aside>
         </div>
       </section>
@@ -204,9 +236,9 @@ export function IndexExplorer({ initial }: Props) {
         <Dialog.Portal>
           <Dialog.Overlay className="ix-dialog-overlay" />
           <Dialog.Content className="ix-dialog-content" aria-describedby={undefined}>
-            <Dialog.Title className="ix-dialog-title">Chunk detail</Dialog.Title>
-            <Dialog.Close className="ix-icon-button" aria-label="Close chunk detail"><X size={18} /></Dialog.Close>
-            <ChunkInspector data={chunksQuery.data} chunk={selectedChunk} />
+            <Dialog.Title className="ix-dialog-title">Index node detail</Dialog.Title>
+            <Dialog.Close className="ix-icon-button" aria-label="Close index node detail"><X size={18} /></Dialog.Close>
+            <IndexInspector data={chunksQuery.data} parentGroup={selectedGroup} chunk={selectedChunk} />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
@@ -296,13 +328,19 @@ function ChunkList(props: {
   loading: boolean;
   error: Error | null;
   serviceLive: boolean;
-  chunks: IndexedChunk[];
+  groups: ParentGroup[];
+  totalParents: number;
+  totalChildren: number;
   filter: string;
   setFilter: (value: string) => void;
-  selectedChunkId: number | null;
-  onSelect: (chunk: IndexedChunk) => void;
+  selection: IndexSelection | null;
+  expandedParents: Set<string>;
+  onToggleParent: (key: string) => void;
+  onSelectParent: (group: ParentGroup) => void;
+  onSelectChunk: (chunk: IndexedChunk) => void;
 }) {
   if (!props.page) return <main className="ix-chunk-pane"><PaneEmpty>No indexed pages</PaneEmpty></main>;
+  const filtering = Boolean(props.filter.trim());
 
   return (
     <main className="ix-chunk-pane">
@@ -312,45 +350,170 @@ function ChunkList(props: {
           <strong>{props.page.title}</strong>
           <code>{props.page.id}</code>
         </div>
-        <span className="ix-count">{props.data?.chunks.length ?? '—'} chunks</span>
+        <span className="ix-count">{props.totalParents} parents · {props.totalChildren} children</span>
       </div>
-      <SearchField value={props.filter} onChange={props.setFilter} placeholder="Filter chunks" />
+      <SearchField value={props.filter} onChange={props.setFilter} placeholder="Filter parents or children" />
       <div className="ix-chunk-scroll">
         {!props.serviceLive && <PaneEmpty>Start the project to inspect its index</PaneEmpty>}
         {props.loading && <LoadingRows />}
         {props.error && <PaneEmpty tone="error">{props.error.message}</PaneEmpty>}
-        {!props.loading && !props.error && props.serviceLive && props.chunks.map((chunk) => (
-          <button
-            type="button"
-            className="ix-chunk-row"
-            data-selected={chunk.chunk_id === props.selectedChunkId}
-            key={chunk.chunk_id}
-            onClick={() => props.onSelect(chunk)}
-          >
-            <span className="ix-chunk-no">{String(chunk.ordinal).padStart(2, '0')}</span>
-            <span className="ix-chunk-body">
-              <span className="ix-chunk-path">
-                {chunk.is_code ? <Code2 size={13} /> : <Braces size={13} />}
-                {chunk.in_page_path ?? 'page body'}
-              </span>
-              <span className="ix-chunk-preview">{preview(chunk.text)}</span>
-              <span className="ix-chunk-meta">
-                <span>{chunk.token_count} tokens</span>
-                <span>{chunk.text.length} chars</span>
-                <span className={chunk.embedded ? 'is-ok' : 'is-warn'}>
-                  {chunk.embedded ? <CheckCircle2 size={12} /> : <CircleAlert size={12} />}
-                  {chunk.embedded ? 'embedded' : 'missing vector'}
-                </span>
-              </span>
-            </span>
-            <ChevronRight className="ix-row-arrow" size={15} />
-          </button>
-        ))}
-        {!props.loading && !props.error && props.serviceLive && props.data && props.chunks.length === 0 && (
-          <PaneEmpty>No matching chunks</PaneEmpty>
+        {!props.loading && !props.error && props.serviceLive && props.groups.map((group, groupIndex) => {
+          const expanded = filtering || props.expandedParents.has(group.key);
+          const selected = props.selection?.kind === 'parent' && props.selection.key === group.key;
+          return (
+            <section className="ix-parent-group" data-expanded={expanded} key={group.key}>
+              <div className="ix-parent-row" data-selected={selected}>
+                <button
+                  className="ix-parent-toggle"
+                  type="button"
+                  aria-label={`${expanded ? 'Collapse' : 'Expand'} ${parentLabel(group)}`}
+                  aria-expanded={expanded}
+                  onClick={() => props.onToggleParent(group.key)}
+                >
+                  <ChevronRight size={15} />
+                </button>
+                <button className="ix-parent-main" type="button" onClick={() => props.onSelectParent(group)}>
+                  <span className="ix-parent-index">P{String(groupIndex + 1).padStart(2, '0')}</span>
+                  <span className="ix-parent-copy">
+                    <strong>{parentLabel(group)}</strong>
+                    <small>{parentPath(group)}</small>
+                  </span>
+                  <span className="ix-parent-stats">
+                    <span>{group.parent?.token_count ?? '—'} tok</span>
+                    <span>{group.children.length} child</span>
+                  </span>
+                </button>
+              </div>
+              {expanded && (
+                <div className="ix-child-list">
+                  {group.children.map((chunk) => (
+                    <button
+                      type="button"
+                      className="ix-child-row"
+                      data-selected={props.selection?.kind === 'chunk' && props.selection.id === chunk.chunk_id}
+                      key={chunk.chunk_id}
+                      onClick={() => props.onSelectChunk(chunk)}
+                    >
+                      <span className="ix-tree-rail" aria-hidden="true" />
+                      <span className="ix-chunk-no">C{String(chunk.ordinal).padStart(2, '0')}</span>
+                      <span className="ix-chunk-body">
+                        <span className="ix-chunk-path">
+                          {chunk.is_code ? <Code2 size={13} /> : <Braces size={13} />}
+                          {chunk.in_page_path ?? 'page body'}
+                        </span>
+                        <span className="ix-chunk-preview">{preview(chunk.text)}</span>
+                        <span className="ix-chunk-meta">
+                          <span>{chunk.token_count} tokens</span>
+                          <span>{chunk.chunk_kind}</span>
+                          <span className={chunk.embedded ? 'is-ok' : 'is-warn'}>
+                            {chunk.embedded ? <CheckCircle2 size={12} /> : <CircleAlert size={12} />}
+                            {chunk.embedded ? 'embedded' : 'missing vector'}
+                          </span>
+                        </span>
+                      </span>
+                      <ChevronRight className="ix-row-arrow" size={15} />
+                    </button>
+                  ))}
+                  {group.children.length === 0 && <div className="ix-empty-children">No child chunks</div>}
+                </div>
+              )}
+            </section>
+          );
+        })}
+        {!props.loading && !props.error && props.serviceLive && props.data && props.groups.length === 0 && (
+          <PaneEmpty>No matching parents or children</PaneEmpty>
         )}
       </div>
     </main>
+  );
+}
+
+function IndexInspector(props: {
+  data?: IndexedPageChunks;
+  parentGroup: ParentGroup | null;
+  chunk: IndexedChunk | null;
+}) {
+  if (props.parentGroup) return <ParentInspector data={props.data} group={props.parentGroup} />;
+  return <ChunkInspector data={props.data} chunk={props.chunk} />;
+}
+
+function ParentInspector({ data, group }: { data?: IndexedPageChunks; group: ParentGroup }) {
+  const [copied, setCopied] = useState(false);
+  if (!data) return <PaneEmpty>Select a parent chunk</PaneEmpty>;
+  const parent = group.parent;
+  if (!parent) {
+    return (
+      <div className="ix-detail">
+        <PaneEmpty tone="error">These child chunks have no structural parent. Reindex this project.</PaneEmpty>
+      </div>
+    );
+  }
+  const expandsForGeneration = parent.child_count >= 2 && parent.text.length <= 6_000;
+  const copy = async () => {
+    await navigator.clipboard.writeText(parent.text);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1_500);
+  };
+
+  return (
+    <div className="ix-detail">
+      <div className="ix-detail-head">
+        <div>
+          <span className="ix-pane-kicker">Parent chunk</span>
+          <strong>{parentLabel(group)}</strong>
+        </div>
+        <CopyButton copied={copied} onCopy={copy} label="parent text" />
+      </div>
+
+      <div className="ix-context-state" data-active={expandsForGeneration}>
+        <Layers3 size={15} />
+        <span>
+          <strong>{expandsForGeneration ? 'Generation context' : 'Retrieval structure only'}</strong>
+          {expandsForGeneration
+            ? 'A matching child expands to this parent before answer generation.'
+            : parent.child_count < 2
+              ? 'Single-child parents stay precise and are not expanded.'
+              : 'This parent exceeds the 6,000-character expansion limit.'}
+        </span>
+      </div>
+
+      <div className="ix-detail-text ix-parent-text"><pre>{parent.text}</pre></div>
+
+      <section className="ix-meta-section">
+        <h3>Parent metadata</h3>
+        <dl className="ix-meta-grid">
+          <Meta label="Parent ID" value={String(parent.parent_id)} mono />
+          <Meta label="Children" value={String(parent.child_count)} />
+          <Meta label="Tokens" value={String(parent.token_count)} />
+          <Meta label="Characters" value={String(parent.text.length)} />
+          <Meta label="Expansion" value={expandsForGeneration ? 'Enabled' : 'Skipped'} good={expandsForGeneration} />
+          <Meta label="Heading ID" value={parent.heading_id ?? '—'} mono />
+        </dl>
+      </section>
+
+      <section className="ix-meta-section">
+        <h3>Structure</h3>
+        <dl className="ix-source-list">
+          <Meta label="Heading path" value={parent.heading_path.join(' › ') || 'Page body'} />
+          <Meta label="Parent path" value={parent.parent_path} mono />
+          <Meta label="Hash" value={parent.content_hash} mono />
+          <Meta label="Indexed" value={formatDate(parent.created_at)} />
+        </dl>
+      </section>
+
+      <section className="ix-meta-section">
+        <h3>Child inventory</h3>
+        <div className="ix-child-inventory">
+          {group.children.map((child) => (
+            <div key={child.chunk_id}>
+              <code>#{child.chunk_id}</code>
+              <span>{child.chunk_kind}</span>
+              <small>{child.token_count} tok</small>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -372,14 +535,7 @@ function ChunkInspector({ data, chunk }: { data?: IndexedPageChunks; chunk: Inde
           <span className="ix-pane-kicker">Chunk {String(chunk.ordinal).padStart(2, '0')}</span>
           <strong>{chunk.in_page_path ?? 'Page body'}</strong>
         </div>
-        <Tooltip.Root>
-          <Tooltip.Trigger asChild>
-            <button className="ix-icon-button" type="button" onClick={copy} aria-label="Copy chunk text">
-              {copied ? <Check size={16} /> : <Copy size={16} />}
-            </button>
-          </Tooltip.Trigger>
-          <Tooltip.Portal><Tooltip.Content className="ix-tooltip" sideOffset={6}>{copied ? 'Copied' : 'Copy text'}</Tooltip.Content></Tooltip.Portal>
-        </Tooltip.Root>
+        <CopyButton copied={copied} onCopy={copy} label="child text" />
       </div>
 
       <div className="ix-detail-text"><pre>{chunk.text}</pre></div>
@@ -391,6 +547,9 @@ function ChunkInspector({ data, chunk }: { data?: IndexedPageChunks; chunk: Inde
           <Meta label="Tokens" value={String(chunk.token_count)} />
           <Meta label="Characters" value={String(chunk.text.length)} />
           <Meta label="Content" value={chunk.is_code ? 'Code / structured' : 'Text / structured'} />
+          <Meta label="Kind" value={chunk.chunk_kind} mono />
+          <Meta label="Object" value={chunk.object_path ?? '—'} mono />
+          <Meta label="Parent tokens" value={chunk.parent_token_count === null ? '—' : String(chunk.parent_token_count)} />
           <Meta label="Vector" value={chunk.embedded ? 'Ready' : 'Missing'} good={chunk.embedded} />
           <Meta label="Cache" value={chunk.embedding_cached ? 'Hit' : 'Missing'} good={chunk.embedding_cached} />
         </dl>
@@ -403,11 +562,28 @@ function ChunkInspector({ data, chunk }: { data?: IndexedPageChunks; chunk: Inde
           <Meta label="Language" value={page.lang} />
           <Meta label="Subtree" value={page.subtree_root ?? '—'} mono />
           <Meta label="Parent" value={page.parent_id ?? '—'} mono />
+          <Meta label="Chunk parent" value={chunk.parent_path ?? '—'} mono />
+          <Meta label="Identifiers" value={chunk.identifiers.map((item) => item.value).join(', ') || '—'} mono />
           <Meta label="Hash" value={chunk.content_hash} mono />
           <Meta label="Indexed" value={formatDate(chunk.created_at)} />
         </dl>
       </section>
     </div>
+  );
+}
+
+function CopyButton(props: { copied: boolean; onCopy: () => void; label: string }) {
+  return (
+    <Tooltip.Root>
+      <Tooltip.Trigger asChild>
+        <button className="ix-icon-button" type="button" onClick={props.onCopy} aria-label={`Copy ${props.label}`}>
+          {props.copied ? <Check size={16} /> : <Copy size={16} />}
+        </button>
+      </Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Content className="ix-tooltip" sideOffset={6}>{props.copied ? 'Copied' : `Copy ${props.label}`}</Tooltip.Content>
+      </Tooltip.Portal>
+    </Tooltip.Root>
   );
 }
 
@@ -472,6 +648,47 @@ function groupPages(pages: IndexPage[]): Array<[string, IndexPage[]]> {
     groups.set(group, list);
   }
   return [...groups.entries()];
+}
+
+function buildParentGroups(data?: IndexedPageChunks): ParentGroup[] {
+  if (!data) return [];
+  const groups = new Map<string, ParentGroup>();
+  for (const parent of data.parents ?? []) {
+    const key = `parent:${parent.parent_id}`;
+    groups.set(key, { key, parent, children: [] });
+  }
+  for (const chunk of data.chunks) {
+    const key = chunk.parent_id === null ? 'unparented' : `parent:${chunk.parent_id}`;
+    const group = groups.get(key) ?? { key, parent: null, children: [] };
+    group.children.push(chunk);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+}
+
+function filterParentGroups(groups: ParentGroup[], filter: string): ParentGroup[] {
+  const query = filter.trim().toLowerCase();
+  if (!query) return groups;
+  return groups.flatMap((group) => {
+    const parentText = group.parent
+      ? `${group.parent.parent_path} ${group.parent.heading_path.join(' ')} ${group.parent.text} ${group.parent.content_hash}`
+      : 'unparented';
+    if (parentText.toLowerCase().includes(query)) return [group];
+    const children = group.children.filter((chunk) =>
+      `${chunk.in_page_path ?? ''} ${chunk.text} ${chunk.content_hash} ${chunk.chunk_kind} ${chunk.object_path ?? ''} ${chunk.identifiers.map((item) => item.value).join(' ')}`
+        .toLowerCase()
+        .includes(query),
+    );
+    return children.length > 0 ? [{ ...group, children }] : [];
+  });
+}
+
+function parentLabel(group: ParentGroup): string {
+  return group.parent?.heading_path.at(-1) ?? (group.parent ? 'Page body' : 'Unparented chunks');
+}
+
+function parentPath(group: ParentGroup): string {
+  return group.parent?.heading_path.join(' › ') || group.parent?.parent_path || 'No structural parent';
 }
 
 function firstSelectableKey(language?: IndexLanguage): string {

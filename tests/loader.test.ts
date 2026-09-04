@@ -157,8 +157,10 @@ test('loader: OpenAPI descriptors become synthetic API reference pages', async (
         paths: {
           '/api/v2/checkout': {
             post: {
+              operationId: 'createOrder',
               summary: '创建订单',
               description: '创建订单后返回 cregis_id 和 checkout_url。频率限制：1000 次/分钟。',
+              parameters: [{ $ref: '#/components/parameters/AccessKeyHeader' }],
               requestBody: {
                 content: {
                   'application/json': {
@@ -169,6 +171,8 @@ test('loader: OpenAPI descriptors become synthetic API reference pages', async (
                         pid: { type: 'integer', description: '支付引擎项目 ID' },
                         order_currency: {
                           type: 'string',
+                          enum: ['USDT', 'BTC'],
+                          maxLength: 10,
                           description: '订单货币，支持 USDT、BTC 等加密货币代码',
                         },
                       },
@@ -200,6 +204,15 @@ test('loader: OpenAPI descriptors become synthetic API reference pages', async (
           },
         },
         components: {
+          parameters: {
+            AccessKeyHeader: {
+              name: 'Access-Key',
+              in: 'header',
+              required: true,
+              schema: { type: 'string' },
+              description: 'API Key identifier',
+            },
+          },
           schemas: {
             StandardResponse: {
               type: 'object',
@@ -224,7 +237,7 @@ test('loader: OpenAPI descriptors become synthetic API reference pages', async (
               type: 'object',
               required: ['status'],
               properties: {
-                status: { type: 'integer', format: 'int32', description: '交易状态' },
+                status: { type: 'integer', format: 'int32', enum: [1, 2], description: '交易状态' },
               },
             },
           },
@@ -236,7 +249,7 @@ test('loader: OpenAPI descriptors become synthetic API reference pages', async (
     const apiPage = proj.pagesByLangAndId.get('zh')?.get('api-payment-api-post-api-v2-checkout');
     assert.ok(apiPage, 'OpenAPI operation should be loaded as a synthetic page');
     assert.equal(apiPage.title, 'POST /api/v2/checkout — 创建订单');
-    assert.equal(apiPage.slug, 'reference/payment-api/post-api-v2-checkout');
+    assert.equal(apiPage.slug, 'reference/payment-api/createOrder');
 
     const paymentSection = proj.navigationsByLang.get('zh')?.items[0];
     assert.equal(paymentSection?.type, 'section');
@@ -278,6 +291,11 @@ test('loader: OpenAPI descriptors become synthetic API reference pages', async (
     assert.match(text, /1000 次\/分钟/);
     assert.match(text, /data\.page_num/);
     assert.match(text, /data\.rows\[\]\.status/);
+    assert.match(text, /Access-Key \(header\).*required/);
+    assert.match(text, /Section: Request Headers/);
+    assert.match(text, /enum=USDT, BTC; maxLength=10/);
+    assert.match(text, /Response Object: data\.rows\[\]/);
+    assert.match(text, /Response Example:/);
   } finally {
     await cleanup();
   }

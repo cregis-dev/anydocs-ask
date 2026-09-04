@@ -68,13 +68,33 @@ export type IndexedChunk = {
   content_hash: string;
   token_count: number;
   is_code: boolean;
+  parent_id: number | null;
+  parent_path: string | null;
+  parent_heading_path: string[];
+  parent_token_count: number | null;
+  chunk_kind: string;
+  object_path: string | null;
+  identifiers: Array<{ value: string; kind: string }>;
   created_at: number;
   embedded: boolean;
   embedding_cached: boolean;
 };
 
+export type IndexedParent = {
+  parent_id: number;
+  parent_path: string;
+  heading_id: string | null;
+  heading_path: string[];
+  text: string;
+  content_hash: string;
+  token_count: number;
+  child_count: number;
+  created_at: number;
+};
+
 export type IndexedPageChunks = {
   page: IndexedPageMeta;
+  parents: IndexedParent[];
   chunks: IndexedChunk[];
 };
 

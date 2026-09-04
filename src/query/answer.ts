@@ -545,7 +545,7 @@ async function askWithTraceInternal(
 
   // 6 + 7. Generate + postprocess.
   const isCrossLang = outcome.kind === 'translate-fallback';
-  const pickedChunks = pickContextChunks(outcome, req.options?.max_chunks, entityTerms, {
+  const pickedChildren = pickContextChunks(outcome, req.options?.max_chunks, entityTerms, {
     apiIntent,
     apiReferenceCandidates: reranked,
     apiReferenceHintTerms,
@@ -555,6 +555,7 @@ async function askWithTraceInternal(
     supplementalPageIds,
     queryLang,
   });
+  const pickedChunks = expandParentContext(deps.db, pickedChildren);
   const selectedContextTrace = buildSelectedContextTrace(pickedChunks, retrievalTrace);
   const formatHint = detectFormatHint(question);
   const preparedPromptInput = prepareDiagnosticInput(question);
@@ -748,6 +749,46 @@ async function askWithTraceInternal(
     },
     queryVector,
   };
+}
+
+/**
+ * Children win retrieval; bounded structural parents supply generation context.
+ * Multiple hits from the same parent collapse to one context item, preventing
+ * repeated prefixes and arbitrary field-boundary cuts in the prompt.
+ */
+export function expandParentContext(
+  db: DbHandle,
+  chunks: RerankedChunk[],
+  maxParentChars = 6000,
+): RerankedChunk[] {
+  const parentIds = [...new Set(chunks.map((chunk) => chunk.parent_id).filter((id): id is number => id !== null))];
+  if (parentIds.length === 0) return chunks;
+  const placeholders = parentIds.map(() => '?').join(',');
+  const rows = db.prepare(
+    `SELECT cp.parent_id, cp.text, COUNT(c.chunk_id) AS child_count
+       FROM chunk_parents cp
+       LEFT JOIN chunks c ON c.parent_id = cp.parent_id
+      WHERE cp.parent_id IN (${placeholders})
+      GROUP BY cp.parent_id, cp.text`,
+  ).all(...parentIds) as Array<{ parent_id: number; text: string; child_count: number }>;
+  const parents = new Map(rows.map((row) => [row.parent_id, row] as const));
+  const emitted = new Set<number>();
+  const out: RerankedChunk[] = [];
+  for (const chunk of chunks) {
+    if (chunk.parent_id === null) {
+      out.push(chunk);
+      continue;
+    }
+    const parent = parents.get(chunk.parent_id);
+    if (!parent || parent.child_count < 2 || parent.text.length > maxParentChars) {
+      out.push(chunk);
+      continue;
+    }
+    if (emitted.has(chunk.parent_id)) continue;
+    emitted.add(chunk.parent_id);
+    out.push({ ...chunk, text: parent.text });
+  }
+  return out;
 }
 
 function apiReferencePagePrefixForProduct(product: IntentProduct): string | null {
@@ -1357,11 +1398,21 @@ function mergeSupplementalContextPages(
 }
 
 function dropCrossLanguageDuplicatePages(chunks: RerankedChunk[], queryLang: DocsLang): RerankedChunk[] {
-  const sameLangPageIds = new Set(
-    chunks.filter((c) => c.lang === queryLang).map((c) => c.page_id),
-  );
-  if (sameLangPageIds.size === 0) return chunks;
-  return chunks.filter((c) => c.lang === queryLang || !sameLangPageIds.has(c.page_id));
+  const counts = new Map<string, Map<string, number>>();
+  for (const chunk of chunks) {
+    const byLang = counts.get(chunk.page_id) ?? new Map<string, number>();
+    byLang.set(chunk.lang, (byLang.get(chunk.lang) ?? 0) + 1);
+    counts.set(chunk.page_id, byLang);
+  }
+  return chunks.filter((chunk) => {
+    if (chunk.lang === queryLang) return true;
+    const byLang = counts.get(chunk.page_id);
+    const sameLangCount = byLang?.get(queryLang) ?? 0;
+    if (sameLangCount === 0) return true;
+    const foreignCount = byLang?.get(chunk.lang) ?? 0;
+    // A sparse translation must not hide materially richer source content.
+    return foreignCount > sameLangCount;
+  });
 }
 
 function preferProjectSetupContext(

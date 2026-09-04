@@ -104,6 +104,11 @@ const EXACT_IDENTIFIER_PATTERNS = [
   /\bT[1-9A-HJ-NP-Za-km-z]{33}\b/g,
   /\b[A-Z]\d{4}\b/g,
   /\/(?:openapi|api)\/v\d+(?:\/[A-Za-z0-9_.{}:-]+)+/gi,
+  /\bAccess-(?:Key|Timestamp|Nonce|Signature)\b/gi,
+  /\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+(?:\[\])?(?:\.[A-Za-z][A-Za-z0-9_]*(?:\[\])?)*\b/g,
+  /\b(?:data|request|response)(?:\.[A-Za-z][A-Za-z0-9_]*(?:\[\])?)+\b/gi,
+  /\b[a-z]+(?:[A-Z][A-Za-z0-9]+){2,}\b/g,
+  /\b(?=[1-9A-HJ-NP-Za-km-z]{32,50}\b)(?=[1-9A-HJ-NP-Za-km-z]*\d)[1-9A-HJ-NP-Za-km-z]{32,50}\b/g,
 ] as const;
 
 // SQLite's unicode61 tokenizer does not segment Chinese into the domain terms

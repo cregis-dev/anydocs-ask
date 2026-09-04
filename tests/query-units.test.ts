@@ -1927,19 +1927,19 @@ test('postprocess: citation URL appends heading anchor when in_page_path encodes
   assert.equal(out.citations[0]!.url, '/frontend/auth#bearer-token');
 });
 
-test('postprocess: OpenAPI synthetic citations link to public Scalar source route', () => {
+test('postprocess: OpenAPI synthetic citations keep the operation page route', () => {
   const chunkById = new Map<string, RerankedChunk>([
     [
       'cit_1',
       fakeReranked({
         page_id: 'api-payment-engine-api-post-api-v2-order-info',
-        page_url: '/zh/reference/payment-engine-api/post-api-v2-order-info',
+        page_url: '/zh/reference/payment-engine-api/queryOrder',
         in_page_path: 'response-fields/p[1]',
       }),
     ],
   ]);
   const out = postprocess({ answerLang: 'zh', rawAnswer: '... [cit_1]', chunkById });
-  assert.equal(out.citations[0]!.url, '/zh/reference/payment-engine-api#api-post-api-v2-order-info');
+  assert.equal(out.citations[0]!.url, '/zh/reference/payment-engine-api/queryOrder');
 });
 
 test('postprocess: cit_N markers renumbered to 1..K matching citations[] order', () => {

@@ -33,6 +33,22 @@ export type ChunkRow = {
   content_hash: string;
   token_count: number;
   is_code: number;          // SQLite has no bool; 0 / 1
+  parent_id: number | null;
+  chunk_kind: string;
+  object_path: string | null;
+  created_at: number;
+};
+
+export type ChunkParentRow = {
+  parent_id: number;
+  page_id: string;
+  lang: string;
+  parent_path: string;
+  heading_id: string | null;
+  heading_path: string;
+  text: string;
+  content_hash: string;
+  token_count: number;
   created_at: number;
 };
 

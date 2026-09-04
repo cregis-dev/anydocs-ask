@@ -126,4 +126,30 @@ test('chunkPage: long prose continuations repeat page and section context', () =
   for (const chunk of chunks) {
     assert.match(chunk.text, /^Page: Long Guide\nSection: Authentication\n/);
   }
+  assert.equal(new Set(chunks.map((chunk) => chunk.parent.parent_path)).size, 1);
+  assert.ok(chunks[0]!.parent.text.length > chunks[0]!.text.length);
+});
+
+test('chunkPage: API object boundaries and exact identifiers become metadata', () => {
+  const page: PageDoc = {
+    id: 'api-example',
+    lang: 'en',
+    slug: 'reference/example',
+    title: 'POST /api/v2/order/info — Query order',
+    status: 'published',
+    content: { version: 1, blocks: [] },
+    render: {
+      markdown: [
+        '# POST /api/v2/order/info — Query order',
+        '## Response Fields',
+        '### Response Object: data.settlement_details',
+        '- `data.settlement_details.settlement_fee` — string: Settlement fee.',
+      ].join('\n\n'),
+    },
+  };
+  const [chunk] = chunkPage(page);
+  assert.equal(chunk?.chunk_kind, 'api-response-object');
+  assert.equal(chunk?.object_path, 'data.settlement_details');
+  assert.ok(chunk?.identifiers.some((item) => item.normalized === 'data.settlement_details.settlement_fee'));
+  assert.ok(chunk?.identifiers.some((item) => item.normalized === 'settlement_fee'));
 });

@@ -611,6 +611,12 @@ test('GET /v1/index/chunks returns page metadata and inspectable chunks', async 
     assert.equal(res.status, 200);
     const body = (await res.json()) as {
       page: { page_id: string; title: string; breadcrumb: unknown[] };
+      parents: Array<{
+        parent_id: number;
+        text: string;
+        token_count: number;
+        child_count: number;
+      }>;
       chunks: Array<{
         ordinal: number;
         text: string;
@@ -622,6 +628,10 @@ test('GET /v1/index/chunks returns page metadata and inspectable chunks', async 
     assert.equal(body.page.page_id, 'auth');
     assert.equal(body.page.title, '鉴权');
     assert.ok(body.page.breadcrumb.length > 0);
+    assert.ok(body.parents.length > 0);
+    assert.match(body.parents[0]?.text ?? '', /JWT bearer token/);
+    assert.ok((body.parents[0]?.token_count ?? 0) > 0);
+    assert.ok((body.parents[0]?.child_count ?? 0) > 0);
     assert.ok(body.chunks.length > 0);
     assert.equal(body.chunks[0]?.ordinal, 1);
     assert.match(body.chunks[0]?.text ?? '', /JWT bearer token/);

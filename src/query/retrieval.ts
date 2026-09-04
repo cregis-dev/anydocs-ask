@@ -25,6 +25,9 @@ export type RetrievedChunk = {
   in_page_path: string;
   text: string;
   is_code: number;
+  parent_id: number | null;
+  chunk_kind: string;
+  object_path: string | null;
   page_title: string;
   page_url: string | null;
   subtree_root: string | null;
@@ -378,7 +381,31 @@ function exactIdentifierPath(
   scopeId: string | null,
   lang: DocsLang | null,
 ): number[] {
-  const query = (requestedLang: DocsLang | null) => db
+  const normalized = identifier.toLowerCase();
+  const queryIndex = (requestedLang: DocsLang | null) => db
+    .prepare(
+      `SELECT ci.chunk_id
+         FROM chunk_identifiers ci
+         JOIN chunks c ON c.chunk_id = ci.chunk_id
+         JOIN pages p ON p.page_id = c.page_id AND p.lang = c.lang
+        WHERE ci.normalized = ?
+          AND p.status = 'published'
+          AND (? IS NULL OR p.subtree_root = ?)
+          AND (? IS NULL OR p.lang = ?)
+        ORDER BY p.nav_index ASC, c.chunk_id ASC
+        LIMIT ?`,
+    )
+    .all(normalized, scopeId, scopeId, requestedLang, requestedLang, limit) as Array<{ chunk_id: number }>;
+  const indexed = queryIndex(lang);
+  if (indexed.length > 0) return indexed.map((row) => row.chunk_id);
+  if (lang !== null) {
+    const fallback = queryIndex(null);
+    if (fallback.length > 0) return fallback.map((row) => row.chunk_id);
+  }
+
+  // Compatibility fallback for databases that have migrated but have not
+  // yet been reindexed.
+  const queryText = (requestedLang: DocsLang | null) => db
     .prepare(
       `SELECT c.chunk_id
          FROM chunks c
@@ -391,8 +418,8 @@ function exactIdentifierPath(
         LIMIT ?`,
     )
     .all(identifier, scopeId, scopeId, requestedLang, requestedLang, limit) as Array<{ chunk_id: number }>;
-  const rows = query(lang);
-  if (rows.length === 0 && lang !== null) return query(null).map((row) => row.chunk_id);
+  const rows = queryText(lang);
+  if (rows.length === 0 && lang !== null) return queryText(null).map((row) => row.chunk_id);
   return rows.map((row) => row.chunk_id);
 }
 
@@ -494,6 +521,7 @@ function fetchChunkRows(
   const rows = db
     .prepare(
       `SELECT c.chunk_id, c.page_id, c.lang, c.in_page_path, c.text, c.is_code,
+              c.parent_id, c.chunk_kind, c.object_path,
               p.title AS page_title, p.url AS page_url, p.subtree_root,
               p.nav_index, p.breadcrumb
          FROM chunks c
@@ -507,6 +535,9 @@ function fetchChunkRows(
       in_page_path: string;
       text: string;
       is_code: number;
+      parent_id: number | null;
+      chunk_kind: string;
+      object_path: string | null;
       page_title: string;
       page_url: string | null;
       subtree_root: string | null;

@@ -31,13 +31,13 @@ test('resolveDbPath puts index.db inside the state root', () => {
   assert.equal(p, '/tmp/state/myproj/index.db');
 });
 
-test('openDatabase creates schema, loads sqlite-vec, sets user_version=2', () => {
+test('openDatabase creates schema, loads sqlite-vec, sets user_version=3', () => {
   const db = openDatabase({ dbPath: ':memory:' });
 
   assert.match(vecVersion(db), /^v?\d/);
 
   const version = db.pragma('user_version', { simple: true });
-  assert.equal(version, 2);
+  assert.equal(version, 3);
 
   const tables = db
     .prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view') ORDER BY name")
@@ -47,7 +47,7 @@ test('openDatabase creates schema, loads sqlite-vec, sets user_version=2', () =>
   // Real tables we authored — virtual tables and their shadow tables are
   // checked separately below to keep this assertion stable across sqlite-vec
   // versions (which can rename internal shadow tables).
-  for (const t of ['pages', 'chunks', 'embedding_cache', 'feedback', 'answers']) {
+  for (const t of ['pages', 'chunks', 'chunk_parents', 'chunk_identifiers', 'embedding_cache', 'feedback', 'answers']) {
     assert.ok(tables.includes(t), `expected table ${t} to exist; got ${tables.join(',')}`);
   }
 
@@ -291,12 +291,12 @@ test('migration 002 — inserting feedback without v1.5 columns falls back to de
   db.close();
 });
 
-test('migration 002 is applied alongside 001 on a fresh DB (user_version=2)', () => {
+test('all migrations are applied on a fresh DB (user_version=3)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'anydocs-ask-mig2-'));
   try {
     const dbPath = join(dir, 'index.db');
     const db = openDatabase({ dbPath });
-    assert.equal(db.pragma('user_version', { simple: true }), 2);
+    assert.equal(db.pragma('user_version', { simple: true }), 3);
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

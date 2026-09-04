@@ -362,3 +362,33 @@ test('retrieveWithTrace: exact identifier falls back across languages when neede
     db.close();
   }
 });
+
+test('retrieveWithTrace: dedicated identifier index resolves a field without scanning chunk text', () => {
+  const db = openDatabase({ dbPath: ':memory:' });
+  try {
+    db.prepare(
+      `INSERT INTO pages (page_id, lang, status, title, breadcrumb, updated_at)
+       VALUES ('api-order', 'en', 'published', 'Query order', '[]', 1)`,
+    ).run();
+    const chunkId = Number(db.prepare(
+      `INSERT INTO chunks (page_id, lang, text, content_hash, token_count, created_at)
+       VALUES ('api-order', 'en', 'object field documentation', 'field-hash', 5, 1)`,
+    ).run().lastInsertRowid);
+    db.prepare(
+      `INSERT INTO chunk_identifiers (chunk_id, identifier, normalized, kind)
+       VALUES (?, 'settlement_fee', 'settlement_fee', 'field')`,
+    ).run(chunkId);
+
+    const result = retrieveWithTrace(db, {
+      queryVector: new Float32Array(1024),
+      ftsQuery: null,
+      scopeId: null,
+      currentPageLang: 'en',
+      exactIdentifiers: ['settlement_fee'],
+    });
+    assert.equal(result.chunks[0]?.chunk_id, chunkId);
+    assert.equal(result.chunks[0]?.rrf_score, 1);
+  } finally {
+    db.close();
+  }
+});

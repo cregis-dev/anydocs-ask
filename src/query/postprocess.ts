@@ -145,6 +145,9 @@ function buildCitationUrl(chunk: RerankedChunk): string | null {
   if (!chunk.page_url) return null;
   const pageUrl = publicCitationPageUrl(chunk);
   if (pageUrl !== chunk.page_url) return pageUrl;
+  // OpenAPI headings are generated for retrieval and do not necessarily map
+  // to anchors in the public API renderer. Link to the real operation page.
+  if (chunk.page_id.startsWith('api-')) return pageUrl;
   // Suffix the heading anchor when in_page_path encodes one. Format from
   // the chunker: `<headingId>/p[<n>]` — strip the `/p[..]` suffix to get
   // the heading id, which is also the URL fragment.
@@ -155,17 +158,7 @@ function buildCitationUrl(chunk: RerankedChunk): string | null {
 }
 
 function publicCitationPageUrl(chunk: RerankedChunk): string {
-  const openApiUrl = publicOpenApiCitationUrl(chunk);
-  if (openApiUrl) return openApiUrl;
   return chunk.page_url!;
-}
-
-function publicOpenApiCitationUrl(chunk: RerankedChunk): string | null {
-  if (!chunk.page_url || !chunk.page_id.startsWith('api-')) return null;
-  const match = /^\/(zh|en)\/reference\/([^/#?]+)\/([^/#?]+)(?:[#?].*)?$/.exec(chunk.page_url);
-  if (!match) return null;
-  const [, lang, sourceSlug, operationSlug] = match;
-  return `/${lang}/reference/${sourceSlug}#api-${operationSlug}`;
 }
 
 function snippetFromChunk(text: string): string {

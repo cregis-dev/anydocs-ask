@@ -19,6 +19,7 @@ import { renderPageContent } from '@anydocs/core/render-page-content';
 import { CHUNK_MAX_CHARS_DEFAULT, CHUNK_OVERLAP_CHARS_DEFAULT } from './sections.ts';
 import { chunkMarkdownStructure } from './structural-chunks.ts';
 import { contentHash } from './normalize.ts';
+import { extractIndexedIdentifiers, type IndexedIdentifier } from './identifiers.ts';
 import type { PageDoc } from '../anydocs/types.ts';
 
 export type ChunkInput = {
@@ -43,6 +44,23 @@ export type ChunkInput = {
   /** is_code = 1 when the structural piece contains a fenced code block.
    *  Hint for BM25 / rerank weight, not a routing signal. */
   is_code: number;
+  /** Stable structural parent. Children are embedded; parents provide bounded context. */
+  parent: ParentChunkInput;
+  /** Coarse type used by retrieval diagnostics and API-aware context selection. */
+  chunk_kind: string;
+  /** OpenAPI object boundary such as data.rows[] or data.settlement_details. */
+  object_path: string | null;
+  /** Exact identifiers stored in a dedicated lookup table. */
+  identifiers: IndexedIdentifier[];
+};
+
+export type ParentChunkInput = {
+  parent_path: string;
+  heading_id: string;
+  heading_path: string[];
+  text: string;
+  content_hash: string;
+  token_count: number;
 };
 
 export type ChunkPageOptions = {
@@ -62,6 +80,15 @@ export function chunkPage(page: PageDoc, options: ChunkPageOptions = {}): ChunkI
   const pieces = chunkMarkdownStructure(markdown, page.title, maxChars);
   const chunks: ChunkInput[] = [];
   const indexesByHeading = new Map<string, number>();
+  const parentTextByHeading = new Map<string, string>();
+
+  for (const piece of pieces) {
+    const key = piece.headingId || '$page';
+    const body = stripContextPrefix(piece.text);
+    const prefix = buildContextPrefix(page.title, piece.headingPath);
+    const current = parentTextByHeading.get(key);
+    parentTextByHeading.set(key, current ? `${current}\n\n${body}` : `${prefix}\n${body}`);
+  }
 
   for (const piece of pieces) {
     const nextIndex = (indexesByHeading.get(piece.headingId) ?? 0) + 1;
@@ -70,6 +97,9 @@ export function chunkPage(page: PageDoc, options: ChunkPageOptions = {}): ChunkI
       ? `${piece.headingId}/p[${nextIndex}]`
       : `p[${nextIndex}]`;
 
+    const parentPath = piece.headingId || '$page';
+    const parentText = parentTextByHeading.get(parentPath) ?? piece.text;
+    const objectPath = objectPathFor(piece.headingPath);
     chunks.push({
       page_id: page.id,
       lang: page.lang,
@@ -80,22 +110,57 @@ export function chunkPage(page: PageDoc, options: ChunkPageOptions = {}): ChunkI
       content_hash: contentHash(piece.text),
       token_count: estimateTokens(piece.text),
       is_code: piece.isCode ? 1 : 0,
+      parent: {
+        parent_path: parentPath,
+        heading_id: piece.headingId,
+        heading_path: piece.headingPath,
+        text: parentText,
+        content_hash: contentHash(parentText),
+        token_count: estimateTokens(parentText),
+      },
+      chunk_kind: chunkKindFor(piece.headingPath, piece.isCode),
+      object_path: objectPath,
+      identifiers: extractIndexedIdentifiers(stripContextPrefix(piece.text)),
     });
   }
 
   return chunks;
 }
 
+function buildContextPrefix(pageTitle: string, headingPath: string[]): string {
+  const lines = [`Page: ${pageTitle.trim()}`];
+  if (headingPath.length > 0) lines.push(`Section: ${headingPath.join(' > ')}`);
+  return lines.join('\n');
+}
+
+function stripContextPrefix(text: string): string {
+  return text.replace(/^Page: [^\n]*(?:\nSection: [^\n]*)?\n?/, '').trim();
+}
+
+function objectPathFor(headingPath: string[]): string | null {
+  const title = headingPath.at(-1) ?? '';
+  const match = /^(?:Request|Response) (?:Object|Example):\s*(.+)$/i.exec(title);
+  return match?.[1]?.trim() || null;
+}
+
+function chunkKindFor(headingPath: string[], isCode: boolean): string {
+  const title = (headingPath.at(-1) ?? '').toLowerCase();
+  if (title.startsWith('request object:')) return 'api-request-object';
+  if (title.startsWith('response object:')) return 'api-response-object';
+  if (title.startsWith('request example:')) return 'api-request-example';
+  if (title.startsWith('response example:')) return 'api-response-example';
+  if (title === 'request headers' || title === 'request parameters') return 'api-parameters';
+  if (title === 'endpoint' || title === 'http request') return 'api-request';
+  if (isCode) return 'code';
+  return 'content';
+}
+
 // ---------------------------------------------------------------------------
 // Heuristics
 // ---------------------------------------------------------------------------
 
-/**
- * Token estimate. anydocs build uses ceil(chars/4) which over-counts CJK and
- * under-counts spaced English; we keep it for compatibility with the
- * `token_count` field semantics in ARCH §4. Real tokenization happens in
- * the embedder pipeline when batching has to respect a model context window.
- */
 function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
+  const cjk = text.match(/[\u3400-\u9fff]/gu)?.length ?? 0;
+  const nonCjkLength = text.replace(/[\u3400-\u9fff]/gu, '').length;
+  return Math.max(1, cjk + Math.ceil(nonCjkLength / 4));
 }

@@ -92,6 +92,14 @@ test('upsertChunksForPage: full pipeline writes chunks + chunks_vec + chunks_fts
 
     const inDb = db.prepare(`SELECT COUNT(*) AS n FROM chunks WHERE page_id='welcome' AND lang='zh'`).get() as { n: number };
     assert.equal(inDb.n, chunks.length);
+    const parentCount = db.prepare(
+      `SELECT COUNT(*) AS n FROM chunk_parents WHERE page_id='welcome' AND lang='zh'`,
+    ).get() as { n: number };
+    assert.ok(parentCount.n > 0 && parentCount.n <= chunks.length);
+    const unparented = db.prepare(
+      `SELECT COUNT(*) AS n FROM chunks WHERE page_id='welcome' AND parent_id IS NULL`,
+    ).get() as { n: number };
+    assert.equal(unparented.n, 0);
 
     // chunks_vec has one row per chunk
     const vecCount = db.prepare('SELECT COUNT(*) AS n FROM chunks_vec').get() as { n: number };
