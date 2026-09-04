@@ -68,6 +68,8 @@ export type RetrieveOptions = {
   supplementalPageIds?: string[];
   /** Optional page_id prefix for API reference pages that belong to the active product area. */
   apiReferencePagePrefix?: string | null;
+  /** Opaque addresses, hashes, API paths, or error codes matched literally. */
+  exactIdentifiers?: string[];
 };
 
 const DEFAULT_PER_PATH_K = 20;
@@ -95,6 +97,9 @@ const API_REFERENCE_INJECT_RANK = 6;
 const SUPPLEMENTAL_CONTEXT_K = 4;
 /** Supporting context should survive finalK trimming but remain below exact API refs. */
 const SUPPLEMENTAL_CONTEXT_INJECT_RANK = 10;
+/** Exact literal matches must outrank fuzzy RRF candidates. */
+const EXACT_IDENTIFIER_SCORE = 1;
+const EXACT_IDENTIFIER_K = 8;
 
 /**
  * Trace metadata from the retrieve step — exposed by retrieveWithTrace() for
@@ -146,6 +151,21 @@ export function retrieveWithTrace(
   bm25Ids.forEach((id, idx) => {
     rrfScores.set(id, (rrfScores.get(id) ?? 0) + 1 / (RRF_K + (idx + 1)));
   });
+
+  const exactIdentifierInjected = new Set<number>();
+  for (const identifier of opts.exactIdentifiers ?? []) {
+    const ids = exactIdentifierPath(
+      db,
+      identifier,
+      EXACT_IDENTIFIER_K,
+      opts.scopeId,
+      opts.currentPageLang ?? null,
+    );
+    for (const id of ids) {
+      exactIdentifierInjected.add(id);
+      rrfScores.set(id, Math.max(rrfScores.get(id) ?? 0, EXACT_IDENTIFIER_SCORE));
+    }
+  }
 
   // Per-entity injection: for each concept term, run a narrow BM25 pass and
   // either add new chunk_ids at ENTITY_INJECT_RANK score, or stack the
@@ -246,7 +266,7 @@ export function retrieveWithTrace(
     }
   }
 
-  const protectedIds = new Set([...supplementalInjected]);
+  const protectedIds = new Set([...supplementalInjected, ...exactIdentifierInjected]);
   const ranked = keepProtectedIds(
     [...rrfScores.entries()].sort((a, b) => b[1] - a[1]),
     finalK,
@@ -349,6 +369,31 @@ function bm25Path(
     )
     .all(ftsQuery, scopeId, scopeId, perPathK) as Array<{ chunk_id: number }>;
   return rows.map((r) => r.chunk_id);
+}
+
+function exactIdentifierPath(
+  db: DbHandle,
+  identifier: string,
+  limit: number,
+  scopeId: string | null,
+  lang: DocsLang | null,
+): number[] {
+  const query = (requestedLang: DocsLang | null) => db
+    .prepare(
+      `SELECT c.chunk_id
+         FROM chunks c
+         JOIN pages p ON p.page_id = c.page_id AND p.lang = c.lang
+        WHERE instr(lower(c.text), lower(?)) > 0
+          AND p.status = 'published'
+          AND (? IS NULL OR p.subtree_root = ?)
+          AND (? IS NULL OR p.lang = ?)
+        ORDER BY p.nav_index ASC, c.chunk_id ASC
+        LIMIT ?`,
+    )
+    .all(identifier, scopeId, scopeId, requestedLang, requestedLang, limit) as Array<{ chunk_id: number }>;
+  const rows = query(lang);
+  if (rows.length === 0 && lang !== null) return query(null).map((row) => row.chunk_id);
+  return rows.map((row) => row.chunk_id);
 }
 
 function currentPagePath(

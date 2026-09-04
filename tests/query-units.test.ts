@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detectLangFromText, langFromScopeId } from '../src/query/lang.ts';
-import { sanitizeFtsQuery } from '../src/query/sanitize.ts';
+import { extractExactIdentifiers, sanitizeFtsQuery } from '../src/query/sanitize.ts';
 import { rerank, computeTitleMatches } from '../src/query/rerank.ts';
 import { aggregate } from '../src/query/aggregate.ts';
 import { postprocess } from '../src/query/postprocess.ts';
@@ -114,7 +114,11 @@ test('langFromScopeId: unsupported lang prefix returns null', () => {
 // extractEntityTerms (answer.ts internal helper)
 // ---------------------------------------------------------------------------
 
-import { extractEntityTerms, answerMentionsEndpointPath } from '../src/query/answer.ts';
+import {
+  answerMentionsEndpointPath,
+  diversifyChunksByPage,
+  extractEntityTerms,
+} from '../src/query/answer.ts';
 
 test('extractEntityTerms: comma-separated triple', () => {
   assert.deepEqual(
@@ -176,6 +180,23 @@ test('extractEntityTerms: plain 2-entity question without compare hint still ski
   // Without `compare`/`vs`, a single `and` is not enough — too easy to
   // accidentally trigger on generic phrases.
   assert.equal(extractEntityTerms('how does sessions and memory work?'), undefined);
+});
+
+test('diversifyChunksByPage: limits leading page repetition without dropping candidates', () => {
+  const chunks = [
+    { page_id: 'a', id: 1 },
+    { page_id: 'a', id: 2 },
+    { page_id: 'a', id: 3 },
+    { page_id: 'b', id: 4 },
+    { page_id: 'a', id: 5 },
+    { page_id: 'c', id: 6 },
+  ];
+  const diversified = diversifyChunksByPage(chunks, 2);
+  assert.deepEqual(diversified.map((chunk) => chunk.id), [1, 2, 4, 6, 3, 5]);
+  assert.deepEqual(
+    diversified.map((chunk) => chunk.id).sort((a, b) => a - b),
+    [1, 2, 3, 4, 5, 6],
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -260,6 +281,22 @@ test('sanitizeFtsQuery: returns null when nothing useful survives', () => {
   assert.equal(sanitizeFtsQuery('   '), null);
   assert.equal(sanitizeFtsQuery('?!'), null);
   assert.equal(sanitizeFtsQuery('AND OR'), null);
+});
+
+test('extractExactIdentifiers: finds addresses, API paths, and error codes in order', () => {
+  assert.deepEqual(
+    extractExactIdentifiers(
+      '调用 /api/v2/order/info 返回 A0403，地址 0x9e5aac1ba1a2e6aed6b32689dfcf62a509ca96f3。',
+    ),
+    ['/api/v2/order/info', 'A0403', '0x9e5aac1ba1a2e6aed6b32689dfcf62a509ca96f3'],
+  );
+});
+
+test('extractExactIdentifiers: folds case-insensitive duplicates', () => {
+  assert.deepEqual(
+    extractExactIdentifiers('/API/v1/coins and /api/v1/coins'),
+    ['/API/v1/coins'],
+  );
 });
 
 // CamelCase identifiers expand to both the original token AND a phrase form

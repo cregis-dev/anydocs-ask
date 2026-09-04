@@ -27,7 +27,7 @@ import type { Reranker } from '../reranker/types.ts';
 import type { PromptConfig, RerankerConfig } from '../config.ts';
 import type { DocsLang } from '../anydocs/types.ts';
 import { detectLangFromText, langFromScopeId } from './lang.ts';
-import { sanitizeFtsQuery } from './sanitize.ts';
+import { extractExactIdentifiers, sanitizeFtsQuery } from './sanitize.ts';
 import { retrieveWithTrace, type RetrievalTrace, type RetrievedChunk } from './retrieval.ts';
 import { computeTitleMatches } from './rerank.ts';
 import { rerank, type RerankedChunk } from './rerank.ts';
@@ -345,6 +345,7 @@ async function runRetrievalPipeline(
   throwIfAborted(signal);
 
   const ftsQuery = sanitizeFtsQuery(searchQuestion);
+  const exactIdentifiers = extractExactIdentifiers(`${safeQuestion}\n${searchQuestion}`);
   const entityTerms = extractEntityTerms(searchQuestion);
   const projectSetupIntent = intentRoute.projectSetupIntent;
   const apiReferenceHints = intentRoute.apiReferenceHints;
@@ -373,6 +374,7 @@ async function runRetrievalPipeline(
     supplementalFtsQueries,
     supplementalPageIds,
     apiReferencePagePrefix,
+    exactIdentifiers,
   });
 
   const ruleReranked = rerank(retrieved, {
@@ -1197,10 +1199,7 @@ function pickContextChunks(
       ? Math.min(HARD_MAX_CHUNKS, Math.max(DEFAULT_MAX_CHUNKS, entityTerms.length * 5))
       : DEFAULT_MAX_CHUNKS;
   const cap = Math.min(clientMax ?? defaultCap, HARD_MAX_CHUNKS);
-  let picked =
-    outcome.kind === 'translate-fallback'
-      ? outcome.pick.slice(0, cap)
-      : outcome.pick.slice(0, cap);
+  let picked = diversifyChunksByPage(outcome.pick).slice(0, cap);
 
   if (!opts.apiIntent) {
     const nonApiPicked = picked.filter((c) => !isApiReferenceChunk(c));
@@ -1310,7 +1309,32 @@ function pickContextChunks(
   if (opts.queryLang && outcome.kind !== 'translate-fallback') {
     picked = dropCrossLanguageDuplicatePages(picked, opts.queryLang);
   }
-  return picked;
+  return diversifyChunksByPage(picked).slice(0, cap);
+}
+
+/**
+ * Keep the leading context from being monopolized by near-duplicate chunks
+ * from one page. No candidates are dropped: overflow is appended in its
+ * original score order after the diverse leading pass.
+ */
+export function diversifyChunksByPage<T extends { page_id: string }>(
+  chunks: T[],
+  maxLeadingPerPage = 3,
+): T[] {
+  if (maxLeadingPerPage < 1 || chunks.length < 2) return [...chunks];
+  const counts = new Map<string, number>();
+  const leading: T[] = [];
+  const overflow: T[] = [];
+  for (const chunk of chunks) {
+    const count = counts.get(chunk.page_id) ?? 0;
+    if (count < maxLeadingPerPage) {
+      leading.push(chunk);
+      counts.set(chunk.page_id, count + 1);
+    } else {
+      overflow.push(chunk);
+    }
+  }
+  return [...leading, ...overflow];
 }
 
 function mergeSupplementalContextPages(

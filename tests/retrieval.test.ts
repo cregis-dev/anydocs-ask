@@ -275,3 +275,90 @@ test('retrieveWithTrace: API reference injection honors language and current pro
     db.close();
   }
 });
+
+test('retrieveWithTrace: exact identifier match outranks fuzzy candidates and respects language', () => {
+  const db = openDatabase({ dbPath: ':memory:' });
+  try {
+    const address = '0x9e5aac1ba1a2e6aed6b32689dfcf62a509ca96f3';
+    const insertPage = db.prepare(
+      `INSERT INTO pages (page_id, lang, status, title, url, subtree_root, nav_index, breadcrumb, updated_at)
+       VALUES (?, ?, 'published', ?, ?, 'tokens', ?, '[]', 1)`,
+    );
+    insertPage.run('supported-tokens', 'zh', '支持的网络与代币', '/zh/supported-tokens', 1);
+    insertPage.run('supported-tokens', 'en', 'Supported tokens', '/en/supported-tokens', 2);
+    insertPage.run('general-guide', 'zh', '常见问题', '/zh/general-guide', 0);
+
+    const insertChunk = db.prepare(
+      `INSERT INTO chunks (page_id, lang, text, content_hash, token_count, created_at)
+       VALUES (?, ?, ?, ?, 8, 1)`,
+    );
+    const exactZh = Number(
+      insertChunk.run(
+        'supported-tokens',
+        'zh',
+        `Page: 支持的网络与代币\nSection: 支持列表\ntoken_id: ${address}`,
+        'exact-zh',
+      ).lastInsertRowid,
+    );
+    const exactEn = Number(
+      insertChunk.run(
+        'supported-tokens',
+        'en',
+        `Page: Supported tokens\nSection: List\ntoken_id: ${address}`,
+        'exact-en',
+      ).lastInsertRowid,
+    );
+    const fuzzy = Number(
+      insertChunk.run('general-guide', 'zh', 'BEP20 合约地址查询指南', 'fuzzy').lastInsertRowid,
+    );
+    db.prepare(`INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)`).run(
+      BigInt(fuzzy),
+      f32Bytes(vector(1024, 0)),
+    );
+
+    const result = retrieveWithTrace(db, {
+      queryVector: new Float32Array(vector(1024, 0)),
+      ftsQuery: '"BEP20" OR "合约地址"',
+      exactIdentifiers: [address],
+      scopeId: null,
+      currentPageLang: 'zh',
+      perPathK: 5,
+      finalK: 5,
+    });
+
+    assert.equal(result.chunks[0]?.chunk_id, exactZh);
+    assert.equal(result.chunks.some((chunk) => chunk.chunk_id === exactEn), false);
+  } finally {
+    db.close();
+  }
+});
+
+test('retrieveWithTrace: exact identifier falls back across languages when needed', () => {
+  const db = openDatabase({ dbPath: ':memory:' });
+  try {
+    db.prepare(
+      `INSERT INTO pages (page_id, lang, status, title, url, subtree_root, nav_index, breadcrumb, updated_at)
+       VALUES ('error-codes', 'en', 'published', 'Error codes', '/en/error-codes', 'reference', 1, '[]', 1)`,
+    ).run();
+    const chunkId = Number(
+      db.prepare(
+        `INSERT INTO chunks (page_id, lang, text, content_hash, token_count, created_at)
+         VALUES ('error-codes', 'en', 'A0403 means access is forbidden.', 'a0403', 8, 1)`,
+      ).run().lastInsertRowid,
+    );
+
+    const result = retrieveWithTrace(db, {
+      queryVector: new Float32Array(vector(1024, 0)),
+      ftsQuery: null,
+      exactIdentifiers: ['A0403'],
+      scopeId: null,
+      currentPageLang: 'zh',
+      perPathK: 0,
+      finalK: 5,
+    });
+
+    assert.equal(result.chunks[0]?.chunk_id, chunkId);
+  } finally {
+    db.close();
+  }
+});
