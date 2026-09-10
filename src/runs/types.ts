@@ -18,6 +18,8 @@
  * rows written before 2026-05-11 — readers MUST treat absent source as
  * `reader` for back-compat.
  */
+import type { RunInputSnapshot } from './input-snapshot-types.ts';
+
 export type RunSource = 'reader' | 'console' | 'mcp';
 
 export type RunRecord = {
@@ -36,6 +38,9 @@ export type RunRecord = {
   retrieval: RunRetrievalTrace;
   answer: RunAnswer;
   feedback: RunFeedback;
+  /** Absent on legacy logs. Does not include router/provider-internal requests. */
+  input_snapshot?: RunInputSnapshot;
+  input_snapshot_status?: 'captured' | 'not_generated' | 'omitted_by_policy';
 };
 
 export type RunRetrievalTrace = {

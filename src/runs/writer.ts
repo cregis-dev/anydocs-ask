@@ -112,6 +112,8 @@ export class RunsWriter {
     if (q === null && a === null) return record;
     return {
       ...record,
+      // Full prompts must not bypass an operator's text-retention limits.
+      ...(record.input_snapshot ? { input_snapshot: undefined, input_snapshot_status: 'omitted_by_policy' as const } : {}),
       ...(q !== null && record.query.length > q ? { query: record.query.slice(0, q) } : {}),
       answer: {
         ...record.answer,

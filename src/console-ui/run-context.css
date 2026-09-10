@@ -1,0 +1,27 @@
+.rc-context { margin-top: 18px; border-top: 1px solid var(--ca-border); border-bottom: 1px solid var(--ca-border); min-width: 0; }
+.rc-context > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px 0; color: var(--ca-muted); cursor: pointer; font-size: 12px; list-style: none; }
+.rc-context summary::-webkit-details-marker { display: none; }
+.rc-context > summary strong { color: var(--ca-text); font-weight: 500; }
+.rc-context .rc-chevron { margin-left: auto; }
+.rc-context[open] > summary .rc-chevron { transform: rotate(180deg); }
+.rc-context summary:focus-visible { outline: 2px solid var(--ca-blue); outline-offset: 2px; }
+.rc-body { padding: 4px 0 16px; min-width: 0; }
+.rc-meta, .rc-snapshot-state { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 11px; color: var(--ca-muted); margin-bottom: 12px; }
+.rc-meta code { color: var(--ca-text); overflow-wrap: anywhere; }
+.rc-snapshot-state { justify-content: space-between; }
+.rc-section { margin-top: 20px; }
+.rc-section > h3 { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 0 0 12px; }
+.rc-section > h3 span { color: var(--ca-muted); font-weight: 400; }
+.rc-text { margin: 10px 0; }
+.rc-text h4 { font-size: 11px; color: var(--ca-muted); font-weight: 500; margin: 0 0 5px; }
+.rc-body pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.65; margin: 0; padding: 10px 12px; background: var(--ca-surface-raised); color: var(--ca-text); border-left: 2px solid var(--ca-border); max-height: 360px; overflow: auto; }
+.rc-history-turn { padding-left: 12px; border-left: 2px solid var(--ca-blue-soft); margin: 12px 0; }
+.rc-document { border-top: 1px solid var(--ca-border); padding: 8px 0; }
+.rc-document > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; cursor: pointer; list-style: none; padding: 4px 0; font-size: 12px; }
+.rc-document > summary strong { flex: 1; font-weight: 500; min-width: 80px; overflow-wrap: anywhere; }
+.rc-document > summary span { color: var(--ca-muted); font-size: 11px; }
+.rc-document-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 11px; color: var(--ca-muted); margin: 8px 0; }
+.rc-document-meta > * { overflow-wrap: anywhere; min-width: 0; }
+.rc-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--ca-muted); line-height: 1.6; }
+.rc-warning { border-left: 2px solid var(--ca-amber); padding: 8px 12px; color: var(--ca-amber); background: var(--ca-amber-soft); font-size: 12px; overflow-wrap: anywhere; }
+.rd-page > .rc-context { margin: 24px 0; padding: 0 20px; background: var(--ca-surface); }

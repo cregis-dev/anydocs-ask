@@ -67,6 +67,8 @@ export type ReportListing = {
 };
 
 export type RunRecord = {
+  input_snapshot?: import('../runs/input-snapshot-types').RunInputSnapshot;
+  input_snapshot_status?: 'captured' | 'not_generated' | 'omitted_by_policy';
   ts: string;
   request_id: string;
   session_id: string | null;

@@ -61,6 +61,8 @@ import type {
   TrafficWindow,
 } from './app-types';
 import { RunDetailScreen } from './run-detail';
+import { TrafficConversations } from './traffic-conversations';
+import { groupConversations, matchesConversationRun } from '../runs/conversations';
 
 const PROJECT_TABS = ['ask', 'index', 'eval', 'traffic', 'feedback', 'settings'] as const;
 type ProjectTab = typeof PROJECT_TABS[number];
@@ -424,12 +426,9 @@ function TrafficTab({ projectName, window: traffic, view }: { projectName: strin
   const [page, setPage] = useState(view?.page ?? 1);
   const [analyzing, setAnalyzing] = useState(false);
   const records = traffic?.records ?? [];
-  const filtered = useMemo(() => [...records].reverse().filter((record) => {
-    if (query && !record.query.toLowerCase().includes(query.toLowerCase())) return false;
-    if (source && (record.source ?? 'reader') !== source) return false;
-    if (kind && record.answer.kind !== kind) return false;
-    return true;
-  }), [records, query, source, kind]);
+  const groups = useMemo(() => groupConversations(records), [records]);
+  const filtered = useMemo(() => groups.filter((runs) => runs.some((record) =>
+    matchesConversationRun(record, { query, source, kind }))), [groups, query, source, kind]);
   const pageSize = 25;
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const visible = filtered.slice((Math.min(page, pages) - 1) * pageSize, Math.min(page, pages) * pageSize);
@@ -442,16 +441,10 @@ function TrafficTab({ projectName, window: traffic, view }: { projectName: strin
   };
   if (!traffic) return <WorkspaceEmpty icon={<BarChart3 />} title="No traffic data" detail="Persist Ask runs or connect the reader to populate operational metrics." />;
   return <section className="ca-workspace"><WorkspaceHeader eyebrow="Observability" title="Traffic" description="Inspect live questions, answer quality, and latency." actions={<button className="ca-button" disabled={analyzing} onClick={analyze}>{analyzing ? <LoaderCircle className="ca-spin" size={15} /> : <Sparkles size={15} />}Analyze</button>} />
-    <div className="ca-metric-strip ca-four"><Metric label={`Queries · ${range === 'all' ? 'all' : `${range}d`}`} value={totals?.count ?? 0} icon={<MessageSquareText />} /><Metric label="Error rate" value={formatPercent(totals?.errorRate)} icon={<CircleAlert />} /><Metric label="p50 latency" value={formatDuration(totals?.p50LatencyMs)} icon={<Activity />} /><Metric label="p95 latency" value={formatDuration(totals?.p95LatencyMs)} icon={<Activity />} /></div>
-    <div className="ca-toolbar"><label className="ca-search"><Search size={15} /><input value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} placeholder="Filter question…" /></label><select value={range} onChange={(e) => { const next = e.target.value; setRange(next); window.location.href = trafficHref(projectName, { range: next, query, source, kind, page: 1 }); }}><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="all">All time</option></select><select value={source} onChange={(e) => { setSource(e.target.value as TrafficViewState['source']); setPage(1); }}><option value="">All sources</option><option>reader</option><option>console</option><option>mcp</option></select><select value={kind} onChange={(e) => { setKind(e.target.value as TrafficViewState['kind']); setPage(1); }}><option value="">All outcomes</option><option>answer</option><option>clarify</option><option>error</option></select></div>
-    <RunTable projectName={projectName} records={visible} returnTo={returnTo} />
-    <Pagination page={Math.min(page, pages)} pages={pages} total={filtered.length} onChange={setPage} />
+    <div className="ca-metric-strip ca-four"><Metric label={`Conversations · ${range === 'all' ? 'all' : `${range}d`}`} value={groups.length} icon={<MessageSquareText />} /><Metric label={`Runs · ${totals?.count ?? 0} · Error rate`} value={formatPercent(totals?.errorRate)} icon={<CircleAlert />} /><Metric label="p50 run latency" value={formatDuration(totals?.p50LatencyMs)} icon={<Activity />} /><Metric label="p95 run latency" value={formatDuration(totals?.p95LatencyMs)} icon={<Activity />} /></div>
+    <div className="ca-toolbar"><label className="ca-search"><Search size={15} /><input aria-label="Search conversations" value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} placeholder="Search questions, answers, session ID..." /></label><select aria-label="Traffic date range" value={range} onChange={(e) => { const next = e.target.value; setRange(next); window.location.href = trafficHref(projectName, { range: next, query, source, kind, page: 1 }); }}><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="all">All time</option></select><select aria-label="Traffic source" value={source} onChange={(e) => { setSource(e.target.value as TrafficViewState['source']); setPage(1); }}><option value="">All sources</option><option>reader</option><option>console</option><option>mcp</option></select><select aria-label="Run outcome" value={kind} onChange={(e) => { setKind(e.target.value as TrafficViewState['kind']); setPage(1); }}><option value="">All outcomes</option><option>answer</option><option>clarify</option><option>error</option></select></div>
+    <TrafficConversations projectName={projectName} groups={visible} returnTo={returnTo} filters={{ query, source, kind }} pagination={<Pagination page={Math.min(page, pages)} pages={pages} total={filtered.length} onChange={setPage} />} />
   </section>;
-}
-
-function RunTable({ projectName, records, returnTo }: { projectName: string; records: RunRecord[]; returnTo: string }) {
-  if (records.length === 0) return <EmptyState icon={<Search />} title="No matching runs" detail="Adjust the filters to broaden the result set." />;
-  return <div className="ca-table-wrap"><table className="ca-table"><thead><tr><th>Time</th><th>Source</th><th>Question</th><th>Outcome</th><th>Latency</th><th><span className="ca-sr-only">Open</span></th></tr></thead><tbody>{records.map((run) => { const href = `/p/${encodeURIComponent(projectName)}/runs/${encodeURIComponent(run.request_id)}?return=${encodeURIComponent(returnTo)}`; return <tr key={run.request_id} tabIndex={0} aria-label={`Inspect run: ${run.query}`} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); window.location.href = href; } }} onClick={() => { window.location.href = href; }}><td><time>{formatTimestamp(run.ts)}</time></td><td><StatusBadge>{run.source ?? 'reader'}</StatusBadge></td><td className="ca-question-cell"><a href={href} onClick={(event) => event.stopPropagation()}>{run.query}</a></td><td><StatusBadge tone={run.answer.kind === 'answer' ? 'live' : run.answer.kind === 'error' ? 'error' : 'warning'}>{run.answer.kind}</StatusBadge></td><td>{formatDuration(run.answer.latency_ms)}</td><td><ChevronRight size={15} /></td></tr>; })}</tbody></table></div>;
 }
 
 function FeedbackTab({ projectName, snapshot }: { projectName: string; snapshot?: FeedbackSnapshot }) {
