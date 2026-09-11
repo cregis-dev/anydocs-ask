@@ -20,6 +20,7 @@
 
 import { performance } from 'node:perf_hooks';
 import { randomBytes } from 'node:crypto';
+import { createInputCapture, type RunInputSnapshot } from '../runs/input-snapshot.ts';
 import type { DbHandle } from '../db/index.ts';
 import type { Embedder } from '../embedding/types.ts';
 import type { LLM } from '../llm/types.ts';
@@ -93,6 +94,7 @@ export type AskStreamHooks = {
  * commands read this back to compute recall-failure / latency / etc. metrics.
  */
 export type AskTrace = {
+  input_snapshot?: RunInputSnapshot;
   /** Ranked chunks (RRF order, or cross-encoder order when enabled). Empty on
    *  early-error paths (validation / invalid_scope). */
   fused: AskTraceFusedChunk[];
@@ -566,6 +568,18 @@ async function askWithTraceInternal(
     systemPrompt: prompt.system,
     userPrompt: prompt.user,
   };
+  const inputCapture = createInputCapture({
+    question, prompt_question: promptQuestion, search_question: searchQuestion,
+    retrieve_question: retrieveQuestion, current_page: req.context?.current_page_id ?? null,
+    history: safeHistory ?? [],
+    documents: [...prompt.chunkById].map(([citation_id, chunk], index) => ({
+      citation_id, chunk_id: chunk.chunk_id, page_id: chunk.page_id, title: chunk.page_title,
+      lang: chunk.lang, url: chunk.page_url, path: chunk.in_page_path, text: chunk.text,
+      content_hash: chunk.content_hash, parent_id: chunk.parent_id ?? null,
+      expanded_parent: pickedChunks[index]?.expanded_parent ?? null,
+    })),
+  });
+  const initialAttempt = inputCapture.addAttempt(llmInput);
   const isStreaming = !!(hooks.onDelta && deps.llm.streamGenerate);
   const generationStartedAt = performance.now();
   try {
@@ -575,7 +589,10 @@ async function askWithTraceInternal(
           onDelta: hooks.onDelta!,
         })
       : await deps.llm.generate(llmInput);
+    initialAttempt.outcome = 'returned';
+    initialAttempt.model = llmOutput.modelUsed;
   } catch (err) {
+    initialAttempt.outcome = 'error';
     timings.generation_ms = elapsedMs(generationStartedAt);
     // LLM call failure (gateway returned garbage / timed out / threw mid-
     // stream). Distinct from `llm_unavailable` which is the *construction*
@@ -590,6 +607,7 @@ async function askWithTraceInternal(
         (err as Error).message,
       ),
       trace: {
+        input_snapshot: inputCapture.snapshot,
         fused: fusedTrace,
         search_question: searchQuestion,
         retrieve_question: retrieveQuestion,
@@ -625,6 +643,7 @@ async function askWithTraceInternal(
   // Bumped 1 → 2 in codex round-11 (2/20 still 400 on the first retry;
   // a second retry should bring flake rate below 1%).
   let citationRetryCount = 0;
+  initialAttempt.accepted = post.used_chunks > 0;
   if (!isStreaming) {
     while (post.used_chunks === 0 && citationRetryCount < MAX_CITATION_RETRIES) {
       citationRetryCount += 1;
@@ -632,8 +651,11 @@ async function askWithTraceInternal(
         systemPrompt: prompt.system + '\n\n' + citationReinforcementFor(queryLang),
         userPrompt: prompt.user,
       };
+      const retryAttempt = inputCapture.addAttempt(retryInput);
       try {
         const retryOutput = await deps.llm.generate(retryInput);
+        retryAttempt.outcome = 'returned';
+        retryAttempt.model = retryOutput.modelUsed;
         const retryPost = postprocess({
           answerLang: queryLang,
           rawAnswer: retryOutput.text,
@@ -641,11 +663,13 @@ async function askWithTraceInternal(
           question,
         });
         if (retryPost.used_chunks > 0) {
+          retryAttempt.accepted = true;
           llmOutput = retryOutput;
           post = retryPost;
           break;
         }
       } catch {
+        retryAttempt.outcome = 'error';
         // Retry itself threw — keep looping; the primary diagnostic is
         // "first call had no citations" and the trace count records how
         // many recovery attempts we made.
@@ -665,6 +689,7 @@ async function askWithTraceInternal(
         'LLM response contained no valid citations',
       ),
       trace: {
+        input_snapshot: inputCapture.snapshot,
         fused: fusedTrace,
         search_question: searchQuestion,
         retrieve_question: retrieveQuestion,
@@ -710,6 +735,7 @@ async function askWithTraceInternal(
       ...(historyWindow > 0 ? { history_window: historyWindow } : {}),
     },
     trace: {
+      input_snapshot: inputCapture.snapshot,
       fused: fusedTrace,
       search_question: searchQuestion,
       retrieve_question: retrieveQuestion,

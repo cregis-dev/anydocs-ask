@@ -174,6 +174,13 @@ test('/v1/ask happy path appends one RunRecord with retrieval trace + answer fie
     }
     assert.equal(llm.routerCalls.length, 0, 'short standalone asks skip router generation');
     assert.equal(llm.calls.length, 1, 'only answer generation should use the main LLM');
+    assert.equal(r.input_snapshot_status, 'captured');
+    assert.equal(r.input_snapshot?.attempts[0]?.system_prompt, llm.calls[0]?.systemPrompt);
+    assert.equal(r.input_snapshot?.attempts[0]?.user_prompt, llm.calls[0]?.userPrompt);
+    assert.equal(r.input_snapshot?.attempts[0]?.accepted, true);
+    assert.equal(r.input_snapshot?.documents.length, r.retrieval.selected_context?.length);
+    assert.deepEqual(r.input_snapshot?.history, []);
+    assert.equal('input_snapshot' in await res.json(), false);
     // request_id is uuid-shaped
     assert.match(r.request_id, /^[0-9a-f-]{36}$/i);
   } finally {
@@ -269,6 +276,8 @@ test('/v1/ask LLM throw: 503 + appends one RunRecord with kind=error/llm_failed 
     const r = JSON.parse(readFileSync(file!, 'utf8').trim()) as RunRecord;
     assert.equal(r.answer.kind, 'error');
     assert.equal(r.answer.error_code, 'llm_failed');
+    assert.equal(r.input_snapshot_status, 'captured');
+    assert.equal(r.input_snapshot?.attempts[0]?.outcome, 'error');
     // runs.jsonl should keep the upstream diagnostic (md = detail ?? message)
     // so eval / analyze still see gateway-flavour incidents.
     assert.match(r.answer.md ?? '', /gateway/i);

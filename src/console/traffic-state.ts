@@ -111,7 +111,9 @@ export function loadTrafficWindow(stateRoot: string, range: TrafficRange = 7): T
   const records: RunRecord[] = [];
   for (const line of iterateRunsSince({ stateRoot, sinceMs }) as Iterable<RunsLine>) {
     if (!isRunRecord(line)) continue;
-    records.push(line);
+    // Full prompts are fetched only when a run's context is expanded.
+    const { input_snapshot: _snapshot, ...summary } = line;
+    records.push(summary);
   }
   const firstRecordMs = records.length > 0 ? Date.parse(records[0]!.ts) : nowMs;
   const days = range === 'all'

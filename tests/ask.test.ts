@@ -466,9 +466,43 @@ test('ask: no_citations on first call → retry → answer on second call', asyn
     assert.equal(result.type, 'answer', 'retry should recover into a citable answer');
     assert.equal(call, 2, 'exactly one retry');
     assert.equal(trace.citation_retry_count, 1);
+    assert.equal(trace.input_snapshot?.attempts.length, 2);
+    assert.equal(trace.input_snapshot?.attempts[0]?.accepted, false);
+    assert.equal(trace.input_snapshot?.attempts[1]?.accepted, true);
+    assert.match(trace.input_snapshot?.attempts[1]?.system_prompt ?? '', /Important correction|previous response|MUST/);
   } finally {
     await ctx.cleanup();
   }
+});
+
+test('generation snapshot contains only history selected by the router and the exact adapter prompts', async () => {
+  const ctx = await bootstrap(async (root) => {
+    await writePage(root, 'en', { id: 'fees', title: 'Fees', body: 'Transaction records include a fee field.' });
+    await writeNav(root, 'en', { version: 1, items: [{ type: 'page', pageId: 'fees' }] });
+  });
+  try {
+    let useHistory = true;
+    const deps = { ...ctx, intentRouter: { async route(args: { question: string }) {
+      return { originalQuestion: args.question, effectiveQuestion: 'Transaction fee field', usesHistory: useHistory, rewritten: useHistory,
+        intent: 'general_docs' as const, product: 'unknown' as const, apiIntent: false, signatureAuthIntent: false,
+        projectSetupIntent: false, apiReferenceHints: [], supplementalContextHints: [], supplementalPageIds: [], apiReferenceVersionPrefs: [], reason: null };
+    } } };
+    ctx.llm.setResponder(() => 'The response includes fee [cit_1].');
+    const req = { question: 'What about the fee?', context: { current_page_id: 'fees', history: [{ question: 'Previous transaction? sign=private-sign', answer_summary: 'A saved summary, not the complete answer.' }] } };
+    const first = await askWithTrace(deps, req);
+    const snapshot = first.trace.input_snapshot!;
+    assert.equal(snapshot.current_page, 'fees');
+    assert.equal(snapshot.history.length, 1);
+    assert.equal(snapshot.history[0]!.question, 'Previous transaction? sign=[REDACTED]');
+    assert.equal(snapshot.history[0]!.answer_summary, req.context.history[0]!.answer_summary);
+    assert.equal(snapshot.attempts[0]!.system_prompt, ctx.llm.calls[0]!.systemPrompt);
+    assert.equal(snapshot.attempts[0]!.user_prompt, ctx.llm.calls[0]!.userPrompt);
+    assert.ok(snapshot.documents.every((doc) => snapshot.attempts[0]!.user_prompt.includes(doc.text)));
+    useHistory = false;
+    const second = await askWithTrace(deps, req);
+    assert.deepEqual(second.trace.input_snapshot?.history, []);
+    assert.doesNotMatch(second.trace.input_snapshot?.attempts[0]?.user_prompt ?? '', /Previous transaction/);
+  } finally { await ctx.cleanup(); }
 });
 
 // Codex round-11: bumped MAX_CITATION_RETRIES 1 → 2. When the first retry

@@ -64,6 +64,39 @@ function makeRegistry(): ProcessRegistry {
 
 const CONSOLE_AUTH_TOKEN = 'test-console-auth-token-32-characters';
 
+test('conversation API validates input and isolates project history', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['one', 'two']);
+    const root = ensureStateRoot(ws, 'one');
+    await fs.mkdir(join(root, 'runs'), { recursive: true });
+    const record = { ts: '2026-09-10T01:00:00.000Z', request_id: 'anchor', session_id: 'session', query: 'hello', source: 'reader',
+      filters: {}, context_pageId: null, retrieval: { fused: [], subtree_ask_triggered: false },
+      answer: { kind: 'answer', md: 'hi', citations: [], latency_ms: 10 }, feedback: { beta: null, gamma: null } };
+    await fs.writeFile(join(root, 'runs', '2026-W37.jsonl'), `${JSON.stringify(record)}\n`);
+    const app = createConsoleApp({ workspacePath: ws, consolePort: 4100, registry: makeRegistry() });
+    assert.equal((await app.request('/api/projects/one/conversation')).status, 400);
+    assert.equal((await app.request('/api/projects/one/conversation?request_id=anchor&offset=-1')).status, 400);
+    assert.equal((await app.request('/api/projects/one/conversation?request_id=anchor&offset=1.5')).status, 400);
+    assert.equal((await app.request('/api/projects/two/conversation?request_id=anchor')).status, 404);
+    assert.equal((await app.request('/api/projects/missing/conversation?request_id=anchor')).status, 404);
+    const response = await app.request('/api/projects/one/conversation?request_id=anchor');
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal((await response.json()).turns[0].query, 'hello');
+    const contextResponse = await app.request('/api/projects/one/runs/anchor/context');
+    assert.equal(contextResponse.status, 200);
+    assert.equal(contextResponse.headers.get('cache-control'), 'no-store');
+    const context = await contextResponse.json();
+    assert.equal(context.status, 'legacy');
+    assert.equal(context.snapshot, null);
+    assert.equal((await app.request('/api/projects/two/runs/anchor/context')).status, 404);
+    const protectedApp = createConsoleApp({ workspacePath: ws, consolePort: 4100, registry: makeRegistry(), authToken: CONSOLE_AUTH_TOKEN });
+    assert.equal((await protectedApp.request('/api/projects/one/conversation?request_id=anchor')).status, 401);
+    assert.equal((await protectedApp.request('/api/projects/one/runs/anchor/context')).status, 401);
+  } finally { await cleanup(); }
+});
+
 function readConsoleBootstrap<T = Record<string, unknown>>(body: string): T {
   const match = /window\.__CONSOLE_APP__ = (\{.*\});<\/script>/.exec(body);
   assert.ok(match?.[1], 'expected serialized React Console bootstrap state');

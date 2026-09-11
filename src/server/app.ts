@@ -981,6 +981,8 @@ function appendRun(
     filters: args.filters,
     context_pageId: args.contextPageId,
     source: args.source,
+    input_snapshot_status: trace.input_snapshot ? 'captured' : 'not_generated',
+    ...(trace.input_snapshot ? { input_snapshot: trace.input_snapshot } : {}),
     retrieval: {
       fused: trace.fused.map((f) => ({
         chunk_id: f.chunk_id,

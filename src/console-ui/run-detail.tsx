@@ -27,6 +27,7 @@ import {
 import { apiJson, projectApi, resolveRunChunks } from './api';
 import type { RunDetailBootstrap, RunRecord } from './app-types';
 import type { ResolvedIndexedChunk } from './types';
+import { RunContext } from './run-context';
 
 type RetrievalMode = 'context' | 'candidates' | 'citations';
 type FusedHit = RunRecord['retrieval']['fused'][number];
@@ -137,6 +138,7 @@ export function RunDetailScreen({
           </aside>
         </div>
 
+        <RunContext projectName={data.projectName} requestId={run.request_id} run={run} full />
         <RetrievalInspector
           projectName={data.projectName}
           run={run}

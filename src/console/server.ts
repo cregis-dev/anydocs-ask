@@ -49,6 +49,7 @@ import {
 } from './feedback-state.ts';
 import { loadIndexSnapshot, type ChildIndexStatus } from './index-state.ts';
 import { loadTrafficWindow, parseTrafficViewOptions } from './traffic-state.ts';
+import { loadConversation } from './conversation-state.ts';
 import { loadProjectHomeStats, summarizeWorkspace } from './home-state.ts';
 import { loadAskConfigForView } from './ask-config-state.ts';
 import { parseAndValidateAskConfig } from '../config.ts';
@@ -648,6 +649,39 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         publicRootPath: nav.publicRootPath,
       },
     }));
+  });
+
+  app.get('/api/projects/:name/runs/:requestId/context', (c) => {
+    const project = findProject(deps.workspacePath, c.req.param('name'));
+    if (!project) return c.json({ error: 'unknown project' }, 404);
+    const stateRoot = projectStateRoot(deps.workspacePath, project);
+    if (!stateRoot) return c.json({ error: 'no projectId' }, 400);
+    const run = loadRunDetail(stateRoot, c.req.param('requestId'));
+    if (!run) return c.json({ error: 'Run not found' }, 404);
+    c.header('Cache-Control', 'no-store');
+    return c.json({
+      snapshot: run.input_snapshot ?? null,
+      status: run.input_snapshot_status ?? 'legacy',
+      currentPage: run.context_pageId,
+      historyWindow: run.answer.history_window ?? null,
+      selectedContext: run.retrieval.selected_context ?? [],
+    });
+  });
+
+  app.get('/api/projects/:name/conversation', (c) => {
+    const project = findProject(deps.workspacePath, c.req.param('name'));
+    if (!project) return c.json({ error: 'unknown project' }, 404);
+    const stateRoot = projectStateRoot(deps.workspacePath, project);
+    if (!stateRoot) return c.json({ error: 'no projectId' }, 400);
+    const requestId = c.req.query('request_id');
+    const offset = Number(c.req.query('offset') ?? '0');
+    if (!requestId || requestId.length > 256 || !Number.isSafeInteger(offset) || offset < 0) {
+      return c.json({ error: 'Invalid request_id or offset' }, 400);
+    }
+    const conversation = loadConversation(stateRoot, requestId, offset);
+    if (!conversation) return c.json({ error: 'Conversation not found in saved runs' }, 404);
+    c.header('Cache-Control', 'no-store');
+    return c.json(conversation);
   });
 
   app.get('/api/projects/:name/runs', (c) => {
