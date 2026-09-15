@@ -14,7 +14,10 @@ import {
   ChevronRight,
   CircleAlert,
   ClipboardCheck,
+  Copy,
   Database,
+  Download,
+  ExternalLink,
   FileChartColumn,
   FileText,
   FolderOpen,
@@ -63,6 +66,7 @@ import type {
 import { RunDetailScreen } from './run-detail';
 import { TrafficConversations } from './traffic-conversations';
 import { groupConversations, matchesConversationRun } from '../runs/conversations';
+import type { RuntimeBuildMetadata } from '../runtime-build';
 
 const PROJECT_TABS = ['ask', 'index', 'eval', 'traffic', 'feedback', 'settings'] as const;
 type ProjectTab = typeof PROJECT_TABS[number];
@@ -128,6 +132,7 @@ function HomeScreen({ data }: { data: HomeBootstrap }) {
     idleTimeoutMin: data.idleTimeoutMin,
     authEnabled: data.authEnabled,
     publicRootPath: data.publicRootPath,
+    build: data.build,
   };
   const [addOpen, setAddOpen] = useState(false);
   const [path, setPath] = useState('');
@@ -241,6 +246,7 @@ function ProjectScreen({ data }: { data: ProjectBootstrap }) {
   const [tab, setTab] = useHashTab();
   const [running, setRunning] = useState(data.running);
   const [health, setHealth] = useState<'idle' | 'warming' | 'ready' | 'error'>(data.running ? 'warming' : 'idle');
+  const [askBuild, setAskBuild] = useState<RuntimeBuildMetadata | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
 
@@ -249,8 +255,22 @@ function ProjectScreen({ data }: { data: ProjectBootstrap }) {
     let cancelled = false;
     const check = async () => {
       try {
-        const result = await apiJson<{ runtime?: { warm?: boolean }; warm?: boolean }>(projectApi(data.project.name, '/health'));
-        if (!cancelled) setHealth((result.runtime?.warm ?? result.warm) ? 'ready' : 'warming');
+        const response = await fetch(projectApi(data.project.name, '/health'), {
+          headers: { Accept: 'application/json' },
+        });
+        const result = await response.json() as {
+          runtime?: { warm?: boolean };
+          warm?: boolean;
+          build?: RuntimeBuildMetadata;
+          error?: string;
+        };
+        if (!response.ok && response.status !== 503) {
+          throw new Error(result.error ?? `Health check failed (${response.status})`);
+        }
+        if (!cancelled) {
+          setHealth((result.runtime?.warm ?? result.warm) ? 'ready' : 'warming');
+          setAskBuild(result.build ?? null);
+        }
       } catch {
         if (!cancelled) setHealth('error');
       }
@@ -274,6 +294,7 @@ function ProjectScreen({ data }: { data: ProjectBootstrap }) {
       } else {
         setRunning(null);
         setHealth('idle');
+        setAskBuild(null);
       }
     } catch (err) {
       window.alert(errorMessage(err));
@@ -295,6 +316,7 @@ function ProjectScreen({ data }: { data: ProjectBootstrap }) {
               <div><dt>index</dt><dd>{data.project.indexed ? 'available' : 'not built'}</dd></div>
               <div><dt>process</dt><dd>{running ? `:${running.port}${running.pid ? ` · pid ${running.pid}` : ''}` : 'stopped'}</dd></div>
             </dl>
+            <RuntimeBuildInfo consoleBuild={data.navigation.build} askBuild={askBuild} running={Boolean(running)} />
             <div className="ca-split-actions">
               <button className="ca-button ca-primary" disabled={Boolean(running) || lifecycleBusy || !data.project.valid} onClick={() => lifecycle('start')}><Play size={15} />Start</button>
               <button className="ca-button" disabled={!running || lifecycleBusy} onClick={() => lifecycle('stop')}><Square size={14} />Stop</button>
@@ -323,6 +345,52 @@ function ProjectScreen({ data }: { data: ProjectBootstrap }) {
         </main>
       </div>
     </div>
+  );
+}
+
+function RuntimeBuildInfo({
+  consoleBuild,
+  askBuild,
+  running,
+}: {
+  consoleBuild: RuntimeBuildMetadata;
+  askBuild: RuntimeBuildMetadata | null;
+  running: boolean;
+}) {
+  const build = askBuild ?? consoleBuild;
+  const mismatch = Boolean(
+    askBuild?.release && consoleBuild.release && askBuild.release !== consoleBuild.release,
+  );
+  const askReleaseMissing = Boolean(running && askBuild && consoleBuild.release && !askBuild.release);
+  if (!hasBuildMetadata(build) && !hasBuildMetadata(consoleBuild)) return null;
+
+  return (
+    <div className="ca-runtime-build">
+      <dl className="ca-kv ca-build-kv">
+        <div><dt>release</dt><dd><ReleaseValue build={build} /></dd></div>
+        {build.engine_release && <div><dt>engine</dt><dd><code title={build.engine_release}>{shortRelease(build.engine_release)}</code></dd></div>}
+        {build.built_at && <div><dt>built</dt><dd><time dateTime={build.built_at}>{formatBuildTime(build.built_at)}</time></dd></div>}
+      </dl>
+      {mismatch && <div className="ca-version-warning" role="alert"><CircleAlert size={14} /><span>Version mismatch: Console {shortRelease(consoleBuild.release!)} · Ask {shortRelease(askBuild!.release!)}</span></div>}
+      {askReleaseMissing && <div className="ca-version-warning" role="alert"><CircleAlert size={14} /><span>Ask did not report a release.</span></div>}
+    </div>
+  );
+}
+
+function ReleaseValue({ build }: { build: RuntimeBuildMetadata }) {
+  const [copied, setCopied] = useState(false);
+  if (!build.release) return <span>unknown</span>;
+  const copy = async () => {
+    await navigator.clipboard.writeText(build.release!);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1_500);
+  };
+  const label = <code title={build.release}>{shortRelease(build.release)}</code>;
+  return (
+    <span className="ca-release-value">
+      {build.release_url ? <a href={build.release_url} target="_blank" rel="noreferrer">{label}<ExternalLink size={11} /></a> : label}
+      <button type="button" onClick={copy} aria-label={copied ? 'Release copied' : 'Copy release'} title={copied ? 'Copied' : 'Copy release'}>{copied ? <Check size={12} /> : <Copy size={12} />}</button>
+    </span>
   );
 }
 
@@ -425,6 +493,7 @@ function TrafficTab({ projectName, window: traffic, view }: { projectName: strin
   const [kind, setKind] = useState(view?.kind ?? '');
   const [page, setPage] = useState(view?.page ?? 1);
   const [analyzing, setAnalyzing] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const records = traffic?.records ?? [];
   const groups = useMemo(() => groupConversations(records), [records]);
   const filtered = useMemo(() => groups.filter((runs) => runs.some((record) =>
@@ -434,17 +503,102 @@ function TrafficTab({ projectName, window: traffic, view }: { projectName: strin
   const visible = filtered.slice((Math.min(page, pages) - 1) * pageSize, Math.min(page, pages) * pageSize);
   const returnTo = trafficHref(projectName, { range, query, source, kind, page: Math.min(page, pages) });
   const totals = traffic?.totals;
+  const matchingRuns = useMemo(
+    () => records.filter((record) => matchesConversationRun(record, { query, source, kind })).length,
+    [records, query, source, kind],
+  );
   const analyze = async () => {
     setAnalyzing(true);
     try { await apiJson(projectApi(projectName, `/analyze?since=${range === 'all' ? '1970-01-01' : `${range}d`}`), { method: 'POST' }); window.location.reload(); }
     catch (err) { window.alert(errorMessage(err)); setAnalyzing(false); }
   };
   if (!traffic) return <WorkspaceEmpty icon={<BarChart3 />} title="No traffic data" detail="Persist Ask runs or connect the reader to populate operational metrics." />;
-  return <section className="ca-workspace"><WorkspaceHeader eyebrow="Observability" title="Traffic" description="Inspect live questions, answer quality, and latency." actions={<button className="ca-button" disabled={analyzing} onClick={analyze}>{analyzing ? <LoaderCircle className="ca-spin" size={15} /> : <Sparkles size={15} />}Analyze</button>} />
+  return <section className="ca-workspace"><WorkspaceHeader eyebrow="Observability" title="Traffic" description="Inspect live questions, answer quality, and latency." actions={<div className="ca-inline-actions"><button className="ca-button" disabled={analyzing} onClick={analyze}>{analyzing ? <LoaderCircle className="ca-spin" size={15} /> : <Sparkles size={15} />}Analyze</button><button className="ca-button" onClick={() => setExportOpen(true)}><Download size={15} />Export</button></div>} />
     <div className="ca-metric-strip ca-four"><Metric label={`Conversations · ${range === 'all' ? 'all' : `${range}d`}`} value={groups.length} icon={<MessageSquareText />} /><Metric label={`Runs · ${totals?.count ?? 0} · Error rate`} value={formatPercent(totals?.errorRate)} icon={<CircleAlert />} /><Metric label="p50 run latency" value={formatDuration(totals?.p50LatencyMs)} icon={<Activity />} /><Metric label="p95 run latency" value={formatDuration(totals?.p95LatencyMs)} icon={<Activity />} /></div>
     <div className="ca-toolbar"><label className="ca-search"><Search size={15} /><input aria-label="Search conversations" value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} placeholder="Search questions, answers, session ID..." /></label><select aria-label="Traffic date range" value={range} onChange={(e) => { const next = e.target.value; setRange(next); window.location.href = trafficHref(projectName, { range: next, query, source, kind, page: 1 }); }}><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="all">All time</option></select><select aria-label="Traffic source" value={source} onChange={(e) => { setSource(e.target.value as TrafficViewState['source']); setPage(1); }}><option value="">All sources</option><option>reader</option><option>console</option><option>mcp</option></select><select aria-label="Run outcome" value={kind} onChange={(e) => { setKind(e.target.value as TrafficViewState['kind']); setPage(1); }}><option value="">All outcomes</option><option>answer</option><option>clarify</option><option>error</option></select></div>
     <TrafficConversations projectName={projectName} groups={visible} returnTo={returnTo} filters={{ query, source, kind }} pagination={<Pagination page={Math.min(page, pages)} pages={pages} total={filtered.length} onChange={setPage} />} />
+    <TrafficExportDialog
+      open={exportOpen}
+      onOpenChange={setExportOpen}
+      projectName={projectName}
+      filters={{ range, query, source, kind }}
+      matchingRuns={matchingRuns}
+      matchingSessions={filtered.length}
+    />
   </section>;
+}
+
+function TrafficExportDialog({
+  open,
+  onOpenChange,
+  projectName,
+  filters,
+  matchingRuns,
+  matchingSessions,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  projectName: string;
+  filters: { range: string; query: string; source: string; kind: string };
+  matchingRuns: number;
+  matchingSessions: number;
+}) {
+  const [format, setFormat] = useState<'csv' | 'jsonl'>('csv');
+  const [groupBy, setGroupBy] = useState<'run' | 'session'>('run');
+  const [includeContent, setIncludeContent] = useState(false);
+  const params = new URLSearchParams({
+    range: filters.range,
+    format,
+    group_by: groupBy,
+    include_content: includeContent ? 'true' : 'false',
+  });
+  if (filters.query) params.set('query', filters.query);
+  if (filters.source) params.set('source', filters.source);
+  if (filters.kind) params.set('kind', filters.kind);
+  const href = projectApi(projectName, `/traffic/export?${params.toString()}`);
+  const exportCount = groupBy === 'session' ? matchingSessions : matchingRuns;
+
+  return <Dialog.Root open={open} onOpenChange={onOpenChange}>
+    <Dialog.Portal>
+      <Dialog.Overlay className="ca-dialog-overlay" />
+      <Dialog.Content className="ca-dialog ca-dialog-sm ca-export-dialog">
+        <div className="ca-dialog-heading">
+          <div><Dialog.Title>Export traffic data</Dialog.Title><Dialog.Description>Download all results matching the current filters, not only this page.</Dialog.Description></div>
+          <Dialog.Close className="ca-icon-button" aria-label="Close export dialog"><X size={18} /></Dialog.Close>
+        </div>
+        <div className="ca-export-grid">
+          <fieldset className="ca-choice-field">
+            <legend>Format</legend>
+            <div className="ca-segmented" role="radiogroup" aria-label="Export format">
+              <button type="button" role="radio" aria-checked={format === 'csv'} data-active={format === 'csv'} onClick={() => setFormat('csv')}>CSV</button>
+              <button type="button" role="radio" aria-checked={format === 'jsonl'} data-active={format === 'jsonl'} onClick={() => setFormat('jsonl')}>JSONL</button>
+            </div>
+            <p>{format === 'csv' ? 'Flat metrics for spreadsheets and BI tools.' : 'Structured retrieval traces for scripts and evals.'}</p>
+          </fieldset>
+          <fieldset className="ca-choice-field">
+            <legend>Group by</legend>
+            <div className="ca-segmented" role="radiogroup" aria-label="Export grouping">
+              <button type="button" role="radio" aria-checked={groupBy === 'run'} data-active={groupBy === 'run'} onClick={() => setGroupBy('run')}>Run</button>
+              <button type="button" role="radio" aria-checked={groupBy === 'session'} data-active={groupBy === 'session'} onClick={() => setGroupBy('session')}>Session</button>
+            </div>
+            <p>{groupBy === 'run' ? 'One record per matching request.' : 'Keeps all in-range turns for each matching conversation.'}</p>
+          </fieldset>
+        </div>
+        <label className="ca-export-content-toggle">
+          <input type="checkbox" checked={includeContent} onChange={(event) => setIncludeContent(event.target.checked)} />
+          <span><strong>Include question, answer, and context text</strong><small>Off by default. Credential patterns are redacted again during export.</small></span>
+        </label>
+        <div className="ca-export-summary" aria-live="polite">
+          <span>{exportCount} matching {groupBy === 'session' ? (exportCount === 1 ? 'session' : 'sessions') : (exportCount === 1 ? 'run' : 'runs')}</span>
+          <code>{filters.range === 'all' ? 'all time' : `${filters.range} days`} · {format.toUpperCase()}</code>
+        </div>
+        <div className="ca-dialog-actions">
+          <Dialog.Close className="ca-button" type="button">Cancel</Dialog.Close>
+          <a className="ca-button ca-primary" href={href} download onClick={() => onOpenChange(false)}><Download size={15} />Export data</a>
+        </div>
+      </Dialog.Content>
+    </Dialog.Portal>
+  </Dialog.Root>;
 }
 
 function FeedbackTab({ projectName, snapshot }: { projectName: string; snapshot?: FeedbackSnapshot }) {
@@ -568,6 +722,9 @@ function progressLabel(event: Record<string, unknown>): string { return String(e
 function readStoredTurns(key: string): ChatTurn[] { try { const value = JSON.parse(localStorage.getItem(key) ?? '[]') as unknown; return Array.isArray(value) ? value.slice(-20) as ChatTurn[] : []; } catch { return []; } }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function shortPath(path: string): string { const home = '/Users/'; return path.startsWith(home) ? `~/${path.split('/').slice(3).join('/')}` : path; }
+function shortRelease(value: string): string { return value.length > 10 ? value.slice(0, 7) : value; }
+function hasBuildMetadata(value: RuntimeBuildMetadata): boolean { return Boolean(value.release || value.engine_release || value.built_at); }
+function formatBuildTime(value: string): string { const date = new Date(value); return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date); }
 function capitalize(value: string): string { return value.charAt(0).toUpperCase() + value.slice(1); }
 function formatDecimal(value: number | null | undefined): string { return value === null || value === undefined ? '—' : value.toFixed(2); }
 function formatPercent(value: number | null | undefined): string { return value === null || value === undefined ? '—' : `${Math.round(value * 100)}%`; }

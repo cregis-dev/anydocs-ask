@@ -97,6 +97,45 @@ test('conversation API validates input and isolates project history', async () =
   } finally { await cleanup(); }
 });
 
+test('traffic export downloads filtered data with safe response headers', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs']);
+    const stateRoot = ensureStateRoot(ws, 'docs');
+    await seedRunsFile(stateRoot, [
+      makeRunRecord({ answer_id: 'answer-ok', kind: 'answer' }),
+      makeRunRecord({ answer_id: 'answer-error', kind: 'error' }),
+    ]);
+    const app = createConsoleApp({ workspacePath: ws, consolePort: 4100, registry: makeRegistry() });
+    const response = await app.request('/api/projects/docs/traffic/export?range=all&kind=error&format=csv&group_by=run');
+    const body = await response.text();
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'text/csv; charset=utf-8');
+    assert.match(response.headers.get('content-disposition') ?? '', /^attachment; filename="docs-traffic-all-run-/);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(response.headers.get('x-anydocs-export-schema'), '1');
+    assert.match(body, /req_answer-error/);
+    assert.doesNotMatch(body, /req_answer-ok/);
+    assert.doesNotMatch(body, /,q,a(?:,|\n)/);
+
+    const invalid = await app.request('/api/projects/docs/traffic/export?format=xml');
+    assert.equal(invalid.status, 400);
+    assert.match((await invalid.json()).error, /format must be csv or jsonl/);
+
+    const protectedApp = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: makeRegistry(),
+      authToken: CONSOLE_AUTH_TOKEN,
+    });
+    assert.equal((await protectedApp.request('/api/projects/docs/traffic/export')).status, 401);
+  } finally {
+    await cleanup();
+  }
+});
+
 function readConsoleBootstrap<T = Record<string, unknown>>(body: string): T {
   const match = /window\.__CONSOLE_APP__ = (\{.*\});<\/script>/.exec(body);
   assert.ok(match?.[1], 'expected serialized React Console bootstrap state');

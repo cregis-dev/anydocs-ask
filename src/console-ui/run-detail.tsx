@@ -362,6 +362,9 @@ function RunConfiguration({ run }: { run: RunRecord }) {
       <dl className="rd-config">
         <div><dt>Request</dt><dd><code>{run.request_id}</code></dd></div>
         {run.langfuse_trace_id && <div><dt>Langfuse trace</dt><dd><code>{run.langfuse_trace_id}</code></dd></div>}
+        {run.runtime_build?.release && <div><dt>Release</dt><dd>{run.runtime_build.release_url ? <a href={run.runtime_build.release_url} target="_blank" rel="noreferrer"><code title={run.runtime_build.release}>{shortId(run.runtime_build.release)}</code><ExternalLink size={11} /></a> : <code title={run.runtime_build.release}>{shortId(run.runtime_build.release)}</code>}</dd></div>}
+        {run.runtime_build?.engine_release && <div><dt>Ask engine</dt><dd><code title={run.runtime_build.engine_release}>{shortId(run.runtime_build.engine_release)}</code></dd></div>}
+        {run.runtime_build?.built_at && <div><dt>Built</dt><dd><time dateTime={run.runtime_build.built_at}>{formatTimestamp(run.runtime_build.built_at, true)}</time></dd></div>}
         <div><dt>Session</dt><dd><code>{run.session_id ?? '—'}</code></dd></div>
         <div><dt>Model</dt><dd>{run.answer.model ?? '—'}</dd></div>
         <div><dt>Router</dt><dd>{run.retrieval.router_strategy ?? 'legacy'}</dd></div>
