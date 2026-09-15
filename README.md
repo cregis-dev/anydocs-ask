@@ -44,6 +44,20 @@ curl http://127.0.0.1:4100/         # 应返回工作区首页 HTML
 
 > **首次运行提示：** BGE-M3 embedding 模型（约 600 MB）会在首次索引时自动下载到 `~/.cache/huggingface/anydocs-ask/transformers/`，视网速需 5–15 分钟；此后从本地缓存加载，预热约 5–10 秒。
 
+### Langfuse 可观测性（可选）
+
+在 Langfuse 项目的 **Settings > API Keys** 创建密钥，并把下面的变量放进工作区或项目 `.env`。只有公钥和私钥同时存在时才启用；未配置或 Langfuse 暂时不可用都不会阻断问答。
+
+```bash
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+LANGFUSE_TRACING_ENVIRONMENT=production
+LANGFUSE_RELEASE=<git-sha-or-version>
+```
+
+每轮问答对应一条 `answer-docs-question` trace，多轮通过现有 `session_id` 聚合。trace 内包含 intent、embedding、hybrid retrieval、context selection、rerank（启用时）和每一次 LLM generation；Anthropic token usage、检索候选与最终输出会一并记录。Reader 的点赞/点踩写成 `user-thumbs` BOOLEAN score。导出前会对密钥型字段做脱敏，Langfuse SDK 初始化和上报均为 fail-open。
+
 不想用控制台？见 [CLI 模式](#cli-模式纯-http)。
 
 ---

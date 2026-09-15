@@ -40,6 +40,7 @@ import {
 import { handleMcpRequest } from '../mcp/server.ts';
 import { resolveMcpToken } from '../mcp/gate.ts';
 import { inspectIndexedPage, resolveIndexedChunks } from '../index/inspect.ts';
+import { recordUserThumb, traceAskTurn } from '../observability/langfuse.ts';
 
 const SSE_HEARTBEAT_MS = 2_000;
 const SSE_DELTA_FLUSH_MS = 150;
@@ -217,6 +218,7 @@ export function createApp(deps: AppDeps): Hono {
             trace,
             latencyMs,
             source: 'mcp',
+            langfuseTraceId: null,
           });
         },
       },
@@ -241,22 +243,38 @@ export function createApp(deps: AppDeps): Hono {
         return c.json(prepared.result, prepared.status);
       }
       injectMultiTurnHistory(runtime, prepared.req, prepared.requestedSessionId);
+      const requestId = randomUUID();
+      const sessionId = runtime.sessions.getOrCreate(prepared.requestedSessionId);
       const t0 = performance.now();
       let ask: Awaited<ReturnType<typeof askWithTrace>>;
+      let langfuseTraceId: string | null = null;
       try {
-        ask = await askWithTrace(
+        const traced = await traceAskTurn(
           {
-            db: runtime.db,
-            embedder: runtime.embedder,
-            llm: prepared.llm,
-            reranker: runtime.reranker,
-            rerankerConfig: runtime.config.reranker,
-            retrievalConfig: runtime.config.retrieval,
-            promptConfig: runtime.config.prompt,
-            intentRouter: runtime.intentRouter,
+            requestId,
+            sessionId,
+            source: prepared.options.source,
+            question: prepared.req.question ?? '',
+            currentPageId: prepared.req.context?.current_page_id,
+            dryRun: prepared.options.dryRun,
           },
-          prepared.req,
+          () => askWithTrace(
+            {
+              db: runtime.db,
+              embedder: runtime.embedder,
+              llm: prepared.llm,
+              reranker: runtime.reranker,
+              rerankerConfig: runtime.config.reranker,
+              retrievalConfig: runtime.config.retrieval,
+              promptConfig: runtime.config.prompt,
+              intentRouter: runtime.intentRouter,
+            },
+            prepared.req,
+          ),
+          summarizeAskForLangfuse,
         );
+        ask = traced.value;
+        langfuseTraceId = traced.traceId;
       } catch (err) {
         return c.json(
           {
@@ -276,6 +294,9 @@ export function createApp(deps: AppDeps): Hono {
         t0,
         options: prepared.options,
         requestedSessionId: prepared.requestedSessionId,
+        requestId,
+        sessionId,
+        langfuseTraceId,
         queryVector,
       });
 
@@ -366,6 +387,8 @@ export function createApp(deps: AppDeps): Hono {
           return;
         }
         injectMultiTurnHistory(runtime, prepared.req, prepared.requestedSessionId);
+        const requestId = randomUUID();
+        const sessionId = runtime.sessions.getOrCreate(prepared.requestedSessionId);
 
         const abortController = new AbortController();
         stream.onAbort(() => {
@@ -375,38 +398,50 @@ export function createApp(deps: AppDeps): Hono {
         });
         const t0 = performance.now();
         let ask: Awaited<ReturnType<typeof askWithTraceStream>>;
+        let langfuseTraceId: string | null = null;
         try {
-          ask = await askWithTraceStream(
+          const traced = await traceAskTurn(
             {
-              db: runtime.db,
-              embedder: runtime.embedder,
-              llm: prepared.llm,
-              reranker: runtime.reranker,
-              rerankerConfig: runtime.config.reranker,
-              retrievalConfig: runtime.config.retrieval,
-              promptConfig: runtime.config.prompt,
-              intentRouter: runtime.intentRouter,
+              requestId,
+              sessionId,
+              source: prepared.options.source,
+              question: prepared.req.question ?? '',
+              currentPageId: prepared.req.context?.current_page_id,
+              dryRun: prepared.options.dryRun,
             },
-            prepared.req,
-            {
-              signal: abortController.signal,
-              onStatus: async (stage) => {
-                await writeFlushed('status', { stage });
-                if (stage === 'generating') {
-                  startHeartbeat();
-                }
+            () => askWithTraceStream(
+              {
+                db: runtime.db,
+                embedder: runtime.embedder,
+                llm: prepared.llm,
+                reranker: runtime.reranker,
+                rerankerConfig: runtime.config.reranker,
+                retrievalConfig: runtime.config.retrieval,
+                promptConfig: runtime.config.prompt,
+                intentRouter: runtime.intentRouter,
               },
-              onDelta: async (text) => {
-                await write('delta', { text });
-                if (!wroteFirstDelta) {
-                  wroteFirstDelta = true;
-                  await flushDeltaPadding();
-                } else {
-                  scheduleDeltaFlush();
-                }
+              prepared.req,
+              {
+                signal: abortController.signal,
+                onStatus: async (stage) => {
+                  await writeFlushed('status', { stage });
+                  if (stage === 'generating') startHeartbeat();
+                },
+                onDelta: async (text) => {
+                  await write('delta', { text });
+                  if (!wroteFirstDelta) {
+                    wroteFirstDelta = true;
+                    await flushDeltaPadding();
+                  } else {
+                    scheduleDeltaFlush();
+                  }
+                },
               },
-            },
+            ),
+            summarizeAskForLangfuse,
           );
+          ask = traced.value;
+          langfuseTraceId = traced.traceId;
         } catch (err) {
           stopHeartbeat();
           clearDeltaFlushTimer();
@@ -434,6 +469,9 @@ export function createApp(deps: AppDeps): Hono {
           t0,
           options: prepared.options,
           requestedSessionId: prepared.requestedSessionId,
+          requestId,
+          sessionId,
+          langfuseTraceId,
           queryVector: ask.queryVector,
         });
         await write('result', bodyOut);
@@ -481,8 +519,12 @@ export function createApp(deps: AppDeps): Hono {
     // we now read the `question` column directly and only fall back to
     // request body or empty string when the answers row is gone.
     const original = runtime.db
-      .prepare(`SELECT question, payload FROM answers WHERE answer_id = ?`)
-      .get(answer_id) as { question: string; payload: string } | undefined;
+      .prepare(`SELECT question, payload, langfuse_trace_id FROM answers WHERE answer_id = ?`)
+      .get(answer_id) as {
+        question: string;
+        payload: string;
+        langfuse_trace_id: string | null;
+      } | undefined;
     let question = '';
     let model = '';
     let retrieved: unknown = null;
@@ -547,6 +589,7 @@ export function createApp(deps: AppDeps): Hono {
           : null;
     const sessionId = sessionIdRaw && sessionIdRaw.length > 0 ? sessionIdRaw : null;
 
+    const rating = typeof obj.rating === 'number' ? obj.rating : null;
     runtime.db
       .prepare(
         `INSERT INTO feedback (
@@ -560,7 +603,7 @@ export function createApp(deps: AppDeps): Hono {
         typeof obj.current_page_id === 'string' ? obj.current_page_id : null,
         retrieved !== null ? JSON.stringify(retrieved) : null,
         generated,
-        typeof obj.rating === 'number' ? obj.rating : null,
+        rating,
         typeof obj.correction === 'string' ? obj.correction : null,
         Array.isArray(obj.bad_citation_ids)
           ? JSON.stringify(obj.bad_citation_ids.filter((x) => typeof x === 'string'))
@@ -572,6 +615,15 @@ export function createApp(deps: AppDeps): Hono {
         Date.now(),
         sessionId,
       );
+
+    if (original?.langfuse_trace_id && rating !== null && rating !== 0) {
+      runtime.trackBackgroundTask(recordUserThumb({
+        traceId: original.langfuse_trace_id,
+        answerId: answer_id,
+        rating,
+        comment: typeof obj.correction === 'string' ? obj.correction : null,
+      }));
+    }
 
     return c.json({ ok: true });
   });
@@ -791,6 +843,26 @@ function injectMultiTurnHistory(
   req.context = { ...(req.context ?? {}), history: turns };
 }
 
+function summarizeAskForLangfuse(
+  ask: Awaited<ReturnType<typeof askWithTrace>>,
+): Record<string, unknown> {
+  const { result } = ask;
+  if (result.type === 'answer') {
+    return {
+      type: result.type,
+      answer: result.answer_md,
+      citations: result.citations.map((citation) => ({
+        citation_id: citation.citation_id,
+        page_id: citation.page_id,
+        chunk_id: citation.chunk_id,
+      })),
+      used_chunks: result.used_chunks,
+    };
+  }
+  if (result.type === 'clarify') return { type: result.type, message: result.message };
+  return { type: result.type, code: result.code, message: result.message };
+}
+
 function finalizeAskCall(args: {
   runtime: Runtime;
   req: AskRequest;
@@ -799,26 +871,18 @@ function finalizeAskCall(args: {
   t0: number;
   options: AskRouteOptions;
   requestedSessionId: string | null;
+  requestId: string;
+  sessionId: string;
+  langfuseTraceId: string | null;
   queryVector: Float32Array | null;
 }): AskResult & { session_id: string; _dry_run?: true } {
-  const { runtime, req, result, trace, t0, options, requestedSessionId, queryVector } = args;
-
-  // Resolve session_id once up front so both runs.jsonl (audit log) and
-  // /v1/ask response carry the SAME id. Dogfood 2026-05-22 caught the bug:
-  // runs.jsonl had session_id=null on every row even when multi-turn was
-  // clearly running, because appendRun used to hardcode null while gamma
-  // resolved its own id later. We now mint once and thread the id through
-  // both writes — observeAsk receives it via preResolvedSessionId to skip
-  // calling getOrCreate a second time (which would mint a different id
-  // when requestedSessionId is null).
-  const sessionId = runtime.sessions.getOrCreate(requestedSessionId);
+  const {
+    runtime, req, result, trace, t0, options, requestedSessionId,
+    requestId, sessionId, langfuseTraceId, queryVector,
+  } = args;
 
   // Persist + log to runs.jsonl regardless of outcome — analyze needs
   // visibility into errors / clarifies / answers alike. Skipped for dry_run.
-  // requestId is minted up here (vs. inside appendRun) so the V3
-  // citation-check-update tail below can reference the SAME id — otherwise
-  // the update line couldn't be joined back to its source row.
-  const requestId = randomUUID();
   if (!options.dryRun) {
     const latencyMs =
       result.type === 'answer' ? result.latency_ms : Math.round(performance.now() - t0);
@@ -832,6 +896,7 @@ function finalizeAskCall(args: {
       trace,
       latencyMs,
       source: options.source,
+      langfuseTraceId,
     });
   }
 
@@ -873,7 +938,13 @@ function finalizeAskCall(args: {
   // Persist for feedback join (v1 doesn't dedupe; every call is its own row).
   // Skipped for dry_run — answer has no persistent identity in the cache.
   if (!options.dryRun && result.type !== 'error') {
-    persistAnswer(runtime.db, result, redactSensitiveText(req.question));
+    persistAnswer(
+      runtime.db,
+      result,
+      redactSensitiveText(req.question),
+      Date.now(),
+      langfuseTraceId,
+    );
   }
 
   // γ session observation (ARCH §15.2.2 / RFC 0001 §4.2). Gated internally
@@ -946,6 +1017,7 @@ function appendRun(
     trace: AskTrace;
     latencyMs: number;
     source: RunSource;
+    langfuseTraceId: string | null;
   },
 ): void {
   if (!runtime.runs.isEnabled) return;
@@ -981,6 +1053,7 @@ function appendRun(
     filters: args.filters,
     context_pageId: args.contextPageId,
     source: args.source,
+    ...(args.langfuseTraceId ? { langfuse_trace_id: args.langfuseTraceId } : {}),
     input_snapshot_status: trace.input_snapshot ? 'captured' : 'not_generated',
     ...(trace.input_snapshot ? { input_snapshot: trace.input_snapshot } : {}),
     retrieval: {

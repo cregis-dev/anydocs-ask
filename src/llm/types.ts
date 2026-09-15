@@ -14,6 +14,15 @@ export type LLMGenerateInput = {
    * message rendering). Optional — providers default to a sensible value.
    */
   temperature?: number;
+  /** Stable, low-cardinality Langfuse generation name. */
+  traceName?: string;
+};
+
+export type LLMUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
 };
 
 export type LLMGenerateOutput = {
@@ -21,6 +30,8 @@ export type LLMGenerateOutput = {
   text: string;
   /** The actual model id used (for the response payload). */
   modelUsed: string;
+  /** Provider-reported usage. Omitted when the gateway does not expose it. */
+  usage?: LLMUsage;
 };
 
 export type LLMStreamOptions = {

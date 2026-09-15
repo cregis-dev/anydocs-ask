@@ -23,12 +23,13 @@ export function persistAnswer(
   result: StorableResult,
   question: string,
   now: number = Date.now(),
+  langfuseTraceId: string | null = null,
 ): void {
   db.prepare(
-    `INSERT INTO answers (answer_id, question, payload, created_at)
-       VALUES (?, ?, ?, ?)
+    `INSERT INTO answers (answer_id, question, payload, created_at, langfuse_trace_id)
+       VALUES (?, ?, ?, ?, ?)
      ON CONFLICT (answer_id) DO NOTHING`,
-  ).run(result.answer_id, question, JSON.stringify(result), now);
+  ).run(result.answer_id, question, JSON.stringify(result), now, langfuseTraceId);
 }
 
 export function readAnswer(

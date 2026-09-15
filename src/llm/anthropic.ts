@@ -16,7 +16,8 @@
  * answer postprocessor consumes the whole text at once.
  */
 
-import type { LLM, LLMGenerateInput, LLMGenerateOutput, LLMStreamOptions } from './types.ts';
+import type { LLM, LLMGenerateInput, LLMGenerateOutput, LLMStreamOptions, LLMUsage } from './types.ts';
+import { observeLangfuse } from '../observability/langfuse.ts';
 
 export type AnthropicLLMOptions = {
   model: string;
@@ -70,14 +71,23 @@ export class AnthropicLLM implements LLM {
     for (let attempt = 1; attempt <= GENERATE_ATTEMPTS; attempt++) {
       let response: AnthropicMessageResponse;
       try {
-        response = await client.messages.create({
-          model: this.model,
-          max_tokens: maxTokens,
-          system: input.systemPrompt,
-          messages: [{ role: 'user', content: input.userPrompt }],
-          thinking: { type: 'disabled' },
-          ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
-        });
+        response = await observeLangfuse(
+          input.traceName ?? 'generate-message',
+          'generation',
+          generationInputAttributes(input, this.model, maxTokens, attempt),
+          async (observation) => {
+            const value = await client.messages.create({
+              model: this.model,
+              max_tokens: maxTokens,
+              system: input.systemPrompt,
+              messages: [{ role: 'user', content: input.userPrompt }],
+              thinking: { type: 'disabled' },
+              ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+            });
+            observation?.update(generationOutputAttributes(value));
+            return value;
+          },
+        );
       } catch (err) {
         lastError = new Error(`AnthropicLLM request failed (model=${this.model}): ${describeRequestError(err)}`);
         if (attempt < GENERATE_ATTEMPTS && shouldRetryRequestError(err)) continue;
@@ -103,7 +113,11 @@ export class AnthropicLLM implements LLM {
         }
         throw lastError;
       }
-      return { text, modelUsed: response.model ?? this.model };
+      return {
+        text,
+        modelUsed: response.model ?? this.model,
+        ...(normalizeUsage(response.usage) ? { usage: normalizeUsage(response.usage) } : {}),
+      };
     }
     throw lastError ?? new Error(`AnthropicLLM request failed (model=${this.model})`);
   }
@@ -120,38 +134,61 @@ export class AnthropicLLM implements LLM {
         ) => AsyncIterable<AnthropicMessageStreamEvent>;
       };
     };
-    let text = '';
-    let modelUsed = this.model;
-    try {
-      const stream = client.messages.stream(
-        {
-          model: this.model,
-          max_tokens: input.maxTokens ?? this.defaultMaxTokens,
-          system: input.systemPrompt,
-          messages: [{ role: 'user', content: input.userPrompt }],
-          thinking: { type: 'disabled' },
-          ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
-        },
-        { signal: options.signal },
-      );
-      for await (const event of stream) {
-        if (options.signal?.aborted) break;
-        if (event.type === 'message_start' && event.message.model) {
-          modelUsed = event.message.model;
+    const maxTokens = input.maxTokens ?? this.defaultMaxTokens;
+    return observeLangfuse(
+      input.traceName ?? 'generate-message',
+      'generation',
+      generationInputAttributes(input, this.model, maxTokens, 1),
+      async (observation) => {
+        let text = '';
+        let modelUsed = this.model;
+        let usage: LLMUsage | undefined;
+        let completionStarted = false;
+        try {
+          const stream = client.messages.stream(
+            {
+              model: this.model,
+              max_tokens: maxTokens,
+              system: input.systemPrompt,
+              messages: [{ role: 'user', content: input.userPrompt }],
+              thinking: { type: 'disabled' },
+              ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+            },
+            { signal: options.signal },
+          );
+          for await (const event of stream) {
+            if (options.signal?.aborted) break;
+            if (event.type === 'message_start') {
+              if (event.message.model) modelUsed = event.message.model;
+              usage = mergeUsage(usage, normalizeUsage(event.message.usage));
+            }
+            if (event.type === 'message_delta') {
+              usage = mergeUsage(usage, normalizeUsage(event.usage));
+            }
+            if (event.type === 'content_block_delta' && isTextDelta(event.delta)) {
+              if (!completionStarted) {
+                completionStarted = true;
+                observation?.update({ completionStartTime: new Date() });
+              }
+              text += event.delta.text;
+              await options.onDelta(event.delta.text);
+            }
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(`AnthropicLLM stream request failed (model=${this.model}): ${msg}`);
         }
-        if (event.type === 'content_block_delta' && isTextDelta(event.delta)) {
-          text += event.delta.text;
-          await options.onDelta(event.delta.text);
+        if (!options.signal?.aborted && text.trim().length === 0) {
+          throw new Error(`AnthropicLLM stream returned no text deltas (model=${modelUsed})`);
         }
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`AnthropicLLM stream request failed (model=${this.model}): ${msg}`);
-    }
-    if (!options.signal?.aborted && text.trim().length === 0) {
-      throw new Error(`AnthropicLLM stream returned no text deltas (model=${modelUsed})`);
-    }
-    return { text, modelUsed };
+        observation?.update({
+          output: text,
+          model: modelUsed,
+          ...(usage ? { usageDetails: langfuseUsage(usage) } : {}),
+        });
+        return { text, modelUsed, ...(usage ? { usage } : {}) };
+      },
+    );
   }
 
   private async getClient(): Promise<unknown> {
@@ -196,12 +233,20 @@ type AnthropicMessageResponse = {
   model?: string;
   stop_reason?: string | null;
   content?: Array<{ type: string; text?: string }>;
+  usage?: AnthropicUsage;
+};
+
+type AnthropicUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
 };
 
 type AnthropicMessageStreamEvent =
   | {
       type: 'message_start';
-      message: { model?: string };
+      message: { model?: string; usage?: AnthropicUsage };
     }
   | {
       type: 'content_block_delta';
@@ -209,7 +254,79 @@ type AnthropicMessageStreamEvent =
         | { type: 'text_delta'; text: string }
         | { type: string; [key: string]: unknown };
     }
-  | { type: 'message_delta' | 'message_stop' | 'content_block_start' | 'content_block_stop' };
+  | { type: 'message_delta'; usage?: AnthropicUsage }
+  | { type: 'message_stop' | 'content_block_start' | 'content_block_stop' };
+
+function generationInputAttributes(
+  input: LLMGenerateInput,
+  model: string,
+  maxTokens: number,
+  attempt: number,
+): Record<string, unknown> {
+  return {
+    input: [
+      { role: 'system', content: input.systemPrompt },
+      { role: 'user', content: input.userPrompt },
+    ],
+    model,
+    modelParameters: {
+      max_tokens: maxTokens,
+      ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+    },
+    metadata: { provider: 'anthropic', attempt },
+  };
+}
+
+function generationOutputAttributes(response: AnthropicMessageResponse): Record<string, unknown> {
+  const usage = normalizeUsage(response.usage);
+  return {
+    output: extractText(response),
+    model: response.model,
+    ...(usage ? { usageDetails: langfuseUsage(usage) } : {}),
+  };
+}
+
+function normalizeUsage(usage: AnthropicUsage | undefined): LLMUsage | undefined {
+  if (!usage) return undefined;
+  const inputTokens = usage.input_tokens ?? 0;
+  const outputTokens = usage.output_tokens ?? 0;
+  if (inputTokens === 0 && outputTokens === 0) return undefined;
+  return {
+    inputTokens,
+    outputTokens,
+    ...(usage.cache_read_input_tokens
+      ? { cacheReadInputTokens: usage.cache_read_input_tokens }
+      : {}),
+    ...(usage.cache_creation_input_tokens
+      ? { cacheCreationInputTokens: usage.cache_creation_input_tokens }
+      : {}),
+  };
+}
+
+function mergeUsage(current: LLMUsage | undefined, next: LLMUsage | undefined): LLMUsage | undefined {
+  if (!next) return current;
+  return {
+    inputTokens: Math.max(current?.inputTokens ?? 0, next.inputTokens),
+    outputTokens: Math.max(current?.outputTokens ?? 0, next.outputTokens),
+    cacheReadInputTokens: Math.max(current?.cacheReadInputTokens ?? 0, next.cacheReadInputTokens ?? 0),
+    cacheCreationInputTokens: Math.max(
+      current?.cacheCreationInputTokens ?? 0,
+      next.cacheCreationInputTokens ?? 0,
+    ),
+  };
+}
+
+function langfuseUsage(usage: LLMUsage): Record<string, number> {
+  return {
+    input: usage.inputTokens,
+    output: usage.outputTokens,
+    total: usage.inputTokens + usage.outputTokens,
+    ...(usage.cacheReadInputTokens ? { cache_read_input_tokens: usage.cacheReadInputTokens } : {}),
+    ...(usage.cacheCreationInputTokens
+      ? { cache_creation_input_tokens: usage.cacheCreationInputTokens }
+      : {}),
+  };
+}
 
 function extractText(resp: AnthropicMessageResponse): string {
   const blocks = resp.content ?? [];

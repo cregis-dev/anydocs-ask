@@ -85,6 +85,7 @@ export type AnswerRow = {
   question: string;
   payload: string;          // JSON
   created_at: number;
+  langfuse_trace_id: string | null;
 };
 
 /**

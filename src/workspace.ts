@@ -48,6 +48,12 @@ ANTHROPIC_API_KEY=
 # (B) Internal Anthropic-compatible gateway (Bearer auth + custom base URL)
 # ANTHROPIC_AUTH_TOKEN=
 # ANTHROPIC_BASE_URL=https://gateway.your-company.example.com
+
+# Optional Langfuse tracing. Create project keys in Langfuse Settings > API Keys.
+# LANGFUSE_PUBLIC_KEY=pk-lf-...
+# LANGFUSE_SECRET_KEY=sk-lf-...
+# LANGFUSE_BASE_URL=https://cloud.langfuse.com
+# LANGFUSE_TRACING_ENVIRONMENT=development
 `;
 
 export const WORKSPACE_SUBDIRS = ['state'] as const;
