@@ -25,7 +25,16 @@ export type Bgem3EmbedderOptions = {
   preferQuantized?: boolean;
   /** Cache directory passed to transformers.js. Defaults to its own pick. */
   cacheDir?: string;
+  /** Optional Hugging Face revision. Falls back to BGE_M3_REVISION. */
+  revision?: string;
 };
+
+export function resolveBgem3Revision(
+  explicitRevision: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  return explicitRevision?.trim() || env.BGE_M3_REVISION?.trim() || undefined;
+}
 
 export class Bgem3Embedder implements Embedder {
   readonly model: string;
@@ -35,12 +44,14 @@ export class Bgem3Embedder implements Embedder {
   private readonly hfModel: string;
   private readonly preferQuantized: boolean;
   private readonly cacheDir: string | undefined;
+  private readonly revision: string | undefined;
   private pipeline: FeatureExtractionPipeline | null = null;
 
   constructor(opts: Bgem3EmbedderOptions = {}) {
     this.hfModel = opts.model ?? 'Xenova/bge-m3';
     this.preferQuantized = opts.preferQuantized ?? false;
     this.cacheDir = opts.cacheDir;
+    this.revision = resolveBgem3Revision(opts.revision);
     // The `model` field is what gets written to embedding_cache.model and is
     // the cache key downstream. fp32 and int8 produce different vectors, so
     // they MUST occupy different cache key spaces — flipping preferQuantized
@@ -69,12 +80,14 @@ export class Bgem3Embedder implements Embedder {
     tx.env.allowRemoteModels = true;
 
     const dtype = this.preferQuantized ? 'q8' : 'fp32';
+    const revisionLabel = this.revision ? `, revision=${this.revision}` : '';
     process.stderr.write(
-      `[ask/embedding] loading ${this.hfModel} (dtype=${dtype}, cache=${this.cacheDir ?? 'default'}) — first run downloads ~${this.preferQuantized ? '300' : '600'} MB\n`,
+      `[ask/embedding] loading ${this.hfModel} (dtype=${dtype}, cache=${this.cacheDir ?? 'default'}${revisionLabel}) — first run downloads ~${this.preferQuantized ? '300' : '600'} MB\n`,
     );
     try {
       this.pipeline = (await tx.pipeline('feature-extraction', this.hfModel, {
         dtype,
+        ...(this.revision ? { revision: this.revision } : {}),
       })) as FeatureExtractionPipeline;
       // Run a single token through to ensure ONNX session is hot.
       await this.pipeline(' ', { pooling: 'mean', normalize: true });
