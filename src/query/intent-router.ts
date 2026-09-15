@@ -198,6 +198,7 @@ export class LLMIntentRouter implements IntentRouter {
         }),
         temperature: 0,
         maxTokens: 500,
+        traceName: 'route-intent',
       });
       raw = out.text;
     } catch {

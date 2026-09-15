@@ -35,6 +35,8 @@ export type RunRecord = {
    * of 'reader'.
    */
   source?: RunSource;
+  /** Langfuse trace id for this turn when tracing was enabled. */
+  langfuse_trace_id?: string;
   retrieval: RunRetrievalTrace;
   answer: RunAnswer;
   feedback: RunFeedback;

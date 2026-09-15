@@ -23,7 +23,7 @@ import { randomBytes } from 'node:crypto';
 import { createInputCapture, type RunInputSnapshot } from '../runs/input-snapshot.ts';
 import type { DbHandle } from '../db/index.ts';
 import type { Embedder } from '../embedding/types.ts';
-import type { LLM } from '../llm/types.ts';
+import type { LLM, LLMGenerateOutput, LLMUsage } from '../llm/types.ts';
 import type { Reranker } from '../reranker/types.ts';
 import type { PromptConfig, RerankerConfig, RetrievalConfig } from '../config.ts';
 import type { DocsLang } from '../anydocs/types.ts';
@@ -43,6 +43,7 @@ import {
   QUESTION_REWRITE_THRESHOLD_CHARS,
   redactSensitiveText,
 } from './diagnostic-input.ts';
+import { observeLangfuse } from '../observability/langfuse.ts';
 
 const DEFAULT_RETRIEVAL_CONFIG: RetrievalConfig = {
   topK: 20,
@@ -341,7 +342,24 @@ async function runRetrievalPipeline(
   const intentRouter = deps.intentRouter ?? new LLMIntentRouter(deps.llm);
   const timings = emptyStageTimings();
   const routerStartedAt = performance.now();
-  const intentRoute = await intentRouter.route({ question, history, lang: queryLang });
+  const intentRoute = await observeLangfuse(
+    'classify-intent',
+    'span',
+    { input: { question, lang: queryLang, history_turns: history.length } },
+    async (observation) => {
+      const route = await intentRouter.route({ question, history, lang: queryLang });
+      observation?.update({
+        output: {
+          intent: route.intent,
+          product: route.product,
+          effective_question: route.effectiveQuestion,
+          uses_history: route.usesHistory,
+          strategy: route.routerStrategy,
+        },
+      });
+      return route;
+    },
+  );
   timings.router_ms = elapsedMs(routerStartedAt);
   const activeHistory = intentRoute.usesHistory ? history : [];
   const safeHistory = activeHistory.map((turn) => ({
@@ -363,7 +381,22 @@ async function runRetrievalPipeline(
     ? [retrieveQuestion]
     : retrieveQuestion === safeQuestion ? [safeQuestion] : [safeQuestion, retrieveQuestion];
   const embeddingStartedAt = performance.now();
-  const embedded = await deps.embedder.embed(embedInputs);
+  const embedded = await observeLangfuse(
+    'embed-query',
+    'embedding',
+    {
+      input: embedInputs,
+      model: deps.embedder.model,
+      metadata: { input_count: embedInputs.length },
+    },
+    async (observation) => {
+      const output = await deps.embedder.embed(embedInputs);
+      observation?.update({
+        output: { vectors: output.length, dimensions: output[0]?.vector.length ?? 0 },
+      });
+      return output;
+    },
+  );
   timings.embedding_ms = elapsedMs(embeddingStartedAt);
   const queryVector = embedded[0]!.vector;
   const retrieveVector = compactLongInput ? queryVector : embedded[1]?.vector ?? queryVector;
@@ -378,24 +411,71 @@ async function runRetrievalPipeline(
   );
   const retrievalConfig = retrievalConfigFor(deps);
   const retrievalStartedAt = performance.now();
-  const { chunks: retrieved, trace: retrievalTrace } = retrieveWithTrace(deps.db, {
-    queryVector: retrieveVector,
-    ftsQuery,
-    scopeId,
-    perPathK: retrievalConfig.topK,
-    finalK: Math.min(retrievalConfig.topK, retrievalConfig.maxChunksHardCap),
-    rrfK: retrievalConfig.rrfK,
-    currentPageLang: queryLang,
-    apiReferencePagePrefix,
-    exactIdentifiers,
-  });
+  const { chunks: retrieved, trace: retrievalTrace } = await observeLangfuse(
+    'retrieve-context',
+    'retriever',
+    {
+      input: { query: searchQuestion, fts_query: ftsQuery, exact_identifiers: exactIdentifiers },
+      metadata: {
+        scope_id: scopeId,
+        top_k: retrievalConfig.topK,
+        rrf_k: retrievalConfig.rrfK,
+      },
+    },
+    async (observation) => {
+      const output = retrieveWithTrace(deps.db, {
+        queryVector: retrieveVector,
+        ftsQuery,
+        scopeId,
+        perPathK: retrievalConfig.topK,
+        finalK: Math.min(retrievalConfig.topK, retrievalConfig.maxChunksHardCap),
+        rrfK: retrievalConfig.rrfK,
+        currentPageLang: queryLang,
+        apiReferencePagePrefix,
+        exactIdentifiers,
+      });
+      observation?.update({
+        output: output.chunks.map((chunk) => ({
+          chunk_id: chunk.chunk_id,
+          page_id: chunk.page_id,
+          path: chunk.in_page_path,
+          text: chunk.text,
+          rrf_score: chunk.rrf_score,
+          vector_rank: output.trace.vecRanks.get(chunk.chunk_id) ?? null,
+          bm25_rank: output.trace.bm25Ranks.get(chunk.chunk_id) ?? null,
+          exact_rank: output.trace.exactRanks.get(chunk.chunk_id) ?? null,
+        })),
+      });
+      return output;
+    },
+  );
   timings.retrieval_ms = elapsedMs(retrievalStartedAt);
 
   const rrfRanked = rankByRrf(retrieved);
 
   const rerankStartedAt = performance.now();
   const reranked = deps.reranker
-    ? await applyCrossEncoderRerank(deps.reranker, searchQuestion, rrfRanked, deps.rerankerConfig)
+    ? await observeLangfuse(
+        'rerank-context',
+        'retriever',
+        { input: { query: searchQuestion, candidates: rrfRanked.length } },
+        async (observation) => {
+          const output = await applyCrossEncoderRerank(
+            deps.reranker!,
+            searchQuestion,
+            rrfRanked,
+            deps.rerankerConfig,
+          );
+          observation?.update({
+            output: output.map((chunk) => ({
+              chunk_id: chunk.chunk_id,
+              page_id: chunk.page_id,
+              final_score: chunk.final_score,
+            })),
+          });
+          return output;
+        },
+      )
     : rrfRanked;
   timings.rerank_ms = elapsedMs(rerankStartedAt);
 
@@ -534,11 +614,28 @@ async function askWithTraceInternal(
   // structural parent expansion below, which changes context granularity but
   // never promotes a lower-ranked child over a higher-ranked one.
   const contextCandidates = outcome.pick.slice(0, retrievalConfig.maxChunksHardCap);
-  const pickedChunks = selectContextWithParents(deps.db, contextCandidates, {
-    maxItems: contextCap,
-    maxTotalTokens: DEFAULT_CONTEXT_TOKEN_BUDGET,
-    maxParentTokens: DEFAULT_PARENT_TOKEN_LIMIT,
-  });
+  const pickedChunks = await observeLangfuse(
+    'select-generation-context',
+    'span',
+    { input: { candidates: contextCandidates.length, max_items: contextCap } },
+    async (observation) => {
+      const output = selectContextWithParents(deps.db, contextCandidates, {
+        maxItems: contextCap,
+        maxTotalTokens: DEFAULT_CONTEXT_TOKEN_BUDGET,
+        maxParentTokens: DEFAULT_PARENT_TOKEN_LIMIT,
+      });
+      observation?.update({
+        output: output.map((chunk) => ({
+          chunk_id: chunk.chunk_id,
+          page_id: chunk.page_id,
+          parent_id: chunk.parent_id,
+          expanded_parent: chunk.expanded_parent?.parent_id ?? null,
+          tokens: chunk.context_token_count,
+        })),
+      });
+      return output;
+    },
+  );
   const selectedContextTrace = buildSelectedContextTrace(pickedChunks, retrievalTrace);
   const formatHint = detectFormatHint(question);
   const preparedPromptInput = prepareDiagnosticInput(question);
@@ -561,12 +658,14 @@ async function askWithTraceInternal(
     ...(historyWindow > 0 ? { history: safeHistory } : {}),
   });
 
-  let llmOutput;
+  let llmOutput: LLMGenerateOutput;
+  let totalUsage: LLMUsage | undefined;
   throwIfAborted(hooks.signal);
   await hooks.onStatus?.('generating');
   const llmInput = {
     systemPrompt: prompt.system,
     userPrompt: prompt.user,
+    traceName: 'generate-answer',
   };
   const inputCapture = createInputCapture({
     question, prompt_question: promptQuestion, search_question: searchQuestion,
@@ -591,6 +690,7 @@ async function askWithTraceInternal(
       : await deps.llm.generate(llmInput);
     initialAttempt.outcome = 'returned';
     initialAttempt.model = llmOutput.modelUsed;
+    totalUsage = addUsage(totalUsage, llmOutput.usage);
   } catch (err) {
     initialAttempt.outcome = 'error';
     timings.generation_ms = elapsedMs(generationStartedAt);
@@ -615,8 +715,8 @@ async function askWithTraceInternal(
         subtree_ask_triggered: false,
         top_final_score,
         timings,
-        tokens_in: null,
-        tokens_out: null,
+        tokens_in: totalUsage?.inputTokens ?? null,
+        tokens_out: totalUsage?.outputTokens ?? null,
         intent_route: intentRoute,
       },
       queryVector,
@@ -650,12 +750,14 @@ async function askWithTraceInternal(
       const retryInput = {
         systemPrompt: prompt.system + '\n\n' + citationReinforcementFor(queryLang),
         userPrompt: prompt.user,
+        traceName: 'generate-answer',
       };
       const retryAttempt = inputCapture.addAttempt(retryInput);
       try {
         const retryOutput = await deps.llm.generate(retryInput);
         retryAttempt.outcome = 'returned';
         retryAttempt.model = retryOutput.modelUsed;
+        totalUsage = addUsage(totalUsage, retryOutput.usage);
         const retryPost = postprocess({
           answerLang: queryLang,
           rawAnswer: retryOutput.text,
@@ -697,8 +799,8 @@ async function askWithTraceInternal(
         subtree_ask_triggered: false,
         top_final_score,
         timings,
-        tokens_in: null,
-        tokens_out: null,
+        tokens_in: totalUsage?.inputTokens ?? null,
+        tokens_out: totalUsage?.outputTokens ?? null,
         citation_retry_count: citationRetryCount,
         intent_route: intentRoute,
       },
@@ -743,8 +845,8 @@ async function askWithTraceInternal(
       subtree_ask_triggered: false,
       top_final_score,
       timings,
-      tokens_in: null,
-      tokens_out: null,
+      tokens_in: totalUsage?.inputTokens ?? null,
+      tokens_out: totalUsage?.outputTokens ?? null,
       citation_retry_count: citationRetryCount,
       intent_route: intentRoute,
       ...(historyWindow > 0 ? { history_window: historyWindow } : {}),
@@ -765,6 +867,17 @@ function emptyStageTimings(): AskStageTimings {
 
 function elapsedMs(startedAt: number): number {
   return Number((performance.now() - startedAt).toFixed(1));
+}
+
+function addUsage(total: LLMUsage | undefined, usage: LLMUsage | undefined): LLMUsage | undefined {
+  if (!usage) return total;
+  return {
+    inputTokens: (total?.inputTokens ?? 0) + usage.inputTokens,
+    outputTokens: (total?.outputTokens ?? 0) + usage.outputTokens,
+    cacheReadInputTokens: (total?.cacheReadInputTokens ?? 0) + (usage.cacheReadInputTokens ?? 0),
+    cacheCreationInputTokens:
+      (total?.cacheCreationInputTokens ?? 0) + (usage.cacheCreationInputTokens ?? 0),
+  };
 }
 
 /**

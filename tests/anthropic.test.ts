@@ -177,6 +177,29 @@ test('AnthropicLLM: disables provider thinking on message requests', async () =>
   assert.deepEqual(seenReq?.thinking, { type: 'disabled' });
 });
 
+test('AnthropicLLM: returns provider token usage for run accounting', async () => {
+  const llm = new AnthropicLLM({ model: 'm', apiKey: 'k' });
+  withFakeClient(llm, () => ({
+    model: 'm',
+    content: [{ type: 'text', text: 'ok' }],
+    usage: {
+      input_tokens: 120,
+      output_tokens: 18,
+      cache_read_input_tokens: 40,
+      cache_creation_input_tokens: 8,
+    },
+  }));
+
+  const result = await llm.generate(PROMPT);
+
+  assert.deepEqual(result.usage, {
+    inputTokens: 120,
+    outputTokens: 18,
+    cacheReadInputTokens: 40,
+    cacheCreationInputTokens: 8,
+  });
+});
+
 test('AnthropicLLM: retries thinking-only max_tokens response with larger token cap', async () => {
   const llm = new AnthropicLLM({ model: 'm', apiKey: 'k' });
   const maxTokens: number[] = [];

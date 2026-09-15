@@ -76,6 +76,7 @@ export type RunRecord = {
   filters: Record<string, unknown>;
   context_pageId: string | null;
   source?: 'reader' | 'console' | 'mcp';
+  langfuse_trace_id?: string;
   retrieval: {
     fused: Array<{
       chunk_id: number;

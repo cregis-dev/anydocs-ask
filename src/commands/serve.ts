@@ -18,6 +18,7 @@ import {
   type ResolvedConfig,
   type McpToolName,
 } from '../config.ts';
+import { startLangfuseObservability } from '../observability/langfuse.ts';
 
 /**
  * Env overrides for the MCP endpoint, applied after `loadConfig`. Lets the
@@ -61,6 +62,7 @@ export async function runServe(opts: ServeOptions): Promise<number> {
   }
   for (const w of warnings) process.stderr.write(`[ask] ${w}\n`);
   applyMcpEnvOverrides(config);
+  const langfuse = await startLangfuseObservability();
 
   const host = opts.host ?? config.server.host;
   const port = opts.port ?? config.server.port;
@@ -105,6 +107,7 @@ export async function runServe(opts: ServeOptions): Promise<number> {
     process.stdout.write(`\nreceived ${signal}, shutting down...\n`);
     server.close(async () => {
       await runtime.stop();
+      await langfuse.shutdown();
       httpResolve(0);
     });
   };

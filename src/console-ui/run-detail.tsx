@@ -361,6 +361,7 @@ function RunConfiguration({ run }: { run: RunRecord }) {
     <RunSection eyebrow="Runtime" title="Configuration">
       <dl className="rd-config">
         <div><dt>Request</dt><dd><code>{run.request_id}</code></dd></div>
+        {run.langfuse_trace_id && <div><dt>Langfuse trace</dt><dd><code>{run.langfuse_trace_id}</code></dd></div>}
         <div><dt>Session</dt><dd><code>{run.session_id ?? '—'}</code></dd></div>
         <div><dt>Model</dt><dd>{run.answer.model ?? '—'}</dd></div>
         <div><dt>Router</dt><dd>{run.retrieval.router_strategy ?? 'legacy'}</dd></div>
