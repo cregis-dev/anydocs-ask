@@ -50,6 +50,12 @@ import {
 import { loadIndexSnapshot, type ChildIndexStatus } from './index-state.ts';
 import { loadTrafficWindow, parseTrafficViewOptions } from './traffic-state.ts';
 import { loadConversation } from './conversation-state.ts';
+import {
+  iterateTrafficExportChunks,
+  parseTrafficExportOptions,
+  trafficExportFilename,
+  TRAFFIC_EXPORT_SCHEMA_VERSION,
+} from './traffic-export.ts';
 import { loadProjectHomeStats, summarizeWorkspace } from './home-state.ts';
 import { loadAskConfigForView } from './ask-config-state.ts';
 import { parseAndValidateAskConfig } from '../config.ts';
@@ -64,6 +70,7 @@ import {
 } from './golden-workshop-state.ts';
 import { createConsoleAuth, renderLoginPage } from './auth.ts';
 import { loadRunDetail } from './run-detail-state.ts';
+import { readRuntimeBuildMetadata } from '../runtime-build.ts';
 
 export type ConsoleAppDeps = {
   workspacePath: string;
@@ -173,6 +180,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     idleTimeoutMin: number;
     authEnabled: boolean;
     publicRootPath: string;
+    build: ReturnType<typeof readRuntimeBuildMetadata>;
   } {
     const projects = scanProjects(deps.workspacePath);
     const liveSet = new Set<string>();
@@ -187,6 +195,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       idleTimeoutMin,
       authEnabled: auth !== null,
       publicRootPath,
+      build: readRuntimeBuildMetadata(process.env),
     };
   }
 
@@ -215,6 +224,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       workspaceSummary,
       authEnabled: auth !== null,
       publicRootPath,
+      build: readRuntimeBuildMetadata(process.env),
     }));
   });
 
@@ -454,6 +464,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         idleTimeoutMin: nav.idleTimeoutMin,
         authEnabled: nav.authEnabled,
         publicRootPath: nav.publicRootPath,
+        build: nav.build,
       },
       evalSnapshot,
       latestEvalReportBody,
@@ -595,6 +606,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         consolePort: nav.consolePort,
         authEnabled: nav.authEnabled,
         publicRootPath: nav.publicRootPath,
+        build: nav.build,
       },
     }));
   });
@@ -620,6 +632,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         consolePort: nav.consolePort,
         authEnabled: nav.authEnabled,
         publicRootPath: nav.publicRootPath,
+        build: nav.build,
       },
     }));
   });
@@ -647,6 +660,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         consolePort: nav.consolePort,
         authEnabled: nav.authEnabled,
         publicRootPath: nav.publicRootPath,
+        build: nav.build,
       },
     }));
   });
@@ -682,6 +696,44 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     if (!conversation) return c.json({ error: 'Conversation not found in saved runs' }, 404);
     c.header('Cache-Control', 'no-store');
     return c.json(conversation);
+  });
+
+  app.get('/api/projects/:name/traffic/export', (c) => {
+    const name = c.req.param('name');
+    const project = findProject(deps.workspacePath, name);
+    if (!project) return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
+    const stateRoot = projectStateRoot(deps.workspacePath, project);
+    if (!stateRoot) return c.json({ ok: false, error: 'no projectId' }, 400);
+    const parsed = parseTrafficExportOptions({
+      range: c.req.query('range'),
+      query: c.req.query('query'),
+      source: c.req.query('source'),
+      kind: c.req.query('kind'),
+      format: c.req.query('format'),
+      groupBy: c.req.query('group_by'),
+      includeContent: c.req.query('include_content'),
+    });
+    if (!parsed.ok) return c.json({ ok: false, error: parsed.error }, 400);
+
+    const exportedAt = new Date().toISOString();
+    c.header('Content-Type', parsed.value.format === 'csv'
+      ? 'text/csv; charset=utf-8'
+      : 'application/x-ndjson; charset=utf-8');
+    c.header('Content-Disposition', `attachment; filename="${trafficExportFilename(name, parsed.value, exportedAt)}"`);
+    c.header('Cache-Control', 'no-store');
+    c.header('X-Content-Type-Options', 'nosniff');
+    c.header('X-AnyDocs-Export-Schema', String(TRAFFIC_EXPORT_SCHEMA_VERSION));
+    c.header('X-AnyDocs-Exported-At', exportedAt);
+    return stream(c, async (output) => {
+      for (const chunk of iterateTrafficExportChunks({
+        stateRoot,
+        projectName: name,
+        options: parsed.value,
+        exportedAt,
+      })) {
+        await output.write(chunk);
+      }
+    });
   });
 
   app.get('/api/projects/:name/runs', (c) => {

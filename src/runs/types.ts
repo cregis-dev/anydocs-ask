@@ -19,6 +19,7 @@
  * `reader` for back-compat.
  */
 import type { RunInputSnapshot } from './input-snapshot-types.ts';
+import type { RuntimeBuildMetadata } from '../runtime-build.ts';
 
 export type RunSource = 'reader' | 'console' | 'mcp';
 
@@ -37,6 +38,8 @@ export type RunRecord = {
   source?: RunSource;
   /** Langfuse trace id for this turn when tracing was enabled. */
   langfuse_trace_id?: string;
+  /** Release provenance captured when this run was generated. */
+  runtime_build?: RuntimeBuildMetadata;
   retrieval: RunRetrievalTrace;
   answer: RunAnswer;
   feedback: RunFeedback;

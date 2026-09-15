@@ -1,4 +1,5 @@
 import type { IndexBootstrap } from './types';
+import type { RuntimeBuildMetadata } from '../runtime-build';
 
 export type ProjectListing = {
   name: string;
@@ -27,6 +28,7 @@ export type Navigation = {
   idleTimeoutMin?: number;
   authEnabled: boolean;
   publicRootPath: string;
+  build: RuntimeBuildMetadata;
 };
 
 export type ProjectStats = {
@@ -56,6 +58,7 @@ export type HomeBootstrap = {
   workspaceSummary: WorkspaceSummary;
   authEnabled: boolean;
   publicRootPath: string;
+  build: RuntimeBuildMetadata;
 };
 
 export type ReportListing = {
@@ -77,6 +80,7 @@ export type RunRecord = {
   context_pageId: string | null;
   source?: 'reader' | 'console' | 'mcp';
   langfuse_trace_id?: string;
+  runtime_build?: RuntimeBuildMetadata;
   retrieval: {
     fused: Array<{
       chunk_id: number;

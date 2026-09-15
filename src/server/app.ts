@@ -18,6 +18,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { Runtime } from './runtime.ts';
+import { hasRuntimeBuildMetadata, readRuntimeBuildMetadata } from '../runtime-build.ts';
 import { buildCorsMiddleware } from './cors.ts';
 import { askWithTrace, askWithTraceStream, type AskTrace } from '../query/answer.ts';
 import { persistAnswer } from './answer-cache.ts';
@@ -167,13 +168,15 @@ export function createApp(deps: AppDeps): Hono {
   // Health
   // -----------------------------------------------------------------------
   app.get('/v1/health', (c) => {
+    const build = readRuntimeBuildMetadata(process.env);
     if (!runtime.warm) {
-      return c.json({ status: 'warming', warm: false }, 503);
+      return c.json({ status: 'warming', warm: false, build }, 503);
     }
     return c.json({
       status: 'ok',
       warm: true,
       booted_at: runtime.bootedAtMs,
+      build,
     });
   });
 
@@ -1045,6 +1048,7 @@ function appendRun(
     // text on `llm_failed`); fall back to the user-facing message.
     md = result.detail ?? result.message;
   }
+  const runtimeBuild = readRuntimeBuildMetadata(process.env);
   const record: RunRecord = {
     ts: new Date().toISOString(),
     request_id: args.requestId,
@@ -1054,6 +1058,7 @@ function appendRun(
     context_pageId: args.contextPageId,
     source: args.source,
     ...(args.langfuseTraceId ? { langfuse_trace_id: args.langfuseTraceId } : {}),
+    ...(hasRuntimeBuildMetadata(runtimeBuild) ? { runtime_build: runtimeBuild } : {}),
     input_snapshot_status: trace.input_snapshot ? 'captured' : 'not_generated',
     ...(trace.input_snapshot ? { input_snapshot: trace.input_snapshot } : {}),
     retrieval: {
