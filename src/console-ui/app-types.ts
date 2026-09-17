@@ -235,9 +235,12 @@ export type FeedbackSnapshot = {
 export type EvalReport = {
   filename: string;
   date: string;
-  r_at_5: number | null;
-  citation_pass: number | null;
-  answer_rule_pass: number | null;
+  mrr: number | null;
+  hit_at_5: number | null;
+  context_precision_at_5: number | null;
+  citation_anchor_pass: number | null;
+  kind_pass: number | null;
+  api_rule_pass: number | null;
   cases: number | null;
   sizeBytes: number;
 };

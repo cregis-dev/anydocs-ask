@@ -117,7 +117,7 @@ API 协议见 [ARCHITECTURE §5](../ARCHITECTURE.md)；CORS / 段落 anchor 等�
 
 ## 4. 测评（评测闭环）
 
-PRD §12 + ARCH §16 的实现已上线。冷启动期严禁乱调权重，只用 v1 默认 + golden 三指标判断"编排是否合格"。
+PRD §12 + ARCH §16 的实现已上线。冷启动期严禁乱调权重，只用 v1 默认 + golden 指标判断"编排是否合格"。
 
 ### 4.1 数据三件套（双根分离，`<workspace>/state/<projectId>/`）
 
@@ -128,13 +128,17 @@ PRD §12 + ARCH §16 的实现已上线。冷启动期严禁乱调权重，只�
 | `golden/cases.jsonl` + `cases.candidate.jsonl` | 已批准的评测 case 与待审候选 | `golden generate / review` |
 | `reports/<date>-{baseline,eval,analyze}.md` | 评测报告（含 `<!-- EVAL_SUMMARY {...} -->` 注释行供 history 表读取） | `eval` / `analyze runs` |
 
-### 4.2 三指标（ARCH §16.3）
+### 4.2 核心指标（ARCH §16.3）
 
 | 指标 | 定义 | 默认门槛 | 不达标含义 |
 |---|---|---|---|
-| **R@5** | `fused[:5].pages ∩ must_cite_pages ≠ ∅` 的样本占比 | ≥ 0.70 | 关键页缺失 / nav 编排有歧义 |
-| **Citation-pass** | `answer.citations.pages ⊆ must_cite_pages` 的样本占比 | ≥ 0.65 | chunk 边界 / breadcrumb 投影问题 |
-| **Answer-rule-pass** | `must_contain` 全命中 ∧ `forbid_contain` 全不命中 | ≥ 0.60 | LLM prompt 或文档行文不够明确 |
+| **MRR** | 第一个命中页面排名的倒数均值 | baseline 回归 | 正确页面排序退化 |
+| **Hit@5** | `fused[:5].pages ∩ must_cite_pages ≠ ∅` 的样本占比 | ≥ 0.70 | 关键页缺失 / nav 编排有歧义 |
+| **Context-P@5** | top-5 chunks 属于 must/allow 页面集合的比例 | baseline 回归 | 上下文噪声增加 |
+| **Citation-anchor** | 至少一个最终引用落在 must/allow 页面集合 | ≥ 0.65 | 回答没有锚定预期来源 |
+| **Kind-pass / API-rule-pass** | 回答分支正确，且适用的 API operation / URL 规则全部满足 | 1.00 | 路由、拒答或 API 精确性退化 |
+
+Hit@1、Hit@3、Unexpected-citation-rate 和关键词重叠保留为诊断项，不作为发布门槛。
 
 ### 4.3 闭环工作流（Day 0 → 持续）
 
@@ -173,8 +177,8 @@ Console 体验台 persist 落的 runs 自带 `source=console`，`analyze` / `gol
 - **检索参数**：`anydocs.ask.json` 的 `retrieval.{topK,rrfK,maxChunksHardCap}`。先看 eval / analyze 指标再调整；冷启动期使用默认值。子树聚合阈值（dominance / spread）固化为 `src/query/aggregate.ts` 的代码常量，不再自动触发 clarify。
 - **chunk 边界**：`indexing.{chunkMaxTokens,chunkHardCap}`；analyze D2 显示 "long queries + many candidates 慢" → 多半是 chunk 过大触发 token 爆。
 - **embedding 量化**：`embedding.preferQuantized: true` 走 int8 版 bge-m3，冷启快 5-6× / 磁盘 ~191MB vs 1.2GB（ARCH §8 spike 实测）。VPS / 小内存场景推荐。
-- **navigation 编排**：D3 歧义高发 → 合并 / 拆分子树。R@5 偏低 → 给重要 section 显式写 `id`（ARCH §2.2.2 推荐）+ 调整 nav 顺序（`nav_index` 作权重）。
-- **文档行文**：Answer-rule-pass 偏低多半是文档没写明确 `must_contain` 关键词；A+ diagnose（v1.5）会自动给"应补文档"建议。
+- **navigation 编排**：D3 歧义高发 → 合并 / 拆分子树。Hit@5 偏低 → 给重要 section 显式写 `id`（ARCH §2.2.2 推荐）+ 调整 nav 顺序（`nav_index` 作权重）。
+- **文档行文**：关键词重叠偏低可作为文档不够明确的线索，但必须人工确认；A+ diagnose（v1.5）会自动给"应补文档"建议。
 
 ### 5.2 0.2 → 0.4 已发布 + 计划中（PRD §11 / ARCH §15 / RFC 0001-0006）
 

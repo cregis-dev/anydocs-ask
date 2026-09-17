@@ -153,14 +153,12 @@ test('writeCaseTraceJsonl persists per-case result, score, and retrieval trace w
       kind: 'answer',
       expected_kind: 'answer',
       kind_pass: true,
-      r_at_5: true,
+      hit_at_5: true,
       hit_at_1: true,
       hit_at_3: true,
       mrr: 1,
       context_precision_at_5: 0.2,
-      context_recall_at_5: 1,
       citation_anchor_pass: true,
-      citation_pass: true,
       unexpected_citation_pages: [],
       unexpected_citation_rate: 0,
       answer_rule_pass: true,
@@ -203,6 +201,43 @@ test('writeCaseTraceJsonl persists per-case result, score, and retrieval trace w
         latency_ms: 12,
       },
       trace: {
+        input_snapshot: {
+          version: 1,
+          captured_at: '2026-09-17T00:00:00.000Z',
+          redaction: 'sensitive-key-patterns-v1',
+          redacted_fields: [],
+          truncated_fields: [],
+          question: c.query,
+          prompt_question: c.query,
+          search_question: c.query,
+          retrieve_question: c.query,
+          current_page: null,
+          history: [],
+          documents: [
+            {
+              citation_id: 'cit_1',
+              chunk_id: 7,
+              page_id: 'payment-engine-quickstart-30min',
+              title: 'Payment Engine Quickstart',
+              lang: 'en',
+              url: '/en/payment-engine-quickstart-30min',
+              path: 'p[1]',
+              text: 'Full checkout_url context actually sent to generation.',
+              content_hash: 'source-version',
+              parent_id: null,
+              expanded_parent: null,
+            },
+          ],
+          attempts: [
+            {
+              system_prompt: 'Answer from the supplied documentation.',
+              user_prompt: 'Complete prompt with full checkout_url context.',
+              outcome: 'returned',
+              accepted: true,
+              model: 'mock',
+            },
+          ],
+        },
         fused: [
           {
             chunk_id: 7,
@@ -269,7 +304,8 @@ test('writeCaseTraceJsonl persists per-case result, score, and retrieval trace w
 
     const raw = await readFile(out, 'utf8');
     const parsed = JSON.parse(raw.trim());
-    assert.equal(parsed.schema_version, 1);
+    assert.equal(parsed.schema_version, 2);
+    assert.equal(parsed.runtime_build, null);
     assert.equal(parsed.case_id, 'case-1');
     assert.equal(parsed.result.answer_id, 'ans_1');
     assert.equal(parsed.score.mrr, 1);
@@ -280,6 +316,13 @@ test('writeCaseTraceJsonl persists per-case result, score, and retrieval trace w
     assert.equal(parsed.diagnostics.retrieved_top20[0].rank, 1);
     assert.equal(parsed.diagnostics.retrieved_top20[0].page_id, 'payment-engine-quickstart-30min');
     assert.equal(parsed.diagnostics.prompt_context[0].page_id, 'payment-engine-quickstart-30min');
+    assert.equal(parsed.ragas_sample.user_input, c.query);
+    assert.equal(parsed.ragas_sample.response, 'Use checkout_url [cit_1].');
+    assert.deepEqual(parsed.ragas_sample.retrieved_contexts, [
+      'Full checkout_url context actually sent to generation.',
+    ]);
+    assert.equal(parsed.ragas_sample.reference, null);
+    assert.equal(parsed.ragas_sample.context_source, 'prompt_snapshot');
     assert.equal(parsed.queryVector, undefined);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -289,16 +332,13 @@ test('writeCaseTraceJsonl persists per-case result, score, and retrieval trace w
 test('renderReport separates core quality, retrieval diagnostics, citation calibration, and answer text diagnostics', () => {
   const summary = {
     n: 1,
-    r_at_5: 1,
+    hit_at_5: 1,
     hit_at_1: 1,
     hit_at_3: 1,
     mrr: 1,
     context_precision_at_5: 0.6,
-    context_recall_n: 1,
-    context_recall_at_5: 1,
     citation_anchor_pass: 1,
     unexpected_citation_rate: 0.5,
-    citation_pass: 0,
     answer_rule_pass: 0,
     kind_pass: 1,
     api_rule_n: 1,
@@ -311,14 +351,12 @@ test('renderReport separates core quality, retrieval diagnostics, citation calib
       kind: 'answer',
       expected_kind: 'answer',
       kind_pass: true,
-      r_at_5: true,
+      hit_at_5: true,
       hit_at_1: true,
       hit_at_3: true,
       mrr: 1,
       context_precision_at_5: 0.6,
-      context_recall_at_5: 1,
       citation_anchor_pass: true,
-      citation_pass: false,
       unexpected_citation_pages: ['extra-page'],
       unexpected_citation_rate: 0.5,
       answer_rule_pass: false,
@@ -352,7 +390,7 @@ test('renderReport separates core quality, retrieval diagnostics, citation calib
   assert.match(report, /Hit@5/);
   assert.match(report, /Context-P@5/);
   assert.match(report, /## Citation calibration/);
-  assert.match(report, /legacy Citation-pass/);
+  assert.doesNotMatch(report, /legacy Citation-pass/);
   assert.match(report, /Unexpected-citation-rate/);
   assert.match(report, /case-1: unexpected=\[extra-page\]/);
   assert.match(report, /## Answer text diagnostics/);
@@ -364,36 +402,32 @@ test('renderReport separates core quality, retrieval diagnostics, citation calib
 test('renderRetrievalReport only reports retrieval quality and diagnostics', () => {
   const summary = {
     n: 2,
-    r_at_5: 0.5,
+    hit_at_5: 0.5,
     hit_at_1: 0.25,
     hit_at_3: 0.5,
     mrr: 0.38,
     context_precision_at_5: 0.3,
-    context_recall_n: 2,
-    context_recall_at_5: 0.5,
   };
   const results = [
     {
       case_id: 'case-hit',
       query: 'How do I create an order?',
-      r_at_5: true,
+      hit_at_5: true,
       hit_at_1: false,
       hit_at_3: true,
       mrr: 0.5,
       context_precision_at_5: 0.4,
-      context_recall_at_5: 1,
       retrieved_pages_top5: ['noise', 'payment-engine-api'],
       latency_ms: 12,
     },
     {
       case_id: 'case-miss',
       query: 'How do I sign requests?',
-      r_at_5: false,
+      hit_at_5: false,
       hit_at_1: false,
       hit_at_3: false,
       mrr: 0,
       context_precision_at_5: 0,
-      context_recall_at_5: 0,
       retrieved_pages_top5: ['noise-a', 'noise-b'],
       latency_ms: 9,
     },
@@ -411,7 +445,7 @@ test('renderRetrievalReport only reports retrieval quality and diagnostics', () 
   assert.match(report, /## Core retrieval quality/);
   assert.match(report, /MRR/);
   assert.match(report, /Hit@1/);
-  assert.match(report, /Context-R@5/);
+  assert.doesNotMatch(report, /Context-R@5/);
   assert.match(report, /## Retrieval diagnostics/);
   assert.match(report, /Hit@3/);
   assert.match(report, /Hit@5/);
@@ -426,13 +460,11 @@ test('renderRetrievalReport only reports retrieval quality and diagnostics', () 
 test('renderRetrievalReport labels no-router raw retrieval mode', () => {
   const summary = {
     n: 1,
-    r_at_5: 1,
+    hit_at_5: 1,
     hit_at_1: 1,
     hit_at_3: 1,
     mrr: 1,
     context_precision_at_5: 1,
-    context_recall_n: 1,
-    context_recall_at_5: 1,
   };
 
   const report = renderRetrievalReport('2026-06-04', {
@@ -463,12 +495,11 @@ test('buildRetrievalEvalCaseTraceRecord stores retrieval trace without LLM resul
   const caseResult = {
     case_id: 'case-1',
     query: c.query,
-    r_at_5: true,
+    hit_at_5: true,
     hit_at_1: true,
     hit_at_3: true,
     mrr: 1,
     context_precision_at_5: 0.2,
-    context_recall_at_5: 1,
     retrieved_pages_top5: ['payment-engine-quickstart-30min'],
     latency_ms: 11,
   };

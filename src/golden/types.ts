@@ -14,7 +14,7 @@
 import type { DocsLang } from '../anydocs/types.ts';
 
 export type GoldenCaseExpected = {
-  /** At least one slug must appear in retrieval top-K (R@5 OR semantics). */
+  /** At least one slug must appear in retrieval top-K (Hit@5 OR semantics). */
   must_cite_pages: string[];
   /**
    * Additional pages that are acceptable final citations but do not satisfy
@@ -38,6 +38,22 @@ export type GoldenCaseExpected = {
    * behavior with existing golden cases.
    */
   expected_kind?: 'answer' | 'clarify' | 'error';
+  /**
+   * Human-reviewed canonical answer used by semantic evaluators such as
+   * Ragas FactualCorrectness. Keep this concise and factual; it is evaluation
+   * ground truth, not a second production prompt.
+   */
+  reference_answer?: string;
+  /**
+   * Atomic facts that a correct answer should cover. These make review easier
+   * and can be joined into a reference when reference_answer is not present.
+   */
+  reference_facts?: string[];
+  /**
+   * Optional case-specific judge guidance. Ragas' built-in metrics do not
+   * consume this yet, but the offline sample keeps it for custom evaluators.
+   */
+  evaluation_rubric?: Record<string, string>;
 };
 
 export type GoldenCase = {

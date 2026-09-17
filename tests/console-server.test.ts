@@ -3162,19 +3162,36 @@ function makeStubOps(overrides: Partial<ConsoleOps> = {}): {
         onEvent({
           type: 'case-done',
           i: 0, total: 2, caseId: 'c1', latencyMs: 200,
-          kind: 'answer', r_at_5: true, citation_pass: true, answer_rule_pass: true,
+          kind: 'answer', hit_at_5: true, hit_at_1: true, hit_at_3: true,
+          mrr: 1, context_precision_at_5: 0.8, citation_anchor_pass: true,
+          unexpected_citation_rate: 0, answer_rule_pass: true,
         });
         onEvent({ type: 'case-start', i: 1, total: 2, caseId: 'c2', query: 'q2', lang: 'zh' });
         onEvent({
           type: 'case-done',
           i: 1, total: 2, caseId: 'c2', latencyMs: 300,
-          kind: 'answer', r_at_5: false, citation_pass: true, answer_rule_pass: false,
+          kind: 'answer', hit_at_5: false, hit_at_1: false, hit_at_3: false,
+          mrr: 0, context_precision_at_5: 0, citation_anchor_pass: false,
+          unexpected_citation_rate: 1, answer_rule_pass: false,
         });
         onEvent({
           type: 'done',
           reportPath: '/tmp/fake/reports/2026-05-15-eval.md',
           totalMs: 500,
-          summary: { n: 2, r_at_5: 0.5, citation_pass: 1, answer_rule_pass: 0.5 },
+          summary: {
+            n: 2,
+            hit_at_5: 0.5,
+            hit_at_1: 0.5,
+            hit_at_3: 0.5,
+            mrr: 0.5,
+            context_precision_at_5: 0.4,
+            citation_anchor_pass: 0.5,
+            unexpected_citation_rate: 0.5,
+            answer_rule_pass: 0.5,
+            kind_pass: 1,
+            api_rule_n: 0,
+            api_rule_pass: null,
+          },
         });
         onEvent({ type: 'result', ok: true, reportPath: '/tmp/fake/reports/2026-05-15-eval.md' });
       }),

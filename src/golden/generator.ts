@@ -31,7 +31,7 @@ import { extractMarkdownSections } from '../content/sections.ts';
 import { TEMPLATE_IDS, type GoldenCaseCandidate, type TemplateId } from './types.ts';
 
 /** must_cite_pages includes the page itself + up to this many nav siblings.
- *  ARCH §16.3.2 R@5 / Citation-pass treat the list as OR-set, so widening
+ *  ARCH §16.3.2 Hit@5 / Citation-anchor treat the list as an OR-set, so widening
  *  here makes both metrics tolerate "answer cites a same-section neighbor",
  *  which is the right editorial reading per PRD §4.1. */
 const SIBLING_CITE_CAP = 5;

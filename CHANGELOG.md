@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+### 变更
+
+- **Eval 指标收敛** —— 主指标统一为 MRR / Hit@5 / Context-P@5 / Citation-anchor / Kind-pass / API-rule-pass；删除与 Hit@5 重复的 `r_at_5`、与 `must_cite_pages` OR-set 语义冲突的伪 Context-R@5，以及依赖 allowlist 完整度的 strict Citation-pass。Hit@1 / Hit@3、Unexpected-citation-rate 与关键词重叠保留为诊断项；Console history 兼容读取旧报告的 `r_at_5`。
+
 ### 新增
 
 - **Console 级 MCP 知识库代理 `/mcp/:name`（CAWP 挂载，ADR-038）** —— 在 dev console（4100）上挂一个**稳定的 per-project MCP 反向代理**，把 RFC 0007 的 `POST /mcp`（位于动态、会被空闲回收的子进程端口上）暴露成一个固定 URL `http://<console>:4100/mcp/<project>`，供外部 agent（CAWP）按项目挂载为检索知识库。

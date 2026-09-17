@@ -116,6 +116,7 @@ code, pre { font-family: "Fira Code", "SFMono-Regular", Consolas, monospace; }
 
 .ca-metric-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-bottom: 22px; overflow: hidden; background: var(--ca-surface); border: 1px solid var(--ca-border); border-radius: var(--ca-radius); }
 .ca-metric-strip.ca-four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.ca-metric-strip.ca-three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .ca-metric-strip.ca-two { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 0; }
 .ca-metric { min-width: 0; display: grid; grid-template-columns: 27px minmax(0, 1fr); grid-template-rows: auto auto; column-gap: 10px; padding: 15px 17px; border-right: 1px solid var(--ca-border); }
 .ca-metric:last-child { border-right: 0; }
@@ -284,7 +285,7 @@ code, pre { font-family: "Fira Code", "SFMono-Regular", Consolas, monospace; }
 .ca-candidate-list code { grid-column: 2; color: var(--ca-muted); font-size: 9px; overflow-wrap: anywhere; }
 .ca-candidate-list article > div:last-child { display: flex; gap: 6px; }
 .ca-report-table { display: flex; flex-direction: column; }
-.ca-report-table a { min-height: 44px; display: grid; grid-template-columns: 1fr 52px 52px 62px 16px; align-items: center; gap: 8px; padding: 0 15px; border-bottom: 1px solid var(--ca-border); font-size: 10px; }
+.ca-report-table a { min-height: 44px; display: grid; grid-template-columns: 1fr 52px 52px 52px 62px 16px; align-items: center; gap: 8px; padding: 0 15px; border-bottom: 1px solid var(--ca-border); font-size: 10px; }
 .ca-report-table a:last-child { border-bottom: 0; }
 .ca-report-table a:hover { background: #f6f8ff; }
 .ca-report-table small { color: var(--ca-muted); }
@@ -381,7 +382,7 @@ code, pre { font-family: "Fira Code", "SFMono-Regular", Consolas, monospace; }
   .ca-home, .ca-document-page, .ca-runs-page { width: calc(100% - 24px); padding-top: 22px; }
   .ca-page-title, .ca-workspace-head { align-items: flex-start; flex-direction: column; gap: 13px; }
   .ca-page-title h1, .ca-workspace-head h1 { font-size: 21px; }
-  .ca-metric-strip, .ca-metric-strip.ca-four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ca-metric-strip, .ca-metric-strip.ca-four, .ca-metric-strip.ca-three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ca-metric { border-bottom: 1px solid var(--ca-border); }
   .ca-metric:nth-child(2n) { border-right: 0; }
   .ca-metric:last-child { border-bottom: 0; }

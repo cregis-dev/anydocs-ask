@@ -25,6 +25,14 @@ dist/
 coverage/
 .nyc_output/
 
+# Python tooling used by the optional offline Ragas evaluator
+**/__pycache__/
+**/.pytest_cache/
+**/.venv/
+**/*.pyc
+**/*.egg-info/
+ragas-reports/
+
 # SQLite local artifacts (in case tests / fixtures drop one in repo root)
 *.db
 *.db-journal

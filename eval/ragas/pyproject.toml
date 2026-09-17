@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anydocs-ragas"
+version = "0.1.0"
+description = "Offline Ragas evaluator for anydocs-ask eval traces"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "anthropic>=0.69,<1",
+  "langchain==0.3.27",
+  "langchain-community==0.3.31",
+  "langchain-core==0.3.80",
+  "langchain-openai==0.3.35",
+  "langfuse>=3.2.4,<4",
+  "openai>=1.99,<3",
+  "ragas==0.4.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[project.scripts]
+anydocs-ragas = "anydocs_ragas.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

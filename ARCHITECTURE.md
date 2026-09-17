@@ -1193,7 +1193,12 @@ shell-exported 变量优先级最高（loadEnvFile 不覆盖）。**v1 不再读
   "expected": {
     "must_cite_pages": ["security/jwt", "security/refresh-token"],
     "must_contain": ["refresh", "expires_in"],
-    "forbid_contain": ["session cookie"]
+    "forbid_contain": ["session cookie"],
+    "reference_answer": "Use the refresh-token flow before the access token expires.",
+    "reference_facts": ["The refresh token is required."],
+    "evaluation_rubric": {
+      "precision": "Do not invent token lifetimes."
+    }
   },
   "tags": ["security", "auth"],
   "created_by": "llm-curated",
@@ -1207,16 +1212,35 @@ shell-exported 变量优先级最高（loadEnvFile 不覆盖）。**v1 不再读
 - `must_cite_pages` 至少 1 个；列表内任一命中即算覆盖（OR 语义）
 - `must_contain` / `forbid_contain` 都是子串数组，匹配走小写 + 中文不分词的 substring；语义级匹配等 v2
 - `context_pageId` 非 null 时 eval 会以该页 slug 作为 ask 请求的 context
+- `reference_answer` / `reference_facts` 是人工复核的语义 ground truth；不参与在线生成，只供独立评测器使用
+- `evaluation_rubric` 保存 case 级审查提示，随离线样本导出，供自定义 evaluator 使用
 
-#### 16.3.2 三指标定义
+#### 16.3.2 指标定义
 
 设 Golden 集大小为 N。对每个 case 调 `/v1/ask` 取响应 `r`：
 
-- **R@5**：`mean_i [ |r.fused[:5].pages ∩ expected.must_cite_pages| > 0 ]`
-- **Citation-pass**：`mean_i [ r.answer.citations.pages ⊆ expected.must_cite_pages ]`
-- **Answer-rule-pass**：`mean_i [ all(s in r.answer.md for s in expected.must_contain) ∧ none(s in r.answer.md for s in expected.forbid_contain) ]`
+- **MRR**：第一个命中 `must_cite_pages` 的唯一页面排名倒数均值
+- **Hit@5**：`mean_i [ |r.fused[:5].pages ∩ expected.must_cite_pages| > 0 ]`；`must_cite_pages` 是 OR-set
+- **Context-P@5**：top-5 chunks 中，页面属于 `must_cite_pages ∪ allow_cite_pages` 的比例
+- **Citation-anchor**：最终引用至少有一个属于 `must_cite_pages ∪ allow_cite_pages`
+- **Kind-pass**：最终 `answer | clarify | error` 分支与 `expected_kind` 一致
+- **API-rule-pass**：配置了 API operation / URL 规则的 case 是否全部满足
 
-#### 16.3.3 Eval 报告
+Hit@1、Hit@3、Unexpected-citation-rate 与关键词/正则重叠只作诊断。后者不具备语义判断能力，不作为发布门槛。
+
+#### 16.3.3 离线 Ragas 语义评测
+
+完整 `eval` 额外写 `<date>-eval.cases.jsonl`。schema v2 的每行包含稳定的 `ragas_sample`：`user_input`、最终 `response`、实际生成上下文 `retrieved_contexts`、人工 `reference`、原子事实和 rubric；`runtime_build` 同时记录生成该 trace 的 release 与 engine release。上下文优先取已脱敏的 `trace.input_snapshot.documents`，不以截断的 Console preview 代替。
+
+`eval/ragas/` 是与在线 Node 服务隔离的 Python runner，默认计算：
+
+- Faithfulness：回答是否被本次实际生成上下文支持
+- Answer Relevancy：回答是否回应用户问题
+- Factual Correctness：回答是否符合人工参考答案；无 reference 的 case 明确记为 skipped
+
+runner 输出逐 case JSONL、聚合 JSON 和 Markdown，并可将同一批得分发布到 Langfuse。Langfuse dataset 名包含稳定 Golden 输入与 reference 的 SHA-256 前缀；回答和检索上下文不参与该 hash，因此多个 release 会落在同一 dataset 的不同 experiment，ground truth 变化才创建新 dataset。experiment metadata 记录 release、engine 和 judge model。该 runner 只离线消费 eval trace，judge 延迟、依赖或故障不会进入 `/v1/ask` 请求链路。
+
+#### 16.3.4 Eval 报告
 
 `<workspace>/state/<projectId>/reports/<date>-eval.md` 模板：
 
@@ -1224,15 +1248,16 @@ shell-exported 变量优先级最高（loadEnvFile 不覆盖）。**v1 不再读
 # Eval — docs-zh — 2026-05-08
 
 Golden: golden/docs-zh/cases.jsonl (N=87)
-Baseline: 2026-04-25 (R@5=0.74, Cit=0.68, Ans=0.62)
+Baseline: 2026-04-25 (MRR=0.74, H@5=0.82, CP@5=0.61, Anchor=0.68)
 
 | metric          | value | baseline | Δ     |
 |-----------------|-------|----------|-------|
-| R@5             | 0.78  | 0.74     | +0.04 |
-| Citation-pass   | 0.71  | 0.68     | +0.03 |
-| Answer-rule-pass| 0.60  | 0.62     | -0.02 |
+| MRR             | 0.78  | 0.74     | +0.04 |
+| Hit@5           | 0.86  | 0.82     | +0.04 |
+| Context-P@5     | 0.64  | 0.61     | +0.03 |
+| Citation-anchor | 0.71  | 0.68     | +0.03 |
 
-## Failures (Answer-rule-pass)
+## Keyword-overlap misses (diagnostic)
 - q-014: missing "refresh" — answer talked about access_token only
   - chunks: security/jwt#L20-40 (rrf=0.83)
 - q-027: forbid_contain hit "session cookie"
@@ -1411,9 +1436,10 @@ subtree_ask_triggered rate: 18% (74 / 412), of which 31 未跟进 →
   },
   "eval": {
     "thresholds": {
-      "r_at_5": 0.70,
-      "citation_pass": 0.65,
-      "answer_rule_pass": 0.60
+      "hit_at_5": 0.70,
+      "citation_anchor_pass": 0.65,
+      "kind_pass": 1.00,
+      "api_rule_pass": 1.00
     }
   },
   "analyze": {
