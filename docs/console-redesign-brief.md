@@ -49,7 +49,7 @@ The redesign must make these feel natural and obvious. Numbered in priority orde
 
 1. **First-time setup**: I just installed anydocs-ask. I want to add my docs folder, see it index, and ask my first question.
 2. **Dogfood a question**: I made some doc edits. I want to ask 3 questions, see if citations are right, and iterate.
-3. **Run an eval**: My golden case set has 30 questions. I want to run them all, see R@5 / Citation / Answer-rule pass rates, and compare against the last report.
+3. **Run an eval**: My golden case set has 30 questions. I want to run them all, see retrieval / citation / behavior quality, and compare against the last report.
 4. **Manage the golden case set**: I want to generate candidate questions from doc structure, approve/reject them one by one, and flush approved ones into the active case set.
 5. **Diagnose live traffic**: My Reader integration is in production. I want to see this week's latency / error / non-answer trends and drill into the worst requests.
 6. **Close the feedback loop** *(new — RFC 0002, T1-a → T1-d + T4 shipped)*: I open the Feedback tab to see this week's β/γ rows; KPI tiles show explicit share + citation issues + non-answer rate; chips narrow to 👍/👎/implicit/no-citations. Click a row → drawer shows the full question, retrieval trace, and three cross-journey actions: **replay in Ask**, **add to golden case**, **jump to doc section** (which scrolls the Index tab to the matching page row and flashes it). Index rows show the past 7d Ask count so frequently retrieved pages remain visible without pretending that rank concentration measures answer correctness. A+ failure-cluster grouping still pending 0.3 (PRD §10.3 ≥ 50 threshold).
@@ -116,7 +116,7 @@ tests/.tmp/console-audit/after/         ← AFTER cleanup (better IA, still ugly
 ## 5. Design goals
 
 1. **Task-oriented IA**: Each tab opens with its main action visible at first glance. No scrolling-past 500 list items to find the run button.
-2. **Plain English first**: Replace internal jargon (题集 / workshop / golden / R@5 / RRF) with friendly labels, but keep the technical term reachable via tooltip / details. CJK stays welcome but should never be the only label for a control.
+2. **Plain English first**: Replace internal jargon (题集 / workshop / golden / Hit@5 / RRF) with friendly labels, but keep the technical term reachable via tooltip / details. CJK stays welcome but should never be the only label for a control.
 3. **State-aware first screens**: A stopped project, a warming project, a ready project, and a project with errors should each feel visually distinct, not just have a different pill in the corner.
 4. **Confident empty states**: Empty Reports, empty Traffic, empty Golden Cases — each is a teaching moment, not "—".
 5. **Calm density**: Reduce visual noise. Group related metrics. Don't make every card look equally important.
@@ -252,14 +252,14 @@ For each page, deliver **all listed states**. Each "state" is a separate mockup.
 **Role**: Run eval against approved cases, compare to baseline, manage golden cases.
 
 **Sections** (in order):
-1. **Metric row**: two cards side-by-side — LATEST EVAL (R@5 / Citation / Answer-rule + deltas vs baseline) and BASELINE (pinned or "not pinned" with explainer).
+1. **Metric row**: MRR / Hit@5 / Context-P@5 / Citation-anchor / Kind-pass / API-rule-pass, with baseline deltas in the report.
 2. **RUN EVAL** (highlighted, primary action card): big `▶ run` button + baseline selector dropdown. Tagline: "Runs every approved case · medium docs take 10–30s." Collapsible "CLI equivalent" details.
 3. **LATEST REPORT** (collapsible details, when a report exists): inline markdown render + link to standalone.
 4. **GOLDEN CASES** card with two sub-tabs:
    - **Approved** (the active case set): summary (N cases, last edited) + by-lang / by-tag / by-source bar charts.
    - **Pending review** (workshop): summary (pending / approved / rejected counts), buttons `+ from structure` / `+ from runs`, optional `flush N approved → cases.jsonl`, then the candidate row list:
      - Each row: badge (template_id), question text, meta line (lang · must_cite pages · optional ctx), approve / reject buttons. Up to 50 rendered, with "load more" tail.
-5. **HISTORY** (table, when ≥1 report): date · R@5 · Cit · Ans · pin button per row. Sparklines for trends.
+5. **HISTORY** (table, when ≥1 report): date · MRR · Hit@5 · Citation-anchor · case count.
 
 **States**:
 1. **No cases yet**: Approved tab empty with prompt to seed via Pending. Pending tab also empty with `+ from structure` CTA.
@@ -424,7 +424,7 @@ Each `.html` file is **self-contained** (links to `../styles.css`) and **uses re
 - Pages: 107 on disk, 460 chunks in DB
 - Sample question: "What is hermes and how do I install it?"
 - Sample answer: 3-paragraph markdown with 2 citations and a fenced code block
-- Sample metrics: R@5 = 0.78, Citation pass = 0.65, Answer-rule pass = 0.82
+- Sample metrics: MRR = 0.78, Hit@5 = 0.86, Citation-anchor = 0.82
 - Sample report file: `2026-05-12-eval.md`
 
 The `README.md` in the deliverable must include:

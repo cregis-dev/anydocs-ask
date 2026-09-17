@@ -85,10 +85,12 @@ export function clearPinnedBaseline(stateRoot: string): boolean {
 export type EvalReportSummary = {
   filename: string;
   date: string;
-  /** Mean of three metrics (R@5, Citation-pass, Answer-rule-pass). null = could not parse. */
-  r_at_5: number | null;
-  citation_pass: number | null;
-  answer_rule_pass: number | null;
+  mrr: number | null;
+  hit_at_5: number | null;
+  context_precision_at_5: number | null;
+  citation_anchor_pass: number | null;
+  kind_pass: number | null;
+  api_rule_pass: number | null;
   /** Approx case count parsed from the report header. null = unparseable. */
   cases: number | null;
   /** Bytes — useful for stale-pin debugging. */
@@ -111,9 +113,12 @@ export function parseEvalReport(stateRoot: string, filename: string): EvalReport
   const summary: EvalReportSummary = {
     filename,
     date,
-    r_at_5: null,
-    citation_pass: null,
-    answer_rule_pass: null,
+    mrr: null,
+    hit_at_5: null,
+    context_precision_at_5: null,
+    citation_anchor_pass: null,
+    kind_pass: null,
+    api_rule_pass: null,
     cases: null,
     sizeBytes: 0,
   };
@@ -126,17 +131,25 @@ export function parseEvalReport(stateRoot: string, filename: string): EvalReport
     try {
       const data = JSON.parse(m[1]!) as {
         date: string;
-        summary: { n: number; r_at_5: number; citation_pass: number; answer_rule_pass: number };
+        summary: Record<string, unknown>;
       };
-      summary.r_at_5 = data.summary.r_at_5;
-      summary.citation_pass = data.summary.citation_pass;
-      summary.answer_rule_pass = data.summary.answer_rule_pass;
-      summary.cases = data.summary.n;
+      summary.mrr = numericMetric(data.summary, 'mrr');
+      summary.hit_at_5 = numericMetric(data.summary, 'hit_at_5') ?? numericMetric(data.summary, 'r_at_5');
+      summary.context_precision_at_5 = numericMetric(data.summary, 'context_precision_at_5');
+      summary.citation_anchor_pass = numericMetric(data.summary, 'citation_anchor_pass');
+      summary.kind_pass = numericMetric(data.summary, 'kind_pass');
+      summary.api_rule_pass = numericMetric(data.summary, 'api_rule_pass');
+      summary.cases = numericMetric(data.summary, 'n');
     } catch {
       // fall through with nulls
     }
   }
   return summary;
+}
+
+function numericMetric(summary: Record<string, unknown>, key: string): number | null {
+  const value = summary[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 export function readReportBody(stateRoot: string, filename: string): string | null {

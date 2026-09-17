@@ -8,12 +8,8 @@ export type CaseResult = {
   kind: 'answer' | 'clarify' | 'error';
   expected_kind: 'answer' | 'clarify' | 'error';
   kind_pass: boolean;
-  /**
-   * @deprecated Saturates at 1.00 across the current cregis set; kept for
-   * regression detection only. Headline-pass signal lives in {@link hit_at_1}
-   * / {@link mrr} now. Will be removed once Hit@K is consumed by the console UI.
-   */
-  r_at_5: boolean;
+  /** Any page represented by the top-5 fused chunks is in the must-cite OR-set. */
+  hit_at_5: boolean;
   /** Top-ranked unique page is in must_cite_pages. */
   hit_at_1: boolean;
   /** Any of the top-3 unique pages is in must_cite_pages. */
@@ -25,21 +21,12 @@ export type CaseResult = {
    */
   mrr: number;
   /**
-   * (# of top-5 retrieved chunks whose page is in must_cite ∪ allow_cite) / 5.
-   * Continuous signal that R@5 / Hit@K can't give — exposes top-K noise
+   * Fraction of the retrieved top-5 chunks whose page is in
+   * must_cite ∪ allow_cite (the denominator is smaller when fewer are returned).
+   * Continuous signal that Hit@K can't give — exposes top-K noise
    * even when at least one correct page is present.
    */
   context_precision_at_5: number;
-  /**
-   * Page-level context recall: |top-5 unique pages ∩ must_cite_pages| /
-   * |must_cite_pages|. null when must_cite_pages is empty (averaged like
-   * {@link api_rule_pass}).
-   *
-   * This is the deterministic, page-level version of Ragas
-   * `context_recall`. The claim-level LLM-judge variant lands in eval
-   * Phase 6 alongside Faithfulness.
-   */
-  context_recall_at_5: number | null;
   /**
    * At least one final citation points at an expected source
    * (`must_cite_pages ∪ allow_cite_pages`). This is the headline citation
@@ -48,12 +35,6 @@ export type CaseResult = {
    * not been calibrated for yet.
    */
   citation_anchor_pass: boolean;
-  /**
-   * Legacy strict metric: all cited pages must be in
-   * `must_cite_pages ∪ allow_cite_pages`. Kept for historical comparisons and
-   * Golden allowlist calibration, but too strict for headline quality.
-   */
-  citation_pass: boolean;
   /** Cited pages outside `must_cite_pages ∪ allow_cite_pages`. */
   unexpected_citation_pages: string[];
   /** unexpected_citation_pages.length / cited_pages.length, or 0 when uncited. */
@@ -83,18 +64,13 @@ export type CaseResult = {
 
 export type EvalSummary = {
   n: number;
-  /** @deprecated See {@link CaseResult.r_at_5}. */
-  r_at_5: number;
+  hit_at_5: number;
   hit_at_1: number;
   hit_at_3: number;
   mrr: number;
   context_precision_at_5: number;
-  context_recall_n: number;
-  context_recall_at_5: number | null;
   citation_anchor_pass: number;
   unexpected_citation_rate: number;
-  /** Legacy strict citation metric; see {@link CaseResult.citation_pass}. */
-  citation_pass: number;
   /** Diagnostic only; see {@link CaseResult.answer_rule_pass}. */
   answer_rule_pass: number;
   kind_pass: number;
@@ -105,30 +81,22 @@ export type EvalSummary = {
 export type RetrievalCaseResult = {
   case_id: string;
   query: string;
-  /**
-   * @deprecated Kept for parity with full eval. Prefer hit_at_1 / mrr for
-   * headline retrieval quality.
-   */
-  r_at_5: boolean;
+  hit_at_5: boolean;
   hit_at_1: boolean;
   hit_at_3: boolean;
   mrr: number;
   context_precision_at_5: number;
-  context_recall_at_5: number | null;
   retrieved_pages_top5: string[];
   latency_ms: number;
 };
 
 export type RetrievalEvalSummary = {
   n: number;
-  /** @deprecated See {@link RetrievalCaseResult.r_at_5}. */
-  r_at_5: number;
+  hit_at_5: number;
   hit_at_1: number;
   hit_at_3: number;
   mrr: number;
   context_precision_at_5: number;
-  context_recall_n: number;
-  context_recall_at_5: number | null;
 };
 
 export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): CaseResult {
@@ -145,7 +113,7 @@ export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): Ca
   // chunks happen to come from the same page.
   const uniquePagesInOrder = uniqueOrdered(trace.fused.map((f) => f.page_id));
   const top5Pages = uniqueOrdered(trace.fused.slice(0, 5).map((f) => f.page_id));
-  const r_at_5 = top5Pages.some((p) => mustPages.has(p));
+  const hit_at_5 = top5Pages.some((p) => mustPages.has(p));
   const hit_at_1 = uniquePagesInOrder.length > 0 && mustPages.has(uniquePagesInOrder[0]!);
   const hit_at_3 = uniquePagesInOrder.slice(0, 3).some((p) => mustPages.has(p));
   const mrr = computeMrr(uniquePagesInOrder, mustPages);
@@ -153,14 +121,10 @@ export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): Ca
     trace.fused.slice(0, 5),
     allowedCitationPages,
   );
-  const context_recall_at_5 = mustPages.size === 0
-    ? null
-    : [...mustPages].filter((p) => top5Pages.includes(p)).length / mustPages.size;
 
   const kind = result.type;
   let citedPages: string[] = [];
   let citationAnchorPass = false;
-  let citationPass = false;
   let unexpectedCitationPages: string[] = [];
   let unexpectedCitationRate = 0;
   let answerRulePass = false;
@@ -179,7 +143,6 @@ export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): Ca
     citationAnchorPass = citedPages.some((p) => allowedCitationPages.has(p));
     unexpectedCitationPages = citedPages.filter((p) => !allowedCitationPages.has(p));
     unexpectedCitationRate = citedPages.length === 0 ? 0 : unexpectedCitationPages.length / citedPages.length;
-    citationPass = citedPages.length > 0 && citedPages.every((p) => allowedCitationPages.has(p));
 
     const md = result.answer_md;
     missingMustContain = c.expected.must_contain.filter((s) => !substringHit(md, s));
@@ -214,14 +177,12 @@ export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): Ca
     kind,
     expected_kind: expectedKind,
     kind_pass: kind === expectedKind,
-    r_at_5,
+    hit_at_5,
     hit_at_1,
     hit_at_3,
     mrr,
     context_precision_at_5,
-    context_recall_at_5,
     citation_anchor_pass: citationAnchorPass,
-    citation_pass: citationPass,
     unexpected_citation_pages: unexpectedCitationPages,
     unexpected_citation_rate: unexpectedCitationRate,
     answer_rule_pass: answerRulePass,
@@ -253,24 +214,20 @@ export function scoreRetrievalCase(
   ]);
   const uniquePagesInOrder = uniqueOrdered(trace.fused.map((f) => f.page_id));
   const top5Pages = uniqueOrdered(trace.fused.slice(0, 5).map((f) => f.page_id));
-  const r_at_5 = top5Pages.some((p) => mustPages.has(p));
+  const hit_at_5 = top5Pages.some((p) => mustPages.has(p));
   const hit_at_1 = uniquePagesInOrder.length > 0 && mustPages.has(uniquePagesInOrder[0]!);
   const hit_at_3 = uniquePagesInOrder.slice(0, 3).some((p) => mustPages.has(p));
   const mrr = computeMrr(uniquePagesInOrder, mustPages);
   const context_precision_at_5 = computeContextPrecision(trace.fused.slice(0, 5), allowedCitationPages);
-  const context_recall_at_5 = mustPages.size === 0
-    ? null
-    : [...mustPages].filter((p) => top5Pages.includes(p)).length / mustPages.size;
 
   return {
     case_id: c.id,
     query: c.query,
-    r_at_5,
+    hit_at_5,
     hit_at_1,
     hit_at_3,
     mrr,
     context_precision_at_5,
-    context_recall_at_5,
     retrieved_pages_top5: top5Pages,
     latency_ms: Math.round(latencyMs),
   };
@@ -287,14 +244,12 @@ export function failedCase(c: GoldenCase, latencyMs: number): CaseResult {
     kind: 'error',
     expected_kind: expectedKind,
     kind_pass: expectedKind === 'error',
-    r_at_5: false,
+    hit_at_5: false,
     hit_at_1: false,
     hit_at_3: false,
     mrr: 0,
     context_precision_at_5: 0,
-    context_recall_at_5: c.expected.must_cite_pages.length === 0 ? null : 0,
     citation_anchor_pass: false,
-    citation_pass: false,
     unexpected_citation_pages: [],
     unexpected_citation_rate: 0,
     answer_rule_pass: false,
@@ -315,42 +270,27 @@ export function failedCase(c: GoldenCase, latencyMs: number): CaseResult {
 }
 
 export function summarizeRetrievalResults(results: RetrievalCaseResult[]): RetrievalEvalSummary {
-  const recallResults = results.filter(
-    (r): r is RetrievalCaseResult & { context_recall_at_5: number } => r.context_recall_at_5 !== null,
-  );
   return {
     n: results.length,
-    r_at_5: mean(results.map((r) => (r.r_at_5 ? 1 : 0))),
+    hit_at_5: mean(results.map((r) => (r.hit_at_5 ? 1 : 0))),
     hit_at_1: mean(results.map((r) => (r.hit_at_1 ? 1 : 0))),
     hit_at_3: mean(results.map((r) => (r.hit_at_3 ? 1 : 0))),
     mrr: mean(results.map((r) => r.mrr)),
     context_precision_at_5: mean(results.map((r) => r.context_precision_at_5)),
-    context_recall_n: recallResults.length,
-    context_recall_at_5: recallResults.length === 0
-      ? null
-      : mean(recallResults.map((r) => r.context_recall_at_5)),
   };
 }
 
 export function summarizeResults(results: CaseResult[]): EvalSummary {
   const apiResults = results.filter((r) => r.api_rule_pass !== null);
-  const recallResults = results.filter(
-    (r): r is CaseResult & { context_recall_at_5: number } => r.context_recall_at_5 !== null,
-  );
   return {
     n: results.length,
-    r_at_5: mean(results.map((r) => (r.r_at_5 ? 1 : 0))),
+    hit_at_5: mean(results.map((r) => (r.hit_at_5 ? 1 : 0))),
     hit_at_1: mean(results.map((r) => (r.hit_at_1 ? 1 : 0))),
     hit_at_3: mean(results.map((r) => (r.hit_at_3 ? 1 : 0))),
     mrr: mean(results.map((r) => r.mrr)),
     context_precision_at_5: mean(results.map((r) => r.context_precision_at_5)),
-    context_recall_n: recallResults.length,
-    context_recall_at_5: recallResults.length === 0
-      ? null
-      : mean(recallResults.map((r) => r.context_recall_at_5)),
     citation_anchor_pass: mean(results.map((r) => (r.citation_anchor_pass ? 1 : 0))),
     unexpected_citation_rate: mean(results.map((r) => r.unexpected_citation_rate)),
-    citation_pass: mean(results.map((r) => (r.citation_pass ? 1 : 0))),
     answer_rule_pass: mean(results.map((r) => (r.answer_rule_pass ? 1 : 0))),
     kind_pass: mean(results.map((r) => (r.kind_pass ? 1 : 0))),
     api_rule_n: apiResults.length,

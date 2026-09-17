@@ -613,11 +613,11 @@ Golden case schema（jsonl，每行）：
 }
 ```
 
-评测输出三个指标（详见 ARCHITECTURE §16.3）：
+评测输出核心质量与诊断指标（详见 ARCHITECTURE §16.3）：
 
-- **R@5**：top-5 命中 `must_cite_pages` 的覆盖率
-- **Citation-pass**：答案 citations 全部落在 `must_cite_pages` 内的样本占比
-- **Answer-rule-pass**：答案文本满足 `must_contain` ∧ ¬`forbid_contain` 的样本占比
+- **MRR / Hit@5 / Context-P@5**：分别衡量正确来源的排序、top-5 可达性与送入模型的上下文噪声
+- **Citation-anchor / Kind-pass / API-rule-pass**：分别衡量引用是否锚定预期来源、回答分支是否正确、API 标识与链接是否满足规则
+- **Hit@1 / Hit@3 / Unexpected-citation-rate / Answer keyword overlap**：仅用于定位问题，不作为主质量指标
 
 ### 12.5 Runs 历史
 
@@ -643,9 +643,11 @@ Golden case schema（jsonl，每行）：
 
 | 指标 | 门槛 | 不达标的含义 |
 |---|---|---|
-| R@5 | ≥0.70 | 关键页缺失 / navigation 编排有歧义 |
-| Citation-pass | ≥0.65 | chunk 边界 / breadcrumb 投影问题 |
-| Answer-rule-pass | ≥0.60 | LLM prompt 或文档行文不够明确 |
+| Hit@5 | ≥0.70 | 关键页缺失 / navigation 编排有歧义 |
+| Citation-anchor | ≥0.65 | 回答没有引用预期来源 |
+| Kind-pass / API-rule-pass | 1.00 | 回答分支错误，或 API 标识与引用不完整 |
+
+MRR 与 Context-P@5 以已钉住的 baseline 做回归比较；关键词重叠仅作诊断，不作为发布门槛。
 
 **冷启动期不应该做**：reranker model、建议问题侧栏、query expansion、LLM few-shot——全在 v1.5+。践行 PRD §1 "服从编排"原则：先确认编排是否合格，再调算法。
 
@@ -759,11 +761,11 @@ Golden case schema（jsonl，每行）：
 - 项目页右主区有 **4 个 tab**：**Ask**（默认 dogfood）/ **Index** / **Eval**（独立 workflow）/ **Traffic**
 - **Eval tab**（2026-05-11 提升为一级 feature）：
   - golden 题集状态：n cases / 按 lang / tag / created_by 分布 / 最近编辑时间
-  - 三指标卡：latest eval + baseline 对比，Δ 用颜色（绿涨红跌）标注
+  - 核心指标卡：MRR / Hit@5 / Context-P@5 / Citation-anchor / Kind-pass / API-rule-pass
   - **baseline pin**：history 表每行 `pin` 按钮可钉一份历史报告作"金准"，后续 eval 默认对比它（不只对比上一份）；UI Unpin 一键清；落盘 `state/<id>/golden/eval-baseline.json`
   - Run eval：dropdown 选对比目标（previous / pinned / 任一历史报告），按钮触发；结果落 `state/<id>/reports/<date>-eval.md`，自动刷新视图
   - 最近报告 markdown inline 渲染（同 reports 页面）
-  - history 表：所有 eval 报告 + R@5 / Cit / Ans 三列 + sparkline 趋势（≥3 报告时显示，unicode block 零依赖）
+  - history 表：所有 eval 报告 + MRR / Hit@5 / Citation-anchor + case 数
 - **2026-05-12 重构**：sidebar "Golden / Analyze" 卡删，三按钮按数据流归位：
   - `analyze runs` → **Traffic tab** analyze 区（紧贴 7d 流量数据）；勾"include console traffic"等价 `--include-console`
   - `golden ← structure` / `golden ← runs` → **Eval tab** Golden Workshop 区（紧贴 cases 统计）

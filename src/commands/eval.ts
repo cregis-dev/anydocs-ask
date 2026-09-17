@@ -5,9 +5,9 @@
  * writes a Markdown report under `<state>/reports/<YYYY-MM-DD>-eval.md`.
  *
  * Report semantics:
- *   - Core quality: MRR, Hit@1, Context-R@5, citation anchor, Kind, API rule.
- *   - Retrieval diagnostics: Hit@3, Hit@5, Context-P@5.
- *   - Citation calibration: legacy strict Citation-pass and unexpected pages.
+ *   - Core quality: MRR, Hit@5, Context-P@5, citation anchor, Kind, API rule.
+ *   - Retrieval diagnostics: Hit@1 and Hit@3.
+ *   - Citation calibration: unexpected citation pages/rate.
  *   - Answer text diagnostics: brittle keyword/regex overlap.
  *
  * The eval driver builds a Runtime in-process (warm-up loads the embedder +
@@ -45,6 +45,11 @@ import {
 } from '../eval/scoring.ts';
 import type { GoldenCase } from '../golden/types.ts';
 import type { AskRequest, AskResult } from '../query/types.ts';
+import {
+  hasRuntimeBuildMetadata,
+  readRuntimeBuildMetadata,
+  type RuntimeBuildMetadata,
+} from '../runtime-build.ts';
 
 export type EvalOptions = {
   projectRoot: string;
@@ -63,7 +68,7 @@ export type EvalOptions = {
 };
 
 export type EvalCaseTraceRecord = {
-  schema_version: 1;
+  schema_version: 2;
   case_id: string;
   index: number;
   total: number;
@@ -75,6 +80,20 @@ export type EvalCaseTraceRecord = {
   result: AskResult;
   trace: AskTrace | null;
   diagnostics: EvalTraceDiagnostics;
+  runtime_build: RuntimeBuildMetadata | null;
+  /** Stable hand-off contract for the separate Python/Ragas evaluator. */
+  ragas_sample: EvalRagasSample;
+};
+
+export type EvalRagasSample = {
+  user_input: string;
+  response: string | null;
+  retrieved_contexts: string[];
+  reference: string | null;
+  reference_facts: string[];
+  rubric: Record<string, string>;
+  /** Full redacted prompt snapshot is preferred; preview is test/legacy fallback. */
+  context_source: 'prompt_snapshot' | 'trace_preview' | 'none';
 };
 
 export type RetrievalEvalCaseTraceRecord = {
@@ -142,15 +161,13 @@ export type EvalProgressEvent =
       caseId: string;
       latencyMs: number;
       kind: CaseResult['kind'];
-      /** @deprecated kept for old console clients; prefer hit_at_1 / mrr. */
-      r_at_5: boolean;
+      hit_at_5: boolean;
       hit_at_1: boolean;
       hit_at_3: boolean;
       mrr: number;
       context_precision_at_5: number;
       citation_anchor_pass: boolean;
       unexpected_citation_rate: number;
-      citation_pass: boolean;
       /** Diagnostic only — see scoring.ts for the deprecation note. */
       answer_rule_pass: boolean;
     }
@@ -227,14 +244,13 @@ export async function runEval(opts: EvalOptions): Promise<number> {
       caseId: c.id,
       latencyMs: caseResult.latency_ms,
       kind: caseResult.kind,
-      r_at_5: caseResult.r_at_5,
+      hit_at_5: caseResult.hit_at_5,
       hit_at_1: caseResult.hit_at_1,
       hit_at_3: caseResult.hit_at_3,
       mrr: caseResult.mrr,
       context_precision_at_5: caseResult.context_precision_at_5,
       citation_anchor_pass: caseResult.citation_anchor_pass,
       unexpected_citation_rate: caseResult.unexpected_citation_rate,
-      citation_pass: caseResult.citation_pass,
       answer_rule_pass: caseResult.answer_rule_pass,
     });
     if ((i + 1) % 5 === 0 || i === cases.length - 1) {
@@ -261,7 +277,7 @@ export async function runEval(opts: EvalOptions): Promise<number> {
   process.stdout.write(
     `anydocs-ask eval: wrote ${reportPath}\n` +
       `anydocs-ask eval: wrote ${caseTracePath}\n` +
-      `  MRR=${summary.mrr.toFixed(2)}  H@1=${summary.hit_at_1.toFixed(2)}  CR@5=${summary.context_recall_at_5 === null ? '—' : summary.context_recall_at_5.toFixed(2)}  Anchor=${summary.citation_anchor_pass.toFixed(2)}  Kind=${summary.kind_pass.toFixed(2)}  Api=${summary.api_rule_pass === null ? '—' : summary.api_rule_pass.toFixed(2)}  (retrieval: H@3=${summary.hit_at_3.toFixed(2)} H@5=${summary.r_at_5.toFixed(2)} CP@5=${summary.context_precision_at_5.toFixed(2)}; citation: legacy=${summary.citation_pass.toFixed(2)} unexpected=${summary.unexpected_citation_rate.toFixed(2)}; ${results.length} cases, ${totalMs}ms)\n`,
+      `  MRR=${summary.mrr.toFixed(2)}  H@5=${summary.hit_at_5.toFixed(2)}  CP@5=${summary.context_precision_at_5.toFixed(2)}  Anchor=${summary.citation_anchor_pass.toFixed(2)}  Kind=${summary.kind_pass.toFixed(2)}  Api=${summary.api_rule_pass === null ? '—' : summary.api_rule_pass.toFixed(2)}  (retrieval diagnostics: H@1=${summary.hit_at_1.toFixed(2)} H@3=${summary.hit_at_3.toFixed(2)}; citations: unexpected=${summary.unexpected_citation_rate.toFixed(2)}; ${results.length} cases, ${totalMs}ms)\n`,
   );
   opts.onProgress?.({ type: 'done', reportPath, totalMs, summary });
   return 0;
@@ -335,7 +351,7 @@ export async function runRetrievalEval(opts: EvalOptions): Promise<number> {
   process.stdout.write(
     `anydocs-ask retrieval eval: wrote ${reportPath}\n` +
       `anydocs-ask retrieval eval: wrote ${caseTracePath}\n` +
-      `  MRR=${summary.mrr.toFixed(2)}  H@1=${summary.hit_at_1.toFixed(2)}  CR@5=${summary.context_recall_at_5 === null ? '—' : summary.context_recall_at_5.toFixed(2)}  (retrieval: H@3=${summary.hit_at_3.toFixed(2)} H@5=${summary.r_at_5.toFixed(2)} CP@5=${summary.context_precision_at_5.toFixed(2)}; ${results.length} cases, ${totalMs}ms)\n`,
+      `  MRR=${summary.mrr.toFixed(2)}  H@5=${summary.hit_at_5.toFixed(2)}  CP@5=${summary.context_precision_at_5.toFixed(2)}  (retrieval diagnostics: H@1=${summary.hit_at_1.toFixed(2)} H@3=${summary.hit_at_3.toFixed(2)}; ${results.length} cases, ${totalMs}ms)\n`,
   );
   return 0;
 }
@@ -457,6 +473,7 @@ export function buildEvalCaseTraceRecord(args: {
   caseResult: CaseResult;
   traced: AskWithTraceResult | null;
 }): EvalCaseTraceRecord {
+  const runtimeBuild = readRuntimeBuildMetadata(process.env);
   const result = args.traced?.result ?? {
     type: 'error',
     code: args.caseResult.error_code ?? 'exception',
@@ -464,7 +481,7 @@ export function buildEvalCaseTraceRecord(args: {
     detail: args.caseResult.error_detail,
   };
   return {
-    schema_version: 1,
+    schema_version: 2,
     case_id: args.c.id,
     index: args.index,
     total: args.total,
@@ -476,6 +493,44 @@ export function buildEvalCaseTraceRecord(args: {
     result,
     trace: args.traced?.trace ?? null,
     diagnostics: buildEvalTraceDiagnostics(args.traced?.trace ?? null),
+    runtime_build: hasRuntimeBuildMetadata(runtimeBuild) ? runtimeBuild : null,
+    ragas_sample: buildRagasSample(args.c, result, args.traced?.trace ?? null),
+  };
+}
+
+export function buildRagasSample(
+  c: GoldenCase,
+  result: AskResult,
+  trace: AskTrace | null,
+): EvalRagasSample {
+  const snapshotContexts = (trace?.input_snapshot?.documents ?? [])
+    .map((document) => document.text.trim())
+    .filter((text) => text.length > 0);
+  const previewContexts = (trace?.selected_context ?? [])
+    .map((chunk) => chunk.text_preview.trim())
+    .filter((text) => text.length > 0);
+  const referenceFacts = (c.expected.reference_facts ?? [])
+    .map((fact) => fact.trim())
+    .filter((fact) => fact.length > 0);
+  const referenceAnswer = c.expected.reference_answer?.trim();
+  const reference = referenceAnswer && referenceAnswer.length > 0
+    ? referenceAnswer
+    : referenceFacts.length > 0
+      ? referenceFacts.map((fact) => `- ${fact}`).join('\n')
+      : null;
+
+  return {
+    user_input: c.query,
+    response: result.type === 'answer' ? result.answer_md : null,
+    retrieved_contexts: snapshotContexts.length > 0 ? snapshotContexts : previewContexts,
+    reference,
+    reference_facts: referenceFacts,
+    rubric: c.expected.evaluation_rubric ?? {},
+    context_source: snapshotContexts.length > 0
+      ? 'prompt_snapshot'
+      : previewContexts.length > 0
+        ? 'trace_preview'
+        : 'none',
   };
 }
 
@@ -557,6 +612,8 @@ function buildChunkDiagnostic(
 
 type Baseline = { date: string; summary: EvalSummary } | null;
 
+type LegacyEvalSummary = Partial<EvalSummary> & { r_at_5?: number };
+
 function loadBaseline(stateRoot: string, override: string | undefined): Baseline {
   const path = override ?? findLatestEvalReport(stateRoot);
   if (!path || !existsSync(path)) return null;
@@ -564,11 +621,45 @@ function loadBaseline(stateRoot: string, override: string | undefined): Baseline
     const text = readFileSync(path, 'utf8');
     const m = text.match(/<!--\s*EVAL_SUMMARY\s+(\{.*?\})\s*-->/);
     if (!m) return null;
-    const data = JSON.parse(m[1]!) as { date: string; summary: EvalSummary };
-    return { date: data.date, summary: data.summary };
+    const data = JSON.parse(m[1]!) as { date: string; summary: LegacyEvalSummary };
+    const summary = normalizeBaselineSummary(data.summary);
+    return summary ? { date: data.date, summary } : null;
   } catch {
     return null;
   }
+}
+
+function normalizeBaselineSummary(raw: LegacyEvalSummary): EvalSummary | null {
+  const hitAt5 = raw.hit_at_5 ?? raw.r_at_5;
+  if (
+    typeof raw.n !== 'number' ||
+    typeof hitAt5 !== 'number' ||
+    typeof raw.hit_at_1 !== 'number' ||
+    typeof raw.hit_at_3 !== 'number' ||
+    typeof raw.mrr !== 'number' ||
+    typeof raw.context_precision_at_5 !== 'number' ||
+    typeof raw.citation_anchor_pass !== 'number' ||
+    typeof raw.unexpected_citation_rate !== 'number' ||
+    typeof raw.answer_rule_pass !== 'number' ||
+    typeof raw.kind_pass !== 'number' ||
+    typeof raw.api_rule_n !== 'number'
+  ) {
+    return null;
+  }
+  return {
+    n: raw.n,
+    hit_at_5: hitAt5,
+    hit_at_1: raw.hit_at_1,
+    hit_at_3: raw.hit_at_3,
+    mrr: raw.mrr,
+    context_precision_at_5: raw.context_precision_at_5,
+    citation_anchor_pass: raw.citation_anchor_pass,
+    unexpected_citation_rate: raw.unexpected_citation_rate,
+    answer_rule_pass: raw.answer_rule_pass,
+    kind_pass: raw.kind_pass,
+    api_rule_n: raw.api_rule_n,
+    api_rule_pass: raw.api_rule_pass ?? null,
+  };
 }
 
 function findLatestEvalReport(stateRoot: string): string | null {
@@ -643,7 +734,6 @@ export function renderRetrievalReport(
 ): string {
   const { summary, results, totalMs } = args;
   const fmt = (x: number): string => x.toFixed(2);
-  const fmtOpt = (x: number | null | undefined): string => x === null || x === undefined ? '—' : x.toFixed(2);
   const lines: string[] = [];
   lines.push(`# Retrieval Eval — ${date}`);
   lines.push('');
@@ -656,20 +746,15 @@ export function renderRetrievalReport(
   lines.push('| metric      | value |');
   lines.push('|-------------|-------|');
   lines.push(`| MRR         | ${fmt(summary.mrr)}  |`);
-  lines.push(`| Hit@1       | ${fmt(summary.hit_at_1)}  |`);
-  lines.push(`| Context-R@5 | ${fmtOpt(summary.context_recall_at_5)}  |`);
-  if (summary.context_recall_n > 0) {
-    lines.push('');
-    lines.push(`Context-R@5 cases: ${summary.context_recall_n}`);
-  }
+  lines.push(`| Hit@5       | ${fmt(summary.hit_at_5)}  |`);
+  lines.push(`| Context-P@5 | ${fmt(summary.context_precision_at_5)}  |`);
   lines.push('');
   lines.push('## Retrieval diagnostics');
   lines.push('');
   lines.push('| metric      | value |');
   lines.push('|-------------|-------|');
+  lines.push(`| Hit@1       | ${fmt(summary.hit_at_1)}  |`);
   lines.push(`| Hit@3       | ${fmt(summary.hit_at_3)}  |`);
-  lines.push(`| Hit@5       | ${fmt(summary.r_at_5)}  |`);
-  lines.push(`| Context-P@5 | ${fmt(summary.context_precision_at_5)}  |`);
   lines.push('');
   lines.push(
     args.noRouter
@@ -678,7 +763,7 @@ export function renderRetrievalReport(
   );
   lines.push('');
 
-  const recallFails = results.filter((r) => !r.r_at_5);
+  const recallFails = results.filter((r) => !r.hit_at_5);
   if (recallFails.length > 0) {
     lines.push(`## Retrieval misses (${recallFails.length})`);
     for (const r of recallFails) {
@@ -688,7 +773,7 @@ export function renderRetrievalReport(
     lines.push('');
   }
 
-  const top1Fails = results.filter((r) => r.r_at_5 && !r.hit_at_1);
+  const top1Fails = results.filter((r) => r.hit_at_5 && !r.hit_at_1);
   if (top1Fails.length > 0) {
     lines.push(`## Top-1 misses (${top1Fails.length})`);
     for (const r of top1Fails) {
@@ -729,7 +814,7 @@ export function renderReport(
   lines.push(`Case traces: \`${date}-eval.cases.jsonl\``);
   if (baseline) {
     lines.push(
-      `Baseline: ${baseline.date} (MRR=${fmtOpt(baseRow!.mrr)}, H@1=${fmtOpt(baseRow!.hit_at_1)}, CR@5=${fmtOpt(baseRow!.context_recall_at_5)}, Anchor=${fmtOpt(baseRow!.citation_anchor_pass)}, Kind=${fmtOpt(baseRow!.kind_pass)}, Api=${fmtOpt(baseRow!.api_rule_pass)})`,
+      `Baseline: ${baseline.date} (MRR=${fmtOpt(baseRow!.mrr)}, H@5=${fmtOpt(baseRow!.hit_at_5)}, CP@5=${fmtOpt(baseRow!.context_precision_at_5)}, Anchor=${fmtOpt(baseRow!.citation_anchor_pass)}, Kind=${fmtOpt(baseRow!.kind_pass)}, Api=${fmtOpt(baseRow!.api_rule_pass)})`,
     );
   } else {
     lines.push(`Baseline: (none — first run)`);
@@ -743,10 +828,10 @@ export function renderReport(
     `| MRR              | ${fmt(summary.mrr)}  | ${baseRow ? fmtOpt(baseRow.mrr) : '—   '}    | ${deltaOpt(summary.mrr, baseRow?.mrr)} |`,
   );
   lines.push(
-    `| Hit@1            | ${fmt(summary.hit_at_1)}  | ${baseRow ? fmtOpt(baseRow.hit_at_1) : '—   '}    | ${deltaOpt(summary.hit_at_1, baseRow?.hit_at_1)} |`,
+    `| Hit@5            | ${fmt(summary.hit_at_5)}  | ${baseRow ? fmtOpt(baseRow.hit_at_5) : '—   '}    | ${deltaOpt(summary.hit_at_5, baseRow?.hit_at_5)} |`,
   );
   lines.push(
-    `| Context-R@5      | ${fmtOpt(summary.context_recall_at_5)}  | ${baseRow ? fmtOpt(baseRow.context_recall_at_5) : '—   '}    | ${deltaOpt(summary.context_recall_at_5, baseRow?.context_recall_at_5)} |`,
+    `| Context-P@5      | ${fmt(summary.context_precision_at_5)}  | ${baseRow ? fmtOpt(baseRow.context_precision_at_5) : '—   '}    | ${deltaOpt(summary.context_precision_at_5, baseRow?.context_precision_at_5)} |`,
   );
   lines.push(
     `| Citation-anchor  | ${fmt(summary.citation_anchor_pass)}  | ${baseRow ? fmtOpt(baseRow.citation_anchor_pass) : '—   '}    | ${deltaOpt(summary.citation_anchor_pass, baseRow?.citation_anchor_pass)} |`,
@@ -757,10 +842,9 @@ export function renderReport(
   lines.push(
     `| API-rule-pass    | ${fmtOpt(summary.api_rule_pass)}  | ${baseRow ? fmtOpt(baseRow.api_rule_pass) : '—   '}    | ${deltaOpt(summary.api_rule_pass, baseRow?.api_rule_pass)} |`,
   );
-  if (summary.api_rule_n > 0 || summary.context_recall_n > 0) {
+  if (summary.api_rule_n > 0) {
     lines.push('');
-    if (summary.api_rule_n > 0) lines.push(`API-rule cases: ${summary.api_rule_n}`);
-    if (summary.context_recall_n > 0) lines.push(`Context-R@5 cases: ${summary.context_recall_n}`);
+    lines.push(`API-rule cases: ${summary.api_rule_n}`);
   }
   lines.push('');
   lines.push('## Retrieval diagnostics');
@@ -768,29 +852,21 @@ export function renderReport(
   lines.push('| metric      | value | baseline | Δ     |');
   lines.push('|-------------|-------|----------|-------|');
   lines.push(
+    `| Hit@1       | ${fmt(summary.hit_at_1)}  | ${baseRow ? fmtOpt(baseRow.hit_at_1) : '—   '}    | ${deltaOpt(summary.hit_at_1, baseRow?.hit_at_1)} |`,
+  );
+  lines.push(
     `| Hit@3       | ${fmt(summary.hit_at_3)}  | ${baseRow ? fmtOpt(baseRow.hit_at_3) : '—   '}    | ${deltaOpt(summary.hit_at_3, baseRow?.hit_at_3)} |`,
   );
-  lines.push(
-    `| Hit@5       | ${fmt(summary.r_at_5)}  | ${baseRow ? fmt(baseRow.r_at_5) : '—   '}    | ${delta(summary.r_at_5, baseRow?.r_at_5)} |`,
-  );
-  lines.push(
-    `| Context-P@5 | ${fmt(summary.context_precision_at_5)}  | ${baseRow ? fmtOpt(baseRow.context_precision_at_5) : '—   '}    | ${deltaOpt(summary.context_precision_at_5, baseRow?.context_precision_at_5)} |`,
-  );
   lines.push('');
-  lines.push('Hit@3 / Hit@5 expose retrieval reach, while Context-P@5 exposes top-K noise.');
-  lines.push('These are diagnostics, not final answer quality gates.');
+  lines.push('Hit@1 and Hit@3 expose rank concentration below the headline Hit@5 reach metric.');
   lines.push('');
   lines.push('## Citation calibration');
   lines.push('');
   lines.push('`Citation-anchor` is the headline signal: at least one citation points at an expected source.');
-  lines.push('`legacy Citation-pass` is stricter: every cited page must already be in the Golden must/allow list.');
   lines.push('Use unexpected citation pages to decide whether to expand `allow_cite_pages` or fix retrieval/prompt behavior.');
   lines.push('');
-  lines.push('| metric                   | value | baseline | Δ     |');
-  lines.push('|--------------------------|-------|----------|-------|');
-  lines.push(
-    `| legacy Citation-pass     | ${fmt(summary.citation_pass)}  | ${baseRow ? fmt(baseRow.citation_pass) : '—   '}    | ${delta(summary.citation_pass, baseRow?.citation_pass)} |`,
-  );
+  lines.push('| metric                     | value | baseline | Δ     |');
+  lines.push('|----------------------------|-------|----------|-------|');
   lines.push(
     `| Unexpected-citation-rate | ${fmt(summary.unexpected_citation_rate)}  | ${baseRow ? fmtOpt(baseRow.unexpected_citation_rate) : '—   '}    | ${deltaOpt(summary.unexpected_citation_rate, baseRow?.unexpected_citation_rate)} |`,
   );
@@ -816,7 +892,7 @@ export function renderReport(
   );
   lines.push('');
 
-  const recallFails = results.filter((r) => !r.r_at_5);
+  const recallFails = results.filter((r) => !r.hit_at_5);
   if (recallFails.length > 0) {
     lines.push(`## Retrieval misses (${recallFails.length})`);
     for (const r of recallFails) {
@@ -830,15 +906,6 @@ export function renderReport(
   if (anchorFails.length > 0) {
     lines.push(`## Citation-anchor failures (${anchorFails.length})`);
     for (const r of anchorFails) {
-      lines.push(`- ${r.case_id}: cited=[${r.cited_pages.join(', ')}]`);
-    }
-    lines.push('');
-  }
-
-  const citFails = results.filter((r) => r.kind === 'answer' && !r.citation_pass);
-  if (citFails.length > 0) {
-    lines.push(`## Legacy strict citation failures (${citFails.length})`);
-    for (const r of citFails) {
       lines.push(`- ${r.case_id}: cited=[${r.cited_pages.join(', ')}]`);
     }
     lines.push('');

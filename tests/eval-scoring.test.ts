@@ -114,7 +114,7 @@ test('scoreCase computes MRR / Hit@K / context_precision over the fused trace', 
 
   assert.equal(scored.hit_at_1, false, 'top-1 was noise');
   assert.equal(scored.hit_at_3, true, 'target reached top-3');
-  assert.equal(scored.r_at_5, true);
+  assert.equal(scored.hit_at_5, true);
   assert.ok(Math.abs(scored.mrr - 1 / 3) < 1e-9, `MRR should be 1/3, got ${scored.mrr}`);
   // top-5 chunks: 2 are in must_cite ∪ allow_cite (target + allowed-extra)
   assert.ok(
@@ -129,7 +129,7 @@ test('scoreCase MRR / Hit@K are 0/false when no must-cite page appears in the tr
 
   assert.equal(scored.hit_at_1, false);
   assert.equal(scored.hit_at_3, false);
-  assert.equal(scored.r_at_5, false);
+  assert.equal(scored.hit_at_5, false);
   assert.equal(scored.mrr, 0);
   assert.equal(scored.context_precision_at_5, 0);
 });
@@ -153,10 +153,9 @@ test('scoreRetrievalCase computes retrieval-only metrics without answer/citation
   assert.equal(scored.case_id, 'case-1');
   assert.equal(scored.hit_at_1, false);
   assert.equal(scored.hit_at_3, true);
-  assert.equal(scored.r_at_5, true);
+  assert.equal(scored.hit_at_5, true);
   assert.equal(scored.mrr, 1 / 2);
   assert.equal(scored.context_precision_at_5, 2 / 5);
-  assert.equal(scored.context_recall_at_5, 1 / 2);
   assert.deepEqual(scored.retrieved_pages_top5, [
     'noise-1',
     'payment-engine-api',
@@ -176,12 +175,10 @@ test('summarizeRetrievalResults averages retrieval-only metrics', () => {
   const summary = summarizeRetrievalResults(results);
 
   assert.equal(summary.n, 2);
-  assert.equal(summary.r_at_5, 0.5);
+  assert.equal(summary.hit_at_5, 0.5);
   assert.equal(summary.hit_at_1, 0.5);
   assert.equal(summary.hit_at_3, 0.5);
   assert.equal(summary.mrr, 0.5);
-  assert.equal(summary.context_recall_n, 2);
-  assert.equal(summary.context_recall_at_5, 0.5);
 });
 
 test('scoreCase MRR ignores chunk-level duplication of the same page', () => {
@@ -197,8 +194,7 @@ test('scoreCase MRR ignores chunk-level duplication of the same page', () => {
   assert.equal(scored.mrr, 1);
 });
 
-test('scoreCase context_recall_at_5 reports fraction of must_cite_pages in top-5', () => {
-  // 4 required pages, only 2 surface in top-5 → recall = 0.5
+test('scoreCase Hit@5 treats must_cite_pages as an OR-set', () => {
   const c = golden({
     expected: {
       must_cite_pages: ['page-A', 'page-B', 'page-C', 'page-D'],
@@ -213,21 +209,7 @@ test('scoreCase context_recall_at_5 reports fraction of must_cite_pages in top-5
     trace(['page-A', 'noise-1', 'page-B', 'noise-2', 'noise-3']),
   );
 
-  assert.equal(scored.r_at_5, true, 'Hit@5 satisfied by any one of the 4');
-  assert.equal(scored.context_recall_at_5, 0.5, '2/4 required pages in top-5');
-});
-
-test('scoreCase context_recall_at_5 is null when must_cite_pages is empty', () => {
-  const c = golden({
-    expected: {
-      must_cite_pages: [],
-      must_contain: [],
-      forbid_contain: [],
-    },
-  });
-
-  const scored = scoreCase(c, answer(), trace(['anything']));
-  assert.equal(scored.context_recall_at_5, null);
+  assert.equal(scored.hit_at_5, true, 'any one acceptable page satisfies Hit@5');
 });
 
 test('scoreCase scores API operation and citation URL rules only when configured', () => {
@@ -272,7 +254,7 @@ test('scoreCase treats legacy API operation paths as the same public citation UR
   assert.deepEqual(scored.missing_must_cite_urls, []);
 });
 
-test('scoreCase allows extra citations listed in allow_cite_pages without changing R@5 target', () => {
+test('scoreCase allows extra citations listed in allow_cite_pages without changing Hit@5 target', () => {
   const c = golden({
     expected: {
       must_cite_pages: ['payment-engine-quickstart-30min'],
@@ -314,8 +296,9 @@ test('scoreCase allows extra citations listed in allow_cite_pages without changi
 
   const scored = scoreCase(c, result, retrievalTrace);
 
-  assert.equal(scored.r_at_5, true);
-  assert.equal(scored.citation_pass, true);
+  assert.equal(scored.hit_at_5, true);
+  assert.equal(scored.citation_anchor_pass, true);
+  assert.equal(scored.unexpected_citation_rate, 0);
 });
 
 test('scoreCase separates citation anchor from unexpected citation pages', () => {
@@ -359,7 +342,6 @@ test('scoreCase separates citation anchor from unexpected citation pages', () =>
   const scored = scoreCase(c, result, trace(['payment-engine-quickstart-30min']));
 
   assert.equal(scored.citation_anchor_pass, true, 'allowed citations still anchor the answer');
-  assert.equal(scored.citation_pass, false, 'legacy strict citation fails on unexpected extras');
   assert.deepEqual(scored.unexpected_citation_pages, ['unrelated-page']);
   assert.equal(scored.unexpected_citation_rate, 0.5);
 });
@@ -387,7 +369,6 @@ test('scoreCase citation anchor fails when answer only cites unexpected pages', 
   );
 
   assert.equal(scored.citation_anchor_pass, false);
-  assert.equal(scored.citation_pass, false);
   assert.deepEqual(scored.unexpected_citation_pages, ['unrelated-page']);
   assert.equal(scored.unexpected_citation_rate, 1);
 });
