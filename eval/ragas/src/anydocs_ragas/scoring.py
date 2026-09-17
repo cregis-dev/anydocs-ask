@@ -9,6 +9,7 @@ from .models import EvalSample
 
 SUPPORTED_METRICS = (
     "faithfulness",
+    "context_recall",
     "answer_relevancy",
     "factual_correctness",
     "rubric_compliance",
@@ -22,6 +23,7 @@ class MetricScorer(Protocol):
 @dataclass(frozen=True)
 class Scorers:
     faithfulness: MetricScorer | None = None
+    context_recall: MetricScorer | None = None
     answer_relevancy: MetricScorer | None = None
     factual_correctness: MetricScorer | None = None
     rubric_compliance: MetricScorer | None = None
@@ -66,6 +68,7 @@ def build_scorers(settings: ProviderSettings, metrics: set[str]) -> Scorers:
     from ragas.llms import llm_factory
     from ragas.metrics.collections import (
         AnswerRelevancy,
+        ContextRecall,
         Faithfulness,
         FactualCorrectness,
         InstanceSpecificRubrics,
@@ -122,8 +125,11 @@ def build_scorers(settings: ProviderSettings, metrics: set[str]) -> Scorers:
 
     return Scorers(
         faithfulness=Faithfulness(llm=llm) if "faithfulness" in metrics else None,
+        context_recall=ContextRecall(llm=llm) if "context_recall" in metrics else None,
         answer_relevancy=relevancy,
-        factual_correctness=FactualCorrectness(llm=llm) if "factual_correctness" in metrics else None,
+        factual_correctness=FactualCorrectness(llm=llm)
+        if "factual_correctness" in metrics
+        else None,
         rubric_compliance=(
             NormalizedFivePointScorer(InstanceSpecificRubrics(llm=llm))
             if "rubric_compliance" in metrics
@@ -167,6 +173,22 @@ async def score_sample(sample: EvalSample, scorers: Scorers) -> dict[str, Any]:
                 retrieved_contexts=sample.retrieved_contexts,
             )
 
+    if scorers.context_recall is not None:
+        if sample.reference is None:
+            skipped["context_recall"] = "golden case has no reference answer or facts"
+        elif not sample.retrieved_contexts:
+            skipped["context_recall"] = "no retrieved contexts"
+        else:
+            await _score_metric(
+                "context_recall",
+                scorers.context_recall,
+                scores,
+                errors,
+                user_input=sample.user_input,
+                retrieved_contexts=sample.retrieved_contexts,
+                reference=sample.reference,
+            )
+
     if scorers.answer_relevancy is not None:
         if sample.response is None:
             skipped["answer_relevancy"] = "case did not produce an answer"
@@ -184,7 +206,9 @@ async def score_sample(sample: EvalSample, scorers: Scorers) -> dict[str, Any]:
         if sample.response is None:
             skipped["factual_correctness"] = "case did not produce an answer"
         elif sample.reference is None:
-            skipped["factual_correctness"] = "golden case has no reference answer or facts"
+            skipped["factual_correctness"] = (
+                "golden case has no reference answer or facts"
+            )
         else:
             await _score_metric(
                 "factual_correctness",

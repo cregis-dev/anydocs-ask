@@ -42,7 +42,8 @@ Factual Correctness. When it is absent, the runner joins `reference_facts`
 into a reference. `rubric_compliance` evaluates the answer against the
 canonical answer, atomic facts, retrieved context, and the case-specific
 `evaluation_rubric`; its native 1-5 result is normalized to 0-1. Cases without
-ground truth still receive Faithfulness and Answer Relevancy scores, while
+ground truth still receive Faithfulness and Answer Relevancy scores. Context
+Recall is skipped when no reference or retrieved context is present, while
 Rubric Compliance is skipped when no rubric is present.
 
 Run a full eval, not `eval --no-router`: retrieval-only traces intentionally
@@ -84,12 +85,14 @@ RAGAS_EMBEDDING_BASE_URL=http://embeddings.internal/v1
 The default metrics are:
 
 - `faithfulness`: answer claims supported by the actual generation context.
+- `context_recall`: reviewed reference claims covered by the retrieved context.
 - `answer_relevancy`: answer relevance to the user question.
 - `factual_correctness`: answer agreement with reviewed Golden ground truth.
 - `rubric_compliance`: case-specific groundedness and precision requirements.
 
-Use `--metrics faithfulness,factual_correctness,rubric_compliance` when the
-judge endpoint does not expose an embedding model.
+Use
+`--metrics faithfulness,context_recall,factual_correctness,rubric_compliance`
+when the judge endpoint does not expose an embedding model.
 
 For an Anthropic-compatible judge, including an internal gateway already used
 by Ask, set:
@@ -127,13 +130,13 @@ to the OpenAI-compatible judge request.
 ## Run in Docker on the internal server
 
 ```bash
-docker build -t anydocs-ragas:0.2 eval/ragas
+docker build -t anydocs-ragas:0.3 eval/ragas
 
 docker run --rm \
   --env-file /etc/cregis-docs/ragas.env \
   -v /var/lib/cregis-docs/ask:/runtime:ro \
   -v /var/lib/cregis-docs/ragas-reports:/reports \
-  anydocs-ragas:0.2 \
+  anydocs-ragas:0.3 \
   /runtime/state/cregis-docs/reports/2026-09-17-eval.cases.jsonl \
   --output-dir /reports
 ```
