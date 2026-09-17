@@ -58,7 +58,7 @@ LANGFUSE_RELEASE=<git-sha-or-version>
 
 每轮问答对应一条 `answer-docs-question` trace，多轮通过现有 `session_id` 聚合。trace 内包含 intent、embedding、hybrid retrieval、context selection、rerank（启用时）和每一次 LLM generation；Anthropic token usage、检索候选与最终输出会一并记录。Reader 的点赞/点踩写成 `user-thumbs` BOOLEAN score。导出前会对密钥型字段做脱敏，Langfuse SDK 初始化和上报均为 fail-open。
 
-线上 trace 之外，完整 `eval` 会同时写出 `*-eval.cases.jsonl`，其中包含生成答案、实际送入模型的完整脱敏上下文，以及 Golden case 的人工参考答案。可用独立的 [Ragas evaluator](./eval/ragas/README.md) 离线计算 Faithfulness、Answer Relevancy 和 Factual Correctness，并可把结果发布为版本化的 Langfuse Dataset/Experiment。Python 评测进程不在在线 Ask 服务内运行。
+线上 trace 之外，完整 `eval` 会同时写出 `*-eval.cases.jsonl`，其中包含生成答案、实际送入模型的完整脱敏上下文，以及 Golden case 的人工参考答案。可用独立的 [Ragas evaluator](./eval/ragas/README.md) 离线计算 Faithfulness、Context Recall、Answer Relevancy 和 Factual Correctness，并可把结果发布为版本化的 Langfuse Dataset/Experiment。Python 评测进程不在在线 Ask 服务内运行。
 
 不想用控制台？见 [CLI 模式](#cli-模式纯-http)。
 

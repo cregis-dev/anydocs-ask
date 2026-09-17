@@ -46,6 +46,7 @@ def test_scores_available_metrics_and_skips_missing_reference():
             sample,
             Scorers(
                 faithfulness=FakeMetric(0.8),
+                context_recall=FakeMetric(0.85),
                 answer_relevancy=FakeMetric(0.7),
                 factual_correctness=FakeMetric(0.9),
                 rubric_compliance=FakeMetric(0.6),
@@ -54,8 +55,55 @@ def test_scores_available_metrics_and_skips_missing_reference():
     )
     assert result["scores"]["faithfulness"]["value"] == 0.8
     assert result["scores"]["answer_relevancy"]["value"] == 0.7
-    assert result["skipped"]["factual_correctness"] == "golden case has no reference answer or facts"
-    assert result["skipped"]["rubric_compliance"] == "golden case has no evaluation rubric"
+    assert (
+        result["skipped"]["context_recall"]
+        == "golden case has no reference answer or facts"
+    )
+    assert (
+        result["skipped"]["factual_correctness"]
+        == "golden case has no reference answer or facts"
+    )
+    assert (
+        result["skipped"]["rubric_compliance"] == "golden case has no evaluation rubric"
+    )
+
+
+def test_context_recall_scores_reference_coverage_without_generated_answer():
+    class ContextRecallMetric:
+        async def ascore(self, **kwargs):
+            assert kwargs == {
+                "user_input": "Which endpoint creates a payout?",
+                "retrieved_contexts": ["POST /api/v1/payout creates a payout."],
+                "reference": "Use /api/v1/payout to create a payout.",
+            }
+            return Result(0.9, "most reference claims were retrieved")
+
+    sample = EvalSample(
+        case_id="case-context-recall",
+        user_input="Which endpoint creates a payout?",
+        response=None,
+        retrieved_contexts=["POST /api/v1/payout creates a payout."],
+        reference="Use /api/v1/payout to create a payout.",
+    )
+    result = asyncio.run(
+        score_sample(sample, Scorers(context_recall=ContextRecallMetric()))
+    )
+    assert result["scores"]["context_recall"] == {
+        "value": 0.9,
+        "reason": "most reference claims were retrieved",
+    }
+
+
+def test_context_recall_skips_empty_retrieval_context():
+    sample = EvalSample(
+        case_id="case-no-context",
+        user_input="Which endpoint creates a payout?",
+        response="Use /api/v1/payout.",
+        retrieved_contexts=[],
+        reference="Use /api/v1/payout to create a payout.",
+    )
+    result = asyncio.run(score_sample(sample, Scorers(context_recall=FakeMetric(1.0))))
+    assert result["skipped"]["context_recall"] == "no retrieved contexts"
 
 
 def test_rubric_compliance_receives_case_guidance_and_atomic_facts():
@@ -64,7 +112,9 @@ def test_rubric_compliance_receives_case_guidance_and_atomic_facts():
             assert kwargs["rubrics"]["score5_description"].endswith(
                 "Requirements: precision: Do not invent an endpoint."
             )
-            assert "Atomic reference facts:\n- Use /api/v1/payout." in kwargs["reference"]
+            assert (
+                "Atomic reference facts:\n- Use /api/v1/payout." in kwargs["reference"]
+            )
             assert kwargs["retrieved_contexts"] == ["POST /api/v1/payout"]
             return Result(0.95, "fully compliant")
 
@@ -91,7 +141,9 @@ def test_anthropic_provider_reuses_existing_gateway_environment(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_MODEL", "internal-model")
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "secret")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example.test")
-    settings = provider_settings({"faithfulness", "factual_correctness", "rubric_compliance"})
+    settings = provider_settings(
+        {"faithfulness", "context_recall", "factual_correctness", "rubric_compliance"}
+    )
     assert settings.judge_provider == "anthropic"
     assert settings.judge_model == "internal-model"
     assert settings.judge_api_key is None
@@ -102,9 +154,10 @@ def test_anthropic_provider_reuses_existing_gateway_environment(monkeypatch):
 
     scorers = build_scorers(
         settings,
-        {"faithfulness", "factual_correctness", "rubric_compliance"},
+        {"faithfulness", "context_recall", "factual_correctness", "rubric_compliance"},
     )
     assert type(scorers.faithfulness).__name__ == "Faithfulness"
+    assert type(scorers.context_recall).__name__ == "ContextRecall"
     assert type(scorers.factual_correctness).__name__ == "FactualCorrectness"
     assert type(scorers.rubric_compliance).__name__ == "NormalizedFivePointScorer"
     assert type(scorers.rubric_compliance.scorer).__name__ == "InstanceSpecificRubrics"
