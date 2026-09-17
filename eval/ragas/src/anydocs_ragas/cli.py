@@ -165,6 +165,7 @@ def provider_settings(metrics: set[str]) -> ProviderSettings:
         embedding_model=embedding_model,
         embedding_api_key=embedding_api_key or (judge_api_key if judge_provider == "openai" else None),
         embedding_base_url=_first_env("RAGAS_EMBEDDING_BASE_URL", "OPENAI_BASE_URL"),
+        judge_extra_body=_json_object_env("RAGAS_JUDGE_EXTRA_BODY_JSON"),
         timeout_seconds=float(os.getenv("RAGAS_TIMEOUT_SECONDS", "120")),
         max_tokens=int(os.getenv("RAGAS_MAX_TOKENS", "4096")),
     )
@@ -183,6 +184,19 @@ def _first_env(*names: str) -> str | None:
         if value and value.strip():
             return value.strip()
     return None
+
+
+def _json_object_env(name: str) -> dict[str, object] | None:
+    value = _first_env(name)
+    if value is None:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{name} must be valid JSON: {error.msg}") from error
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    return parsed
 
 
 if __name__ == "__main__":

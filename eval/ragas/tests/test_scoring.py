@@ -64,6 +64,37 @@ def test_anthropic_provider_reuses_existing_gateway_environment(monkeypatch):
     assert scorers.faithfulness.llm.model_args["max_tokens"] == 4096
 
 
+def test_openai_provider_passes_extra_body_to_judge(monkeypatch):
+    monkeypatch.setenv("RAGAS_JUDGE_PROVIDER", "openai")
+    monkeypatch.setenv("RAGAS_JUDGE_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("RAGAS_JUDGE_API_KEY", "secret")
+    monkeypatch.setenv("RAGAS_JUDGE_BASE_URL", "https://gateway.example.test/v1")
+    monkeypatch.setenv(
+        "RAGAS_JUDGE_EXTRA_BODY_JSON",
+        '{"thinking":{"type":"disabled"}}',
+    )
+    settings = provider_settings({"faithfulness"})
+    assert settings.judge_extra_body == {"thinking": {"type": "disabled"}}
+
+    scorers = build_scorers(settings, {"faithfulness"})
+    assert scorers.faithfulness.llm.model_args["extra_body"] == {
+        "thinking": {"type": "disabled"},
+    }
+
+
+def test_judge_extra_body_must_be_json_object(monkeypatch):
+    monkeypatch.setenv("RAGAS_JUDGE_PROVIDER", "openai")
+    monkeypatch.setenv("RAGAS_JUDGE_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("RAGAS_JUDGE_API_KEY", "secret")
+    monkeypatch.setenv("RAGAS_JUDGE_EXTRA_BODY_JSON", "[]")
+    try:
+        provider_settings({"faithfulness"})
+    except ValueError as error:
+        assert "must be a JSON object" in str(error)
+    else:
+        raise AssertionError("non-object extra body should fail")
+
+
 def test_answer_relevancy_still_requires_openai_compatible_embeddings(monkeypatch):
     monkeypatch.setenv("RAGAS_JUDGE_PROVIDER", "anthropic")
     monkeypatch.setenv("ANTHROPIC_MODEL", "internal-model")
