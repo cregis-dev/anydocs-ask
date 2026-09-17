@@ -88,6 +88,7 @@ export type EvalReportSummary = {
   mrr: number | null;
   hit_at_5: number | null;
   context_precision_at_5: number | null;
+  retrieval_content_pass: number | null;
   citation_anchor_pass: number | null;
   kind_pass: number | null;
   api_rule_pass: number | null;
@@ -116,6 +117,7 @@ export function parseEvalReport(stateRoot: string, filename: string): EvalReport
     mrr: null,
     hit_at_5: null,
     context_precision_at_5: null,
+    retrieval_content_pass: null,
     citation_anchor_pass: null,
     kind_pass: null,
     api_rule_pass: null,
@@ -136,6 +138,7 @@ export function parseEvalReport(stateRoot: string, filename: string): EvalReport
       summary.mrr = numericMetric(data.summary, 'mrr');
       summary.hit_at_5 = numericMetric(data.summary, 'hit_at_5') ?? numericMetric(data.summary, 'r_at_5');
       summary.context_precision_at_5 = numericMetric(data.summary, 'context_precision_at_5');
+      summary.retrieval_content_pass = numericMetric(data.summary, 'retrieval_content_pass');
       summary.citation_anchor_pass = numericMetric(data.summary, 'citation_anchor_pass');
       summary.kind_pass = numericMetric(data.summary, 'kind_pass');
       summary.api_rule_pass = numericMetric(data.summary, 'api_rule_pass');

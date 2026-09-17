@@ -143,6 +143,7 @@ export type EvalTraceChunkDiagnostic = {
   lang?: string;
   in_page_path?: string;
   text_preview?: string;
+  identifiers?: string[];
   final_score: number;
   rrf_score: number;
   vec_rank: number | null;
@@ -277,7 +278,7 @@ export async function runEval(opts: EvalOptions): Promise<number> {
   process.stdout.write(
     `anydocs-ask eval: wrote ${reportPath}\n` +
       `anydocs-ask eval: wrote ${caseTracePath}\n` +
-      `  MRR=${summary.mrr.toFixed(2)}  H@5=${summary.hit_at_5.toFixed(2)}  CP@5=${summary.context_precision_at_5.toFixed(2)}  Anchor=${summary.citation_anchor_pass.toFixed(2)}  Kind=${summary.kind_pass.toFixed(2)}  Api=${summary.api_rule_pass === null ? '—' : summary.api_rule_pass.toFixed(2)}  (retrieval diagnostics: H@1=${summary.hit_at_1.toFixed(2)} H@3=${summary.hit_at_3.toFixed(2)}; citations: unexpected=${summary.unexpected_citation_rate.toFixed(2)}; ${results.length} cases, ${totalMs}ms)\n`,
+      `  MRR=${summary.mrr.toFixed(2)}  H@5=${summary.hit_at_5.toFixed(2)}  CP@5=${summary.context_precision_at_5.toFixed(2)}  Field=${summary.retrieval_content_pass === null ? '—' : summary.retrieval_content_pass.toFixed(2)}  Anchor=${summary.citation_anchor_pass.toFixed(2)}  Kind=${summary.kind_pass.toFixed(2)}  Api=${summary.api_rule_pass === null ? '—' : summary.api_rule_pass.toFixed(2)}  (retrieval diagnostics: H@1=${summary.hit_at_1.toFixed(2)} H@3=${summary.hit_at_3.toFixed(2)}; citations: unexpected=${summary.unexpected_citation_rate.toFixed(2)}; ${results.length} cases, ${totalMs}ms)\n`,
   );
   opts.onProgress?.({ type: 'done', reportPath, totalMs, summary });
   return 0;
@@ -351,7 +352,7 @@ export async function runRetrievalEval(opts: EvalOptions): Promise<number> {
   process.stdout.write(
     `anydocs-ask retrieval eval: wrote ${reportPath}\n` +
       `anydocs-ask retrieval eval: wrote ${caseTracePath}\n` +
-      `  MRR=${summary.mrr.toFixed(2)}  H@5=${summary.hit_at_5.toFixed(2)}  CP@5=${summary.context_precision_at_5.toFixed(2)}  (retrieval diagnostics: H@1=${summary.hit_at_1.toFixed(2)} H@3=${summary.hit_at_3.toFixed(2)}; ${results.length} cases, ${totalMs}ms)\n`,
+      `  MRR=${summary.mrr.toFixed(2)}  H@5=${summary.hit_at_5.toFixed(2)}  CP@5=${summary.context_precision_at_5.toFixed(2)}  Field=${summary.retrieval_content_pass === null ? '—' : summary.retrieval_content_pass.toFixed(2)}  (retrieval diagnostics: H@1=${summary.hit_at_1.toFixed(2)} H@3=${summary.hit_at_3.toFixed(2)}; ${results.length} cases, ${totalMs}ms)\n`,
   );
   return 0;
 }
@@ -598,6 +599,7 @@ function buildChunkDiagnostic(
     ...(maybeContext.lang ? { lang: maybeContext.lang } : {}),
     ...(maybeContext.in_page_path ? { in_page_path: maybeContext.in_page_path } : {}),
     ...(maybeContext.text_preview ? { text_preview: maybeContext.text_preview } : {}),
+    ...(chunk.identifiers?.length ? { identifiers: chunk.identifiers } : {}),
     final_score: chunk.final_score,
     rrf_score: chunk.rrf_score,
     vec_rank: chunk.vec_rank,
@@ -659,6 +661,8 @@ function normalizeBaselineSummary(raw: LegacyEvalSummary): EvalSummary | null {
     kind_pass: raw.kind_pass,
     api_rule_n: raw.api_rule_n,
     api_rule_pass: raw.api_rule_pass ?? null,
+    retrieval_content_n: raw.retrieval_content_n ?? 0,
+    retrieval_content_pass: raw.retrieval_content_pass ?? null,
   };
 }
 
@@ -734,6 +738,7 @@ export function renderRetrievalReport(
 ): string {
   const { summary, results, totalMs } = args;
   const fmt = (x: number): string => x.toFixed(2);
+  const fmtOpt = (x: number | null | undefined): string => x === null || x === undefined ? '—' : x.toFixed(2);
   const lines: string[] = [];
   lines.push(`# Retrieval Eval — ${date}`);
   lines.push('');
@@ -748,6 +753,11 @@ export function renderRetrievalReport(
   lines.push(`| MRR         | ${fmt(summary.mrr)}  |`);
   lines.push(`| Hit@5       | ${fmt(summary.hit_at_5)}  |`);
   lines.push(`| Context-P@5 | ${fmt(summary.context_precision_at_5)}  |`);
+  lines.push(`| Field retrieval | ${fmtOpt(summary.retrieval_content_pass)}  |`);
+  if (summary.retrieval_content_n > 0) {
+    lines.push('');
+    lines.push(`Field-retrieval cases: ${summary.retrieval_content_n}`);
+  }
   lines.push('');
   lines.push('## Retrieval diagnostics');
   lines.push('');
@@ -778,6 +788,15 @@ export function renderRetrievalReport(
     lines.push(`## Top-1 misses (${top1Fails.length})`);
     for (const r of top1Fails) {
       lines.push(`- ${r.case_id}: MRR=${r.mrr.toFixed(2)} top5=[${r.retrieved_pages_top5.join(', ')}]`);
+    }
+    lines.push('');
+  }
+
+  const contentFails = results.filter((r) => r.retrieval_content_pass === false);
+  if (contentFails.length > 0) {
+    lines.push(`## Field retrieval misses (${contentFails.length})`);
+    for (const r of contentFails) {
+      lines.push(`- ${r.case_id}: missing regex=[${r.missing_must_retrieve_regex.join(', ')}]`);
     }
     lines.push('');
   }
@@ -834,6 +853,9 @@ export function renderReport(
     `| Context-P@5      | ${fmt(summary.context_precision_at_5)}  | ${baseRow ? fmtOpt(baseRow.context_precision_at_5) : '—   '}    | ${deltaOpt(summary.context_precision_at_5, baseRow?.context_precision_at_5)} |`,
   );
   lines.push(
+    `| Field-retrieval  | ${fmtOpt(summary.retrieval_content_pass)}  | ${baseRow ? fmtOpt(baseRow.retrieval_content_pass) : '—   '}    | ${deltaOpt(summary.retrieval_content_pass, baseRow?.retrieval_content_pass)} |`,
+  );
+  lines.push(
     `| Citation-anchor  | ${fmt(summary.citation_anchor_pass)}  | ${baseRow ? fmtOpt(baseRow.citation_anchor_pass) : '—   '}    | ${deltaOpt(summary.citation_anchor_pass, baseRow?.citation_anchor_pass)} |`,
   );
   lines.push(
@@ -845,6 +867,9 @@ export function renderReport(
   if (summary.api_rule_n > 0) {
     lines.push('');
     lines.push(`API-rule cases: ${summary.api_rule_n}`);
+  }
+  if (summary.retrieval_content_n > 0) {
+    lines.push(`Field-retrieval cases: ${summary.retrieval_content_n}`);
   }
   lines.push('');
   lines.push('## Retrieval diagnostics');
@@ -907,6 +932,15 @@ export function renderReport(
     lines.push(`## Citation-anchor failures (${anchorFails.length})`);
     for (const r of anchorFails) {
       lines.push(`- ${r.case_id}: cited=[${r.cited_pages.join(', ')}]`);
+    }
+    lines.push('');
+  }
+
+  const retrievalContentFails = results.filter((r) => r.retrieval_content_pass === false);
+  if (retrievalContentFails.length > 0) {
+    lines.push(`## Field retrieval failures (${retrievalContentFails.length})`);
+    for (const r of retrievalContentFails) {
+      lines.push(`- ${r.case_id}: missing regex=[${r.missing_must_retrieve_regex.join(', ')}]`);
     }
     lines.push('');
   }

@@ -153,6 +153,8 @@ export type AskTraceFusedChunk = {
   parent_id?: number | null;
   chunk_kind?: string;
   object_path?: string | null;
+  /** Indexed technical identifiers; additive for legacy trace compatibility. */
+  identifiers?: string[];
   rrf_score: number;
   final_score: number;
   vec_rank: number | null;
@@ -1084,6 +1086,7 @@ function buildFusedTrace(
     parent_id: c.parent_id,
     chunk_kind: c.chunk_kind,
     object_path: c.object_path,
+    identifiers: c.identifiers,
     rrf_score: c.rrf_score,
     final_score: c.final_score,
     vec_rank: retrievalTrace.vecRanks.get(c.chunk_id) ?? null,
@@ -1109,6 +1112,7 @@ function buildSelectedContextTrace(
     parent_id: c.parent_id,
     chunk_kind: c.chunk_kind,
     object_path: c.object_path,
+    identifiers: c.identifiers,
     content_hash: c.content_hash,
     context_rank: index + 1,
     context_token_count: c.context_token_count,

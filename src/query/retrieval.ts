@@ -31,6 +31,8 @@ export type RetrievedChunk = {
   parent_id: number | null;
   chunk_kind: string;
   object_path: string | null;
+  /** Exact technical identifiers indexed for this chunk. */
+  identifiers: string[];
   page_title: string;
   page_url: string | null;
   subtree_root: string | null;
@@ -319,6 +321,7 @@ function exactIdentifierPath(
 function isScopeSensitiveIdentifier(identifier: string): boolean {
   return (
     /^Access-(?:Key|Timestamp|Nonce|Signature)$/i.test(identifier) ||
+    /^[a-z][a-z0-9]{2,}$/.test(identifier) ||
     /^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+(?:\[\])?(?:\.[A-Za-z][A-Za-z0-9_]*(?:\[\])?)*$/.test(identifier) ||
     /^(?:data|request|response)(?:\.[A-Za-z][A-Za-z0-9_]*(?:\[\])?)+$/i.test(identifier) ||
     /^[a-z]+(?:[A-Z][A-Za-z0-9]+){2,}$/.test(identifier)
@@ -337,6 +340,11 @@ function fetchChunkRows(
       `SELECT c.chunk_id, c.page_id, c.lang, c.in_page_path, c.text,
               c.content_hash, c.token_count, c.is_code,
               c.parent_id, c.chunk_kind, c.object_path,
+              COALESCE((
+                SELECT json_group_array(ci.identifier)
+                  FROM chunk_identifiers ci
+                 WHERE ci.chunk_id = c.chunk_id
+              ), '[]') AS identifiers_json,
               p.title AS page_title, p.url AS page_url, p.subtree_root,
               p.nav_index, p.breadcrumb
          FROM chunks c
@@ -355,14 +363,16 @@ function fetchChunkRows(
       parent_id: number | null;
       chunk_kind: string;
       object_path: string | null;
+      identifiers_json: string;
       page_title: string;
       page_url: string | null;
       subtree_root: string | null;
       nav_index: number | null;
       breadcrumb: string;
     }>;
-  return rows.map((r) => ({
+  return rows.map(({ identifiers_json, ...r }) => ({
     ...r,
+    identifiers: JSON.parse(identifiers_json) as string[],
     breadcrumb: JSON.parse(r.breadcrumb) as BreadcrumbNode[],
   }));
 }

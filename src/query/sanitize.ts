@@ -176,6 +176,12 @@ export function sanitizeFtsQuery(text: string): string | null {
     if (FTS5_KEYWORDS.has(t.toUpperCase())) continue; // drop AND/OR/NOT/NEAR
     if (isEnglishStopWord(t)) continue;
     pushUseful(t);
+    // unicode61 keeps adjacent CJK and ASCII text as one token. Real queries
+    // often write field names without spaces (for example `参数fee`), so emit
+    // each script run as an additional term while retaining the original.
+    for (const part of splitMixedScriptRuns(t)) {
+      if (!isEnglishStopWord(part)) pushUseful(part);
+    }
     for (const term of expandCjkDomainTerms(t)) pushUseful(term);
     // Compound camelCase ("codeGroup", "getUserById"): also emit a phrase
     // form so BM25 hits the same identifier spelled as separate words
@@ -192,6 +198,11 @@ export function sanitizeFtsQuery(text: string): string | null {
   return useful.join(' OR ');
 }
 
+function splitMixedScriptRuns(token: string): string[] {
+  if (!CJK_RE.test(token) || !/[A-Za-z0-9_]/.test(token)) return [];
+  return token.match(/[\u3400-\u9fff]+|[A-Za-z0-9_]+/gu) ?? [];
+}
+
 /**
  * Extract opaque identifiers that should be matched literally rather than
  * entrusted to semantic similarity or FTS tokenization. The order follows
@@ -206,6 +217,19 @@ export function extractExactIdentifiers(text: string): string[] {
       const value = trimIdentifierPunctuation(match[0]);
       if (value) matches.push({ value, index: match.index ?? 0 });
     }
+  }
+  // Lowercase field names are often written directly against Chinese prose
+  // (`参数fee`, `status是什么`). Treat only that mixed-script shape as exact;
+  // accepting every plain English word here would make the exact path noisy.
+  const adjacentFieldPattern = /(?<=[\u3400-\u9fff])[a-z][a-z0-9]{2,}\b|\b[a-z][a-z0-9]{2,}(?=[\u3400-\u9fff])/gu;
+  for (const match of text.matchAll(adjacentFieldPattern)) {
+    matches.push({ value: match[0], index: match.index ?? 0 });
+  }
+  const labeledFieldPattern = /(?:参数|字段)\s*[`'"]?([a-z][a-z0-9]{2,})[`'"]?/gu;
+  for (const match of text.matchAll(labeledFieldPattern)) {
+    const value = match[1];
+    if (!value) continue;
+    matches.push({ value, index: (match.index ?? 0) + match[0].lastIndexOf(value) });
   }
   matches.sort((a, b) => a.index - b.index || b.value.length - a.value.length);
 

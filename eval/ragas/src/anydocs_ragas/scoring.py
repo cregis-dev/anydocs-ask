@@ -11,6 +11,7 @@ SUPPORTED_METRICS = (
     "faithfulness",
     "answer_relevancy",
     "factual_correctness",
+    "rubric_compliance",
 )
 
 
@@ -23,6 +24,26 @@ class Scorers:
     faithfulness: MetricScorer | None = None
     answer_relevancy: MetricScorer | None = None
     factual_correctness: MetricScorer | None = None
+    rubric_compliance: MetricScorer | None = None
+
+
+@dataclass(frozen=True)
+class NormalizedMetricResult:
+    value: float
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class NormalizedFivePointScorer:
+    scorer: MetricScorer
+
+    async def ascore(self, **kwargs: Any) -> NormalizedMetricResult:
+        result = await self.scorer.ascore(**kwargs)
+        value = max(1.0, min(5.0, float(result.value)))
+        return NormalizedMetricResult(
+            value=(value - 1.0) / 4.0,
+            reason=getattr(result, "reason", None),
+        )
 
 
 @dataclass(frozen=True)
@@ -43,7 +64,12 @@ class ProviderSettings:
 def build_scorers(settings: ProviderSettings, metrics: set[str]) -> Scorers:
     from ragas.embeddings.base import embedding_factory
     from ragas.llms import llm_factory
-    from ragas.metrics.collections import AnswerRelevancy, Faithfulness, FactualCorrectness
+    from ragas.metrics.collections import (
+        AnswerRelevancy,
+        Faithfulness,
+        FactualCorrectness,
+        InstanceSpecificRubrics,
+    )
 
     if settings.judge_provider == "anthropic":
         from anthropic import AsyncAnthropic
@@ -98,6 +124,11 @@ def build_scorers(settings: ProviderSettings, metrics: set[str]) -> Scorers:
         faithfulness=Faithfulness(llm=llm) if "faithfulness" in metrics else None,
         answer_relevancy=relevancy,
         factual_correctness=FactualCorrectness(llm=llm) if "factual_correctness" in metrics else None,
+        rubric_compliance=(
+            NormalizedFivePointScorer(InstanceSpecificRubrics(llm=llm))
+            if "rubric_compliance" in metrics
+            else None
+        ),
     )
 
 
@@ -164,6 +195,24 @@ async def score_sample(sample: EvalSample, scorers: Scorers) -> dict[str, Any]:
                 reference=sample.reference,
             )
 
+    if scorers.rubric_compliance is not None:
+        if sample.response is None:
+            skipped["rubric_compliance"] = "case did not produce an answer"
+        elif not sample.rubric:
+            skipped["rubric_compliance"] = "golden case has no evaluation rubric"
+        else:
+            await _score_metric(
+                "rubric_compliance",
+                scorers.rubric_compliance,
+                scores,
+                errors,
+                user_input=sample.user_input,
+                response=sample.response,
+                retrieved_contexts=sample.retrieved_contexts,
+                reference=_rubric_reference(sample),
+                rubrics=_five_point_rubric(sample),
+            )
+
     return {
         "case_id": sample.case_id,
         "lang": sample.lang,
@@ -189,3 +238,42 @@ async def _score_metric(
         }
     except Exception as error:  # The batch must survive one judge/provider failure.
         errors[name] = f"{type(error).__name__}: {error}"
+
+
+def _rubric_reference(sample: EvalSample) -> str | None:
+    parts: list[str] = []
+    if sample.reference is not None:
+        parts.append(sample.reference)
+    if sample.reference_facts:
+        facts = "\n".join(f"- {fact}" for fact in sample.reference_facts)
+        parts.append(f"Atomic reference facts:\n{facts}")
+    return "\n\n".join(parts) or None
+
+
+def _five_point_rubric(sample: EvalSample) -> dict[str, str]:
+    requirements = " ".join(
+        f"{name}: {instruction}" for name, instruction in sample.rubric.items()
+    )
+    return {
+        "score1_description": (
+            "The response is materially incorrect, unsupported, irrelevant, or directly "
+            f"violates a critical case-specific requirement. Requirements: {requirements}"
+        ),
+        "score2_description": (
+            "The response contains some correct information but has major factual errors, "
+            "unsupported claims, or omits most of the required answer."
+        ),
+        "score3_description": (
+            "The response is broadly correct but misses important reference facts, is only "
+            "partly grounded in the supplied context, or needs a substantial qualification."
+        ),
+        "score4_description": (
+            "The response is accurate, grounded, and covers the important reference facts, "
+            "with only a minor omission or imprecision."
+        ),
+        "score5_description": (
+            "The response is fully correct, grounded in the supplied context, covers all "
+            "material reference facts, and obeys every case-specific requirement. "
+            f"Requirements: {requirements}"
+        ),
+    }

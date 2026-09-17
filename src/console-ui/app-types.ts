@@ -95,6 +95,7 @@ export type RunRecord = {
       parent_id?: number | null;
       chunk_kind?: string;
       object_path?: string | null;
+      identifiers?: string[];
       rrf_score: number;
       final_score: number;
       vec_rank: number | null;
@@ -115,6 +116,7 @@ export type RunRecord = {
       parent_id?: number | null;
       chunk_kind?: string;
       object_path?: string | null;
+      identifiers?: string[];
       rrf_score: number;
       final_score: number;
       vec_rank: number | null;
@@ -238,6 +240,7 @@ export type EvalReport = {
   mrr: number | null;
   hit_at_5: number | null;
   context_precision_at_5: number | null;
+  retrieval_content_pass: number | null;
   citation_anchor_pass: number | null;
   kind_pass: number | null;
   api_rule_pass: number | null;

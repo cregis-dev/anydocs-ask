@@ -27,6 +27,9 @@ export type CaseResult = {
    * even when at least one correct page is present.
    */
   context_precision_at_5: number;
+  /** Field/content-level assertions over the top-5 retrieved chunks. */
+  retrieval_content_pass: boolean | null;
+  missing_must_retrieve_regex: string[];
   /**
    * At least one final citation points at an expected source
    * (`must_cite_pages ∪ allow_cite_pages`). This is the headline citation
@@ -76,6 +79,8 @@ export type EvalSummary = {
   kind_pass: number;
   api_rule_n: number;
   api_rule_pass: number | null;
+  retrieval_content_n: number;
+  retrieval_content_pass: number | null;
 };
 
 export type RetrievalCaseResult = {
@@ -86,6 +91,8 @@ export type RetrievalCaseResult = {
   hit_at_3: boolean;
   mrr: number;
   context_precision_at_5: number;
+  retrieval_content_pass: boolean | null;
+  missing_must_retrieve_regex: string[];
   retrieved_pages_top5: string[];
   latency_ms: number;
 };
@@ -97,6 +104,8 @@ export type RetrievalEvalSummary = {
   hit_at_3: number;
   mrr: number;
   context_precision_at_5: number;
+  retrieval_content_n: number;
+  retrieval_content_pass: number | null;
 };
 
 export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): CaseResult {
@@ -117,10 +126,9 @@ export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): Ca
   const hit_at_1 = uniquePagesInOrder.length > 0 && mustPages.has(uniquePagesInOrder[0]!);
   const hit_at_3 = uniquePagesInOrder.slice(0, 3).some((p) => mustPages.has(p));
   const mrr = computeMrr(uniquePagesInOrder, mustPages);
-  const context_precision_at_5 = computeContextPrecision(
-    trace.fused.slice(0, 5),
-    allowedCitationPages,
-  );
+  const top5Chunks = trace.fused.slice(0, 5);
+  const context_precision_at_5 = computeContextPrecision(top5Chunks, allowedCitationPages);
+  const retrievalContent = scoreRetrievalContent(c, top5Chunks);
 
   const kind = result.type;
   let citedPages: string[] = [];
@@ -182,6 +190,8 @@ export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): Ca
     hit_at_3,
     mrr,
     context_precision_at_5,
+    retrieval_content_pass: retrievalContent.pass,
+    missing_must_retrieve_regex: retrievalContent.missing,
     citation_anchor_pass: citationAnchorPass,
     unexpected_citation_pages: unexpectedCitationPages,
     unexpected_citation_rate: unexpectedCitationRate,
@@ -218,7 +228,9 @@ export function scoreRetrievalCase(
   const hit_at_1 = uniquePagesInOrder.length > 0 && mustPages.has(uniquePagesInOrder[0]!);
   const hit_at_3 = uniquePagesInOrder.slice(0, 3).some((p) => mustPages.has(p));
   const mrr = computeMrr(uniquePagesInOrder, mustPages);
-  const context_precision_at_5 = computeContextPrecision(trace.fused.slice(0, 5), allowedCitationPages);
+  const top5Chunks = trace.fused.slice(0, 5);
+  const context_precision_at_5 = computeContextPrecision(top5Chunks, allowedCitationPages);
+  const retrievalContent = scoreRetrievalContent(c, top5Chunks);
 
   return {
     case_id: c.id,
@@ -228,6 +240,8 @@ export function scoreRetrievalCase(
     hit_at_3,
     mrr,
     context_precision_at_5,
+    retrieval_content_pass: retrievalContent.pass,
+    missing_must_retrieve_regex: retrievalContent.missing,
     retrieved_pages_top5: top5Pages,
     latency_ms: Math.round(latencyMs),
   };
@@ -249,6 +263,8 @@ export function failedCase(c: GoldenCase, latencyMs: number): CaseResult {
     hit_at_3: false,
     mrr: 0,
     context_precision_at_5: 0,
+    retrieval_content_pass: (c.expected.must_retrieve_regex?.length ?? 0) > 0 ? false : null,
+    missing_must_retrieve_regex: c.expected.must_retrieve_regex ?? [],
     citation_anchor_pass: false,
     unexpected_citation_pages: [],
     unexpected_citation_rate: 0,
@@ -270,6 +286,7 @@ export function failedCase(c: GoldenCase, latencyMs: number): CaseResult {
 }
 
 export function summarizeRetrievalResults(results: RetrievalCaseResult[]): RetrievalEvalSummary {
+  const retrievalContentResults = results.filter((r) => r.retrieval_content_pass !== null);
   return {
     n: results.length,
     hit_at_5: mean(results.map((r) => (r.hit_at_5 ? 1 : 0))),
@@ -277,11 +294,16 @@ export function summarizeRetrievalResults(results: RetrievalCaseResult[]): Retri
     hit_at_3: mean(results.map((r) => (r.hit_at_3 ? 1 : 0))),
     mrr: mean(results.map((r) => r.mrr)),
     context_precision_at_5: mean(results.map((r) => r.context_precision_at_5)),
+    retrieval_content_n: retrievalContentResults.length,
+    retrieval_content_pass: retrievalContentResults.length === 0
+      ? null
+      : mean(retrievalContentResults.map((r) => (r.retrieval_content_pass ? 1 : 0))),
   };
 }
 
 export function summarizeResults(results: CaseResult[]): EvalSummary {
   const apiResults = results.filter((r) => r.api_rule_pass !== null);
+  const retrievalContentResults = results.filter((r) => r.retrieval_content_pass !== null);
   return {
     n: results.length,
     hit_at_5: mean(results.map((r) => (r.hit_at_5 ? 1 : 0))),
@@ -297,7 +319,31 @@ export function summarizeResults(results: CaseResult[]): EvalSummary {
     api_rule_pass: apiResults.length === 0
       ? null
       : mean(apiResults.map((r) => (r.api_rule_pass ? 1 : 0))),
+    retrieval_content_n: retrievalContentResults.length,
+    retrieval_content_pass: retrievalContentResults.length === 0
+      ? null
+      : mean(retrievalContentResults.map((r) => (r.retrieval_content_pass ? 1 : 0))),
   };
+}
+
+function scoreRetrievalContent(
+  c: GoldenCase,
+  top5Chunks: AskTrace['fused'],
+): { pass: boolean | null; missing: string[] } {
+  const rules = c.expected.must_retrieve_regex ?? [];
+  if (rules.length === 0) return { pass: null, missing: [] };
+  const haystack = top5Chunks.map((chunk) => [
+    chunk.page_id,
+    chunk.page_title,
+    chunk.page_url,
+    chunk.in_page_path,
+    chunk.object_path,
+    chunk.chunk_kind,
+    ...(chunk.identifiers ?? []),
+    chunk.text_preview,
+  ].filter((value): value is string => typeof value === 'string').join('\n')).join('\n---\n');
+  const missing = rules.filter((rule) => !regexHit(haystack, rule));
+  return { pass: missing.length === 0, missing };
 }
 
 function computeMrr(uniquePagesInOrder: string[], mustPages: Set<string>): number {

@@ -144,6 +144,7 @@ test('chunkPage: API object boundaries and exact identifiers become metadata', (
         '## Response Fields',
         '### Response Object: data.settlement_details',
         '- `data.settlement_details.settlement_fee` — string: Settlement fee.',
+        '- `data.settlement_details.fee` — string: Network fee.',
       ].join('\n\n'),
     },
   };
@@ -152,6 +153,7 @@ test('chunkPage: API object boundaries and exact identifiers become metadata', (
   assert.equal(chunk?.object_path, 'data.settlement_details');
   assert.ok(chunk?.identifiers.some((item) => item.normalized === 'data.settlement_details.settlement_fee'));
   assert.ok(chunk?.identifiers.some((item) => item.normalized === 'settlement_fee'));
+  assert.ok(chunk?.identifiers.some((item) => item.normalized === 'fee'));
 });
 
 test('chunkPage: every generated API object and example heading carries its object boundary', () => {
