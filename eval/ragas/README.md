@@ -105,6 +105,21 @@ different from the online Ask service.
 `RAGAS_MAX_TOKENS` controls the structured judge response budget; the default
 is `4096` so faithfulness claim extraction is not truncated on longer answers.
 
+Some OpenAI-compatible reasoning models enable thinking by default, which can
+conflict with the structured `tool_choice` requests used by Ragas. Pass a
+provider-specific request body when needed:
+
+```bash
+RAGAS_JUDGE_PROVIDER=openai
+RAGAS_JUDGE_MODEL=deepseek-v4-pro
+RAGAS_JUDGE_API_KEY=...
+RAGAS_JUDGE_BASE_URL=https://gateway.example.com/v1
+RAGAS_JUDGE_EXTRA_BODY_JSON='{"thinking":{"type":"disabled"}}'
+```
+
+`RAGAS_JUDGE_EXTRA_BODY_JSON` must be a JSON object and is forwarded unchanged
+to the OpenAI-compatible judge request.
+
 ## Run in Docker on the internal server
 
 ```bash

@@ -35,6 +35,7 @@ class ProviderSettings:
     embedding_model: str
     embedding_api_key: str | None
     embedding_base_url: str | None
+    judge_extra_body: dict[str, Any] | None = None
     timeout_seconds: float = 120.0
     max_tokens: int = 4096
 
@@ -61,12 +62,18 @@ def build_scorers(settings: ProviderSettings, metrics: set[str]) -> Scorers:
             base_url=settings.judge_base_url,
             timeout=settings.timeout_seconds,
         )
+    model_args: dict[str, Any] = {
+        "temperature": 0,
+        "max_tokens": settings.max_tokens,
+    }
+    if settings.judge_extra_body is not None:
+        model_args["extra_body"] = settings.judge_extra_body
+
     llm = llm_factory(
         settings.judge_model,
         provider=settings.judge_provider,
         client=judge_client,
-        temperature=0,
-        max_tokens=settings.max_tokens,
+        **model_args,
     )
 
     relevancy = None
