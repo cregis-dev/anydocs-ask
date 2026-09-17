@@ -213,6 +213,19 @@ test('sanitizeFtsQuery: chinese punctuation acts as token boundary', () => {
   assert.equal(sanitizeFtsQuery('鉴权？怎么做'), '"鉴权" OR "怎么做"');
 });
 
+test('sanitizeFtsQuery: splits adjacent CJK prose and ASCII field names', () => {
+  assert.equal(
+    sanitizeFtsQuery('返回的参数fee是怎么计算的'),
+    '"返回的参数fee是怎么计算的" OR "返回的参数" OR "fee" OR "是怎么计算的" OR "参数"',
+  );
+});
+
+test('sanitizeFtsQuery: splits underscore fields adjacent to CJK prose', () => {
+  const query = sanitizeFtsQuery('order_amount最小值是多少');
+  assert.ok(query?.includes('"order_amount"'));
+  assert.ok(query?.includes('"最小值是多少"'));
+});
+
 test('sanitizeFtsQuery: expands long zh signature phrases into searchable domain terms', () => {
   const query = sanitizeFtsQuery('Cregis API 签名应该怎么拼接参数？sign 字段本身要不要参与签名？');
   assert.ok(query?.includes('"签名"'));
@@ -251,6 +264,17 @@ test('extractExactIdentifiers: folds case-insensitive duplicates', () => {
     extractExactIdentifiers('/API/v1/coins and /api/v1/coins'),
     ['/API/v1/coins'],
   );
+});
+
+test('extractExactIdentifiers: finds lowercase fields adjacent to Chinese prose', () => {
+  assert.deepEqual(
+    extractExactIdentifiers('返回的参数fee，是怎么计算的？status是什么意思？字段 currency 呢？'),
+    ['fee', 'status', 'currency'],
+  );
+});
+
+test('extractExactIdentifiers: does not promote ordinary standalone English words', () => {
+  assert.deepEqual(extractExactIdentifiers('how is fee calculated'), []);
 });
 
 // CamelCase identifiers expand to both the original token AND a phrase form

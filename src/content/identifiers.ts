@@ -37,9 +37,18 @@ export function extractIndexedIdentifiers(text: string): IndexedIdentifier[] {
   for (const item of found) {
     const candidates: IndexedIdentifier[] = [item];
     if (item.kind === 'field' && item.value.includes('.')) {
-      for (const segment of item.value.split('.')) {
+      const segments = item.value.split('.');
+      for (const segment of segments) {
         const value = segment.replace(/\[\]$/, '');
         if (value.includes('_')) candidates.push({ value, normalized: normalizeIdentifier(value), kind: 'field' });
+      }
+      // OpenAPI renders complete paths such as `data.rows[].fee`. Index the
+      // leaf as well so a natural query that names only `fee` can take the
+      // exact-match path. Restrict this to the terminal segment: indexing
+      // generic containers such as `data` and `rows` would add broad noise.
+      const leaf = segments.at(-1)?.replace(/\[\]$/, '');
+      if (leaf && /^[A-Za-z][A-Za-z0-9]{2,}$/.test(leaf)) {
+        candidates.push({ value: leaf, normalized: normalizeIdentifier(leaf), kind: 'field' });
       }
     }
     for (const candidate of candidates) {

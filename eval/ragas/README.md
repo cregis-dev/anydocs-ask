@@ -39,11 +39,14 @@ Add reviewed semantic ground truth to selected entries in
 
 Start with 20-30 manually reviewed cases. `reference_answer` is used by
 Factual Correctness. When it is absent, the runner joins `reference_facts`
-into a reference. Cases without either field still receive Faithfulness and
-Answer Relevancy scores.
+into a reference. `rubric_compliance` evaluates the answer against the
+canonical answer, atomic facts, retrieved context, and the case-specific
+`evaluation_rubric`; its native 1-5 result is normalized to 0-1. Cases without
+ground truth still receive Faithfulness and Answer Relevancy scores, while
+Rubric Compliance is skipped when no rubric is present.
 
 Run a full eval, not `eval --no-router`: retrieval-only traces intentionally
-have no generated answer and cannot produce the three semantic scores.
+have no generated answer and cannot produce the semantic scores.
 
 ## Run locally
 
@@ -83,9 +86,10 @@ The default metrics are:
 - `faithfulness`: answer claims supported by the actual generation context.
 - `answer_relevancy`: answer relevance to the user question.
 - `factual_correctness`: answer agreement with reviewed Golden ground truth.
+- `rubric_compliance`: case-specific groundedness and precision requirements.
 
-Use `--metrics faithfulness,factual_correctness` when the judge endpoint does
-not expose an embedding model.
+Use `--metrics faithfulness,factual_correctness,rubric_compliance` when the
+judge endpoint does not expose an embedding model.
 
 For an Anthropic-compatible judge, including an internal gateway already used
 by Ask, set:
@@ -123,13 +127,13 @@ to the OpenAI-compatible judge request.
 ## Run in Docker on the internal server
 
 ```bash
-docker build -t anydocs-ragas:0.1 eval/ragas
+docker build -t anydocs-ragas:0.2 eval/ragas
 
 docker run --rm \
   --env-file /etc/cregis-docs/ragas.env \
   -v /var/lib/cregis-docs/ask:/runtime:ro \
   -v /var/lib/cregis-docs/ragas-reports:/reports \
-  anydocs-ragas:0.1 \
+  anydocs-ragas:0.2 \
   /runtime/state/cregis-docs/reports/2026-09-17-eval.cases.jsonl \
   --output-dir /reports
 ```

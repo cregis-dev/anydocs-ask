@@ -34,6 +34,8 @@ def publish_experiment(
                 "case_id": case_id,
                 "lang": sample["lang"],
                 "context_source": sample["context_source"],
+                "reference_facts": sample["reference_facts"],
+                "evaluation_rubric": sample["rubric"],
             },
         )
 

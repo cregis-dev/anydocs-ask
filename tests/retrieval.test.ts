@@ -180,3 +180,31 @@ test('retrieveWithTrace: generic exact fields prefer the routed API product', ()
     db.close();
   }
 });
+
+test('retrieveWithTrace: simple exact fields prefer the routed API product', () => {
+  const db = openDatabase({ dbPath: ':memory:' });
+  try {
+    insertPage(db, 'api-waas-api-post-api-v1-trade-page', 'zh', 20);
+    insertPage(db, 'api-payment-engine-api-post-api-v2-order-info', 'zh', 10);
+    const waas = insertChunk(db, 'api-waas-api-post-api-v1-trade-page', 'zh', 'data.rows[].fee 交易费用');
+    const payment = insertChunk(db, 'api-payment-engine-api-post-api-v2-order-info', 'zh', 'data.fee 订单费用');
+    for (const chunkId of [waas, payment]) {
+      db.prepare(`INSERT INTO chunk_identifiers (chunk_id, identifier, normalized, kind) VALUES (?, 'fee', 'fee', 'field')`)
+        .run(chunkId);
+    }
+
+    const result = retrieveWithTrace(db, {
+      queryVector: new Float32Array(1024),
+      ftsQuery: null,
+      exactIdentifiers: ['fee'],
+      currentPageLang: 'zh',
+      apiReferencePagePrefix: 'api-waas-api-',
+      scopeId: null,
+    });
+
+    assert.equal(result.chunks[0]?.chunk_id, waas);
+    assert.equal(result.chunks.some((chunk) => chunk.chunk_id === payment), false);
+  } finally {
+    db.close();
+  }
+});

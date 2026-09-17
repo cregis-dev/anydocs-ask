@@ -39,6 +39,7 @@ function trace(pageIds: string[]): AskTrace {
       final_score: 1 / (i + 1),
       vec_rank: i + 1,
       bm25_rank: null,
+      exact_rank: null,
       nav_index: null,
     })),
     subtree_ask_triggered: false,
@@ -46,6 +47,30 @@ function trace(pageIds: string[]): AskTrace {
     confidence: 1,
     tokens_in: null,
     tokens_out: null,
+  };
+}
+
+function traceWithContent(chunks: Array<{
+  page_id: string;
+  object_path?: string;
+  text_preview?: string;
+  identifiers?: string[];
+}>): AskTrace {
+  return {
+    ...trace([]),
+    fused: chunks.map((chunk, i) => ({
+      chunk_id: i + 1,
+      page_id: chunk.page_id,
+      object_path: chunk.object_path ?? null,
+      text_preview: chunk.text_preview,
+      identifiers: chunk.identifiers,
+      rrf_score: 1 / (i + 1),
+      final_score: 1 / (i + 1),
+      vec_rank: i + 1,
+      bm25_rank: null,
+      exact_rank: null,
+      nav_index: null,
+    })),
   };
 }
 
@@ -179,6 +204,68 @@ test('summarizeRetrievalResults averages retrieval-only metrics', () => {
   assert.equal(summary.hit_at_1, 0.5);
   assert.equal(summary.hit_at_3, 0.5);
   assert.equal(summary.mrr, 0.5);
+  assert.equal(summary.retrieval_content_n, 0);
+  assert.equal(summary.retrieval_content_pass, null);
+});
+
+test('retrieval content rules match field-level paths and previews in the top 5', () => {
+  const c = golden({
+    expected: {
+      must_cite_pages: ['waas-api'],
+      must_retrieve_regex: ['data\\.rows(?:\\[\\])?\\.fee', '交易费用'],
+      must_contain: [],
+      forbid_contain: [],
+    },
+  });
+  const scored = scoreRetrievalCase(c, traceWithContent([
+    { page_id: 'waas-api', object_path: 'data.rows[].fee', text_preview: 'fee: 交易费用' },
+  ]), 10);
+
+  assert.equal(scored.retrieval_content_pass, true);
+  assert.deepEqual(scored.missing_must_retrieve_regex, []);
+});
+
+test('retrieval content rules use indexed identifiers beyond truncated previews', () => {
+  const c = golden({
+    expected: {
+      must_cite_pages: ['waas-api'],
+      must_retrieve_regex: ['data\\.rows(?:\\[\\])?\\.fee|交易费用'],
+      must_contain: [],
+      forbid_contain: [],
+    },
+  });
+  const scored = scoreRetrievalCase(c, traceWithContent([
+    {
+      page_id: 'waas-api',
+      object_path: 'data.rows[]',
+      text_preview: 'data.rows[].cid ...',
+      identifiers: ['data.rows[].fee', 'fee'],
+    },
+  ]), 10);
+
+  assert.equal(scored.retrieval_content_pass, true);
+  assert.deepEqual(scored.missing_must_retrieve_regex, []);
+});
+
+test('retrieval content rules fail when the right page omits the required field chunk', () => {
+  const c = golden({
+    expected: {
+      must_cite_pages: ['waas-api'],
+      must_retrieve_regex: ['data\\.rows(?:\\[\\])?\\.fee'],
+      must_contain: [],
+      forbid_contain: [],
+    },
+  });
+  const scored = scoreRetrievalCase(c, traceWithContent([
+    { page_id: 'waas-api', object_path: 'data', text_preview: 'pageNum pageSize total' },
+  ]), 10);
+  const summary = summarizeRetrievalResults([scored]);
+
+  assert.equal(scored.hit_at_5, true, 'page-level retrieval still passes');
+  assert.equal(scored.retrieval_content_pass, false, 'field-level retrieval fails');
+  assert.deepEqual(scored.missing_must_retrieve_regex, ['data\\.rows(?:\\[\\])?\\.fee']);
+  assert.equal(summary.retrieval_content_n, 1);
+  assert.equal(summary.retrieval_content_pass, 0);
 });
 
 test('scoreCase MRR ignores chunk-level duplication of the same page', () => {

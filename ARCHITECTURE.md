@@ -1192,6 +1192,7 @@ shell-exported 变量优先级最高（loadEnvFile 不覆盖）。**v1 不再读
   "context_pageId": null,
   "expected": {
     "must_cite_pages": ["security/jwt", "security/refresh-token"],
+    "must_retrieve_regex": ["response\\.refresh_token"],
     "must_contain": ["refresh", "expires_in"],
     "forbid_contain": ["session cookie"],
     "reference_answer": "Use the refresh-token flow before the access token expires.",
@@ -1210,6 +1211,7 @@ shell-exported 变量优先级最高（loadEnvFile 不覆盖）。**v1 不再读
 字段约束：
 
 - `must_cite_pages` 至少 1 个；列表内任一命中即算覆盖（OR 语义）
+- `must_retrieve_regex` 可选；每个正则都必须命中 top-5 chunk 的页面/路径/对象路径/文本，用于字段级检索回归
 - `must_contain` / `forbid_contain` 都是子串数组，匹配走小写 + 中文不分词的 substring；语义级匹配等 v2
 - `context_pageId` 非 null 时 eval 会以该页 slug 作为 ask 请求的 context
 - `reference_answer` / `reference_facts` 是人工复核的语义 ground truth；不参与在线生成，只供独立评测器使用
@@ -1222,6 +1224,7 @@ shell-exported 变量优先级最高（loadEnvFile 不覆盖）。**v1 不再读
 - **MRR**：第一个命中 `must_cite_pages` 的唯一页面排名倒数均值
 - **Hit@5**：`mean_i [ |r.fused[:5].pages ∩ expected.must_cite_pages| > 0 ]`；`must_cite_pages` 是 OR-set
 - **Context-P@5**：top-5 chunks 中，页面属于 `must_cite_pages ∪ allow_cite_pages` 的比例
+- **Field-retrieval**：配置了 `must_retrieve_regex` 的 case 中，所有字段级正则均在 top-5 chunks 命中的比例
 - **Citation-anchor**：最终引用至少有一个属于 `must_cite_pages ∪ allow_cite_pages`
 - **Kind-pass**：最终 `answer | clarify | error` 分支与 `expected_kind` 一致
 - **API-rule-pass**：配置了 API operation / URL 规则的 case 是否全部满足
@@ -1255,6 +1258,7 @@ Baseline: 2026-04-25 (MRR=0.74, H@5=0.82, CP@5=0.61, Anchor=0.68)
 | MRR             | 0.78  | 0.74     | +0.04 |
 | Hit@5           | 0.86  | 0.82     | +0.04 |
 | Context-P@5     | 0.64  | 0.61     | +0.03 |
+| Field-retrieval | 0.92  | 0.88     | +0.04 |
 | Citation-anchor | 0.71  | 0.68     | +0.03 |
 
 ## Keyword-overlap misses (diagnostic)
@@ -1286,6 +1290,7 @@ Baseline: 2026-04-25 (MRR=0.74, H@5=0.82, CP@5=0.61, Anchor=0.68)
         "vec_rank": 2,
         "bm25_rank": 5,
         "exact_rank": null,
+        "identifiers": ["refresh_token"],
         "nav_index": 3
       }
     ],
@@ -1318,6 +1323,7 @@ Baseline: 2026-04-25 (MRR=0.74, H@5=0.82, CP@5=0.61, Anchor=0.68)
 
 - `answer.kind`：`'answer' | 'clarify' | 'error'`——所有出口都落 runs（错误 / 反问 / 答案），analyze 维度 1 / 3 依赖此区分。
 - `retrieval.fused[*].vec_rank / bm25_rank / exact_rank`：三条召回路径的原始名次；`rrf_score` 仅由这些名次和配置的 `retrieval.rrfK` 计算。`final_score` 默认等于 `rrf_score`，仅在明确启用 cross-encoder 时改为模型分。
+- `retrieval.fused[*].identifiers`：该 chunk 已建立精确索引的技术标识；旧日志可缺省。字段级 Golden 断言优先使用它，避免被 `text_preview` 截断造成误判。
 - `retrieval.router_strategy`：`fast_path | cache | llm | fallback | disabled`；旧日志没有此字段。
 - `retrieval.timings`：Router、Embedding、检索、可选 Reranker 与答案生成的 wall-clock 毫秒数；旧日志没有此字段。各阶段之和可能略小于 `answer.latency_ms`，差值为校验、上下文组装、后处理和日志外壳开销。
 - `answer.tokens_in / tokens_out`：v1 LLM 接口未暴露，写 `null`；后续 LLM 接口扩展时填充。schema 不变。

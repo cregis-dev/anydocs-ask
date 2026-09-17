@@ -81,6 +81,8 @@ export type RunFusedChunk = {
   parent_id?: number | null;
   chunk_kind?: string;
   object_path?: string | null;
+  /** Exact technical identifiers indexed for this chunk. Missing on legacy rows. */
+  identifiers?: string[];
   rrf_score: number;
   final_score: number;
   vec_rank: number | null;

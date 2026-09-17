@@ -25,6 +25,12 @@ export type GoldenCaseExpected = {
   must_cite_operations?: string[];
   /** Optional citation URL fragments that should appear in final citations. */
   must_cite_urls?: string[];
+  /**
+   * Regexes that must all match the metadata or text of at least one top-5
+   * retrieved chunk. Use this for field-level regressions where page-level
+   * Hit@5 is too coarse (for example `data.rows[].fee`).
+   */
+  must_retrieve_regex?: string[];
   /** Substrings that must all appear in answer.md (case-insensitive substring). */
   must_contain: string[];
   /** Regexes that must all match answer.md. */
@@ -50,8 +56,8 @@ export type GoldenCaseExpected = {
    */
   reference_facts?: string[];
   /**
-   * Optional case-specific judge guidance. Ragas' built-in metrics do not
-   * consume this yet, but the offline sample keeps it for custom evaluators.
+   * Optional case-specific judge guidance consumed by the offline
+   * rubric-compliance evaluator.
    */
   evaluation_rubric?: Record<string, string>;
 };
