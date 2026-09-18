@@ -146,6 +146,59 @@ test('parent context: token budget falls back to one child and preserves room fo
   }
 });
 
+test('parent context: default limit expands page parents through 3300 tokens only', () => {
+  const db = openDatabase({ dbPath: ':memory:' });
+  try {
+    db.prepare(
+      `INSERT INTO pages (page_id, lang, status, title, breadcrumb, updated_at)
+       VALUES ('api-page', 'en', 'published', 'API page', '[]', 1)`,
+    ).run();
+    const insertParent = db.prepare(
+      `INSERT INTO chunk_parents
+        (page_id, lang, parent_path, heading_path, text, content_hash, token_count, created_at)
+       VALUES ('api-page', 'en', ?, '[]', ?, ?, ?, 1)`,
+    );
+    const eligibleParent = Number(
+      insertParent.run('eligible-page', 'eligible page parent', 'eligible-parent', 3_300).lastInsertRowid,
+    );
+    const oversizedParent = Number(
+      insertParent.run('oversized-page', 'oversized page parent', 'oversized-parent', 3_301).lastInsertRowid,
+    );
+    const insertChunk = db.prepare(
+      `INSERT INTO chunks
+        (page_id, lang, in_page_path, text, content_hash, token_count, parent_id, chunk_kind, created_at)
+       VALUES ('api-page', 'en', ?, ?, ?, 2, ?, 'content', 1)`,
+    );
+    const eligible = [
+      Number(insertChunk.run('eligible/p[1]', 'eligible one', 'eligible-one', eligibleParent).lastInsertRowid),
+      Number(insertChunk.run('eligible/p[2]', 'eligible two', 'eligible-two', eligibleParent).lastInsertRowid),
+    ];
+    const oversized = [
+      Number(insertChunk.run('oversized/p[1]', 'oversized one', 'oversized-one', oversizedParent).lastInsertRowid),
+      Number(insertChunk.run('oversized/p[2]', 'oversized two', 'oversized-two', oversizedParent).lastInsertRowid),
+    ];
+
+    const expanded = selectContextWithParents(
+      db,
+      eligible.map((id) => fakeChunk(id, eligibleParent)),
+      { maxItems: 2, maxTotalTokens: 8_000 },
+    );
+    assert.equal(expanded.length, 1);
+    assert.equal(expanded[0]?.expanded_parent?.parent_id, eligibleParent);
+    assert.equal(expanded[0]?.context_token_count, 3_300);
+
+    const childOnly = selectContextWithParents(
+      db,
+      oversized.map((id) => fakeChunk(id, oversizedParent)),
+      { maxItems: 2, maxTotalTokens: 8_000 },
+    );
+    assert.equal(childOnly.length, 2);
+    assert.ok(childOnly.every((chunk) => chunk.expanded_parent === null));
+  } finally {
+    db.close();
+  }
+});
+
 test('parent context: total token budget bounds child-only context', () => {
   const db = openDatabase({ dbPath: ':memory:' });
   try {

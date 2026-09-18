@@ -27,7 +27,12 @@ test('chunkPage: starter-docs welcome page produces ≥1 chunk per heading secti
     assert.equal(c.content_hash, contentHash(c.text));
     assert.ok(c.token_count >= 1);
     assert.match(c.in_page_path, /p\[\d+\]$/);
+    assert.equal(c.parent.parent_path, '$page');
+    assert.deepEqual(c.parent.heading_path, []);
   }
+  assert.equal(new Set(chunks.map((chunk) => chunk.parent.content_hash)).size, 1);
+  assert.match(chunks[0]!.parent.text, /Page: /);
+  assert.match(chunks[0]!.parent.text, /Section: /);
 });
 
 test('chunkPage: code block inside section stays inside the section text', async () => {
@@ -127,6 +132,7 @@ test('chunkPage: long prose continuations repeat page and section context', () =
     assert.match(chunk.text, /^Page: Long Guide\nSection: Authentication\n/);
   }
   assert.equal(new Set(chunks.map((chunk) => chunk.parent.parent_path)).size, 1);
+  assert.equal(chunks[0]!.parent.parent_path, '$page');
   assert.ok(chunks[0]!.parent.text.length > chunks[0]!.text.length);
 });
 

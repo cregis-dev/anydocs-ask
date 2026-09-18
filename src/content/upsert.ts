@@ -83,8 +83,8 @@ export async function upsertChunksForPage(
     deleteChunks.run(pageId, lang);
     deleteParents.run(pageId, lang);
 
-    // Parents are stored once per heading/object boundary. Child chunks carry
-    // the parent id but remain the only embedded and BM25-indexed records.
+    // The page parent is stored once. Child chunks carry its id but remain the
+    // only embedded and BM25-indexed records.
     const now = Date.now();
     const parentIds = new Map<string, number | bigint>();
     for (const c of chunks) {

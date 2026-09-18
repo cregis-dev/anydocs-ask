@@ -95,7 +95,7 @@ test('upsertChunksForPage: full pipeline writes chunks + chunks_vec + chunks_fts
     const parentCount = db.prepare(
       `SELECT COUNT(*) AS n FROM chunk_parents WHERE page_id='welcome' AND lang='zh'`,
     ).get() as { n: number };
-    assert.ok(parentCount.n > 0 && parentCount.n <= chunks.length);
+    assert.equal(parentCount.n, 1);
     const unparented = db.prepare(
       `SELECT COUNT(*) AS n FROM chunks WHERE page_id='welcome' AND parent_id IS NULL`,
     ).get() as { n: number };

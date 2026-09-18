@@ -244,10 +244,10 @@ export class Indexer {
 
   /**
    * Returns 'skip' when the new chunk set is byte-identical (by content_hash
-   * sequence + in_page_path) to what's in DB for (page_id, lang). The
-   * sequence — not just the set — must match, because in_page_path encodes
-   * structural position; if a heading was renamed its anchor changes even
-   * when the chunk text is identical, and we want that to flow through.
+   * sequence + in_page_path + parent identity) to what's in DB for
+   * (page_id, lang). The sequence — not just the set — must match, because
+   * in_page_path encodes structural position; parent hashes are included so
+   * parent-only chunking changes are not skipped when child text is stable.
    */
   private decideChunkWrite(
     pageId: string,
@@ -256,15 +256,25 @@ export class Indexer {
   ): 'write' | 'skip' {
     const existing = this.db
       .prepare(
-        `SELECT content_hash, in_page_path FROM chunks
-         WHERE page_id = ? AND lang = ?
-         ORDER BY chunk_id`,
+        `SELECT c.content_hash, c.in_page_path,
+                cp.parent_path, cp.content_hash AS parent_content_hash
+           FROM chunks c
+           LEFT JOIN chunk_parents cp ON cp.parent_id = c.parent_id
+         WHERE c.page_id = ? AND c.lang = ?
+         ORDER BY c.chunk_id`,
       )
-      .all(pageId, lang) as Array<{ content_hash: string; in_page_path: string }>;
+      .all(pageId, lang) as Array<{
+        content_hash: string;
+        in_page_path: string;
+        parent_path: string | null;
+        parent_content_hash: string | null;
+      }>;
     if (existing.length !== newChunks.length) return 'write';
     for (let i = 0; i < existing.length; i++) {
       if (existing[i]!.content_hash !== newChunks[i]!.content_hash) return 'write';
       if (existing[i]!.in_page_path !== newChunks[i]!.in_page_path) return 'write';
+      if (existing[i]!.parent_path !== newChunks[i]!.parent.parent_path) return 'write';
+      if (existing[i]!.parent_content_hash !== newChunks[i]!.parent.content_hash) return 'write';
     }
     return 'skip';
   }
