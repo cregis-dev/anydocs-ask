@@ -46,9 +46,9 @@ import {
 import { observeLangfuse } from '../observability/langfuse.ts';
 
 const DEFAULT_RETRIEVAL_CONFIG: RetrievalConfig = {
-  topK: 20,
+  topK: 40,
   rrfK: 60,
-  maxChunksHardCap: 20,
+  maxChunksHardCap: 40,
 };
 const DEFAULT_MAX_CHUNKS = 8;
 const DEFAULT_CONTEXT_TOKEN_BUDGET = 8000;
@@ -955,7 +955,6 @@ export function selectContextWithParents(
   }>;
   const parents = new Map(rows.map((row) => [row.parent_id, row] as const));
   const emittedParents = new Set<number>();
-  const emittedParentFallbacks = new Set<number>();
   const emittedChildren = new Set<number>();
   const out: SelectedContextChunk[] = [];
   let usedTokens = 0;
@@ -967,17 +966,16 @@ export function selectContextWithParents(
     let expandedParent: AskTraceExpandedParent | null = null;
     let selected: RerankedChunk = chunk;
     let selectedTokens = estimateContextTokens(chunk.text);
-    let parentFallbackId: number | null = null;
     const parent = chunk.parent_id === null ? undefined : parents.get(chunk.parent_id);
-    if (
-      parent &&
-      parent.child_count >= 2 &&
-      parent.token_count <= maxParentTokens &&
-      parent.text.length <= maxParentChars
-    ) {
+    if (parent) {
       if (emittedParents.has(parent.parent_id)) continue;
-      if (usedTokens + parent.token_count <= maxTotalTokens) {
-        emittedParents.add(parent.parent_id);
+      emittedParents.add(parent.parent_id);
+      if (
+        parent.child_count >= 2 &&
+        parent.token_count <= maxParentTokens &&
+        parent.text.length <= maxParentChars &&
+        usedTokens + parent.token_count <= maxTotalTokens
+      ) {
         selected = { ...chunk, text: parent.text };
         selectedTokens = parent.token_count;
         expandedParent = {
@@ -988,17 +986,10 @@ export function selectContextWithParents(
           token_count: parent.token_count,
           child_count: parent.child_count,
         };
-      } else {
-        // The full parent no longer fits. Keep only its best-ranked child so
-        // later siblings do not consume the slots that refill should use for
-        // distinct context units.
-        if (emittedParentFallbacks.has(parent.parent_id)) continue;
-        parentFallbackId = parent.parent_id;
       }
     }
 
     if (usedTokens + selectedTokens > maxTotalTokens) continue;
-    if (parentFallbackId !== null) emittedParentFallbacks.add(parentFallbackId);
     out.push({ ...selected, expanded_parent: expandedParent, context_token_count: selectedTokens });
     usedTokens += selectedTokens;
   }

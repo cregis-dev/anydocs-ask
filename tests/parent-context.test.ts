@@ -192,7 +192,8 @@ test('parent context: default limit expands page parents through 3300 tokens onl
       oversized.map((id) => fakeChunk(id, oversizedParent)),
       { maxItems: 2, maxTotalTokens: 8_000 },
     );
-    assert.equal(childOnly.length, 2);
+    assert.equal(childOnly.length, 1);
+    assert.equal(childOnly[0]?.chunk_id, oversized[0]);
     assert.ok(childOnly.every((chunk) => chunk.expanded_parent === null));
   } finally {
     db.close();

@@ -679,9 +679,9 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
     "cacheMaxEntries": 512
   },
   "retrieval": {
-    "topK": 20,
+    "topK": 40,
     "rrfK": 60,
-    "maxChunksHardCap": 20
+    "maxChunksHardCap": 40
   },
   "server": {
     "host": "127.0.0.1",

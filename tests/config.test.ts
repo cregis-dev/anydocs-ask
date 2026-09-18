@@ -221,7 +221,7 @@ test('loadConfig: type-mismatched fields are warned (not thrown), defaults prese
   });
   try {
     const r = await loadConfig(root);
-    assert.equal(r.config.retrieval.topK, 20, 'default preserved on type mismatch');
+    assert.equal(r.config.retrieval.topK, 40, 'default preserved on type mismatch');
     assert.equal(r.config.server.port, 3100, 'default preserved when section is wrong type');
     assert.ok(r.warnings.length >= 2);
   } finally {
@@ -243,7 +243,7 @@ test('loadConfig: retrieval tuning is accepted and invalid bounds keep defaults'
     assert.deepEqual(r.config.retrieval, {
       topK: 12,
       rrfK: 60,
-      maxChunksHardCap: 20,
+      maxChunksHardCap: 40,
     });
     assert.ok(r.warnings.some((warning) => warning.includes('retrieval.rrfK')));
     assert.ok(r.warnings.some((warning) => warning.includes('retrieval.maxChunksHardCap')));
