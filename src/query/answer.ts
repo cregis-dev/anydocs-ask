@@ -612,9 +612,6 @@ async function askWithTraceInternal(
     entityTerms,
     retrievalConfig.maxChunksHardCap,
   );
-  const parentContextCap = req.options?.max_chunks === undefined
-    ? Math.min(contextCap, DEFAULT_MAX_CHUNKS)
-    : contextCap;
   // Preserve aggregate/RRF order. The only transformation after ranking is
   // structural parent expansion below, which changes context granularity but
   // never promotes a lower-ranked child over a higher-ranked one.
@@ -625,7 +622,7 @@ async function askWithTraceInternal(
     { input: { candidates: contextCandidates.length, max_items: contextCap } },
     async (observation) => {
       const output = selectContextWithParents(deps.db, contextCandidates, {
-        maxItems: parentContextCap,
+        maxItems: contextCap,
         maxTotalTokens: DEFAULT_CONTEXT_TOKEN_BUDGET,
         maxParentTokens: DEFAULT_PARENT_TOKEN_LIMIT,
       });
@@ -957,14 +954,8 @@ export function selectContextWithParents(
     child_count: number;
   }>;
   const parents = new Map(rows.map((row) => [row.parent_id, row] as const));
-  const childrenByParent = new Map<number, RerankedChunk[]>();
-  for (const chunk of candidates) {
-    if (chunk.parent_id === null || !parents.has(chunk.parent_id)) continue;
-    const siblings = childrenByParent.get(chunk.parent_id) ?? [];
-    siblings.push(chunk);
-    childrenByParent.set(chunk.parent_id, siblings);
-  }
   const emittedParents = new Set<number>();
+  const emittedParentFallbacks = new Set<number>();
   const emittedChildren = new Set<number>();
   const out: SelectedContextChunk[] = [];
   let usedTokens = 0;
@@ -976,16 +967,17 @@ export function selectContextWithParents(
     let expandedParent: AskTraceExpandedParent | null = null;
     let selected: RerankedChunk = chunk;
     let selectedTokens = estimateContextTokens(chunk.text);
+    let parentFallbackId: number | null = null;
     const parent = chunk.parent_id === null ? undefined : parents.get(chunk.parent_id);
-    if (parent) {
+    if (
+      parent &&
+      parent.child_count >= 2 &&
+      parent.token_count <= maxParentTokens &&
+      parent.text.length <= maxParentChars
+    ) {
       if (emittedParents.has(parent.parent_id)) continue;
-      emittedParents.add(parent.parent_id);
-      if (
-        parent.child_count >= 2 &&
-        parent.token_count <= maxParentTokens &&
-        parent.text.length <= maxParentChars &&
-        usedTokens + parent.token_count <= maxTotalTokens
-      ) {
+      if (usedTokens + parent.token_count <= maxTotalTokens) {
+        emittedParents.add(parent.parent_id);
         selected = { ...chunk, text: parent.text };
         selectedTokens = parent.token_count;
         expandedParent = {
@@ -996,21 +988,17 @@ export function selectContextWithParents(
           token_count: parent.token_count,
           child_count: parent.child_count,
         };
-      } else if (parent.child_count >= 2) {
-        // Oversized page parents still occupy one candidate slot, but retain
-        // the two strongest matching sections so grouping does not discard
-        // complementary fields or examples from the same article.
-        const fallbackChildren = (childrenByParent.get(parent.parent_id) ?? [chunk]).slice(0, 2);
-        const fallbackText = fallbackChildren.map((item) => item.text).join('\n\n');
-        const fallbackTokens = estimateContextTokens(fallbackText);
-        if (usedTokens + fallbackTokens <= maxTotalTokens) {
-          selected = { ...chunk, text: fallbackText };
-          selectedTokens = fallbackTokens;
-        }
+      } else {
+        // The full parent no longer fits. Keep only its best-ranked child so
+        // later siblings do not consume the slots that refill should use for
+        // distinct context units.
+        if (emittedParentFallbacks.has(parent.parent_id)) continue;
+        parentFallbackId = parent.parent_id;
       }
     }
 
     if (usedTokens + selectedTokens > maxTotalTokens) continue;
+    if (parentFallbackId !== null) emittedParentFallbacks.add(parentFallbackId);
     out.push({ ...selected, expanded_parent: expandedParent, context_token_count: selectedTokens });
     usedTokens += selectedTokens;
   }
