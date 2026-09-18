@@ -130,6 +130,7 @@ function systemPromptFor(
     const lines = [
       identity,
       '- 答案必须基于下方提供的参考片段，严禁编造。',
+      '- 只回答用户当前问题所需的信息。不要因为参考片段包含额外内容，就主动扩展到未被询问的背景、相邻流程或其他接口；仅保留正确理解和执行答案所必需的前提、限制及安全警告。',
       '- 必须至少给出 1 条引用，引用使用 [cit_N] 标记内联在答案里。',
       '- 答案中所有代码 / API 名必须能在参考片段中找到，否则不要写入。',
       '- Shell 路径、文件路径、命令参数必须与参考片段完全一致，禁止修改或省略任何字符（含 ~、/ 等前缀）。',
@@ -155,6 +156,7 @@ function systemPromptFor(
   const lines = [
     identity,
     '- Base your answer ONLY on the supplied context snippets; do not invent facts.',
+    '- Answer only what is needed for the user\'s current question. Do not expand into unasked background, adjacent workflows, or other endpoints merely because they appear in the context. Include only prerequisites, constraints, and safety warnings necessary for a correct answer.',
     '- Cite at least once using [cit_N] markers inline in the answer.',
     '- Every code identifier / API name in the answer must appear in the context.',
       '- Shell paths, file paths, and command arguments must be copied character-for-character from the context — never drop or modify characters such as ~ or /.',

@@ -1026,6 +1026,22 @@ test('buildPrompt: appends project-specific assistant identity and instructions 
   assert.match(prompt.system, /WaaS 主要用于钱包/);
 });
 
+test('buildPrompt: keeps Chinese and English answers focused on the current question', () => {
+  const base = {
+    question: 'How do I configure authentication?',
+    chunks: [{ ...fakeRetrieved({ lang: 'en' }), final_score: 0.2 }],
+    isCrossLang: false,
+    formatHint: 'paragraph' as const,
+  };
+  const zh = buildPrompt({ ...base, question: '如何配置鉴权？', answerLang: 'zh' });
+  const en = buildPrompt({ ...base, answerLang: 'en' });
+
+  assert.match(zh.system, /只回答用户当前问题所需的信息/);
+  assert.match(zh.system, /前提、限制及安全警告/);
+  assert.match(en.system, /Answer only what is needed for the user's current question/);
+  assert.match(en.system, /prerequisites, constraints, and safety warnings/);
+});
+
 test('buildPrompt: adds API reference citation rule when context contains API reference chunks', () => {
   const prompt = buildPrompt({
     question: '创建订单返回哪些字段？',
