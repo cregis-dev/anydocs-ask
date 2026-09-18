@@ -2237,8 +2237,8 @@ legacySsrTest('GET /p/:name: Settings tab does NOT prefill fields absent from an
       body,
       /data-cfg-path="llm\.apiKeyEnv"[^>]*value=""[^>]*placeholder="ANTHROPIC_API_KEY"/,
     );
-    // Absent retrieval.topK → empty value with placeholder "40"
-    assert.match(body, /data-cfg-path="retrieval\.topK"[^>]*value=""[^>]*placeholder="40"/);
+    // Absent retrieval.topK → empty value with placeholder "20"
+    assert.match(body, /data-cfg-path="retrieval\.topK"[^>]*value=""[^>]*placeholder="20"/);
   } finally {
     await cleanup();
   }

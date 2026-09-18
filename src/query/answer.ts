@@ -46,9 +46,9 @@ import {
 import { observeLangfuse } from '../observability/langfuse.ts';
 
 const DEFAULT_RETRIEVAL_CONFIG: RetrievalConfig = {
-  topK: 40,
+  topK: 20,
   rrfK: 60,
-  maxChunksHardCap: 40,
+  maxChunksHardCap: 20,
 };
 const DEFAULT_MAX_CHUNKS = 8;
 const DEFAULT_CONTEXT_TOKEN_BUDGET = 8000;

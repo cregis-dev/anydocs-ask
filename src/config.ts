@@ -316,9 +316,9 @@ const DEFAULTS: ResolvedConfig = {
     cacheMaxEntries: 512,
   },
   retrieval: {
-    topK: 40,
+    topK: 20,
     rrfK: 60,
-    maxChunksHardCap: 40,
+    maxChunksHardCap: 20,
   },
   reranker: {
     enabled: false,
