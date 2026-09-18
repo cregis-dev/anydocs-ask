@@ -100,7 +100,7 @@ test('parent context: collapsed siblings refill the final context from lower-ran
   }
 });
 
-test('parent context: token budget falls back to one child and preserves room for another parent', () => {
+test('parent context: oversized parents group their top two children into one context item', () => {
   const db = openDatabase({ dbPath: ':memory:' });
   try {
     db.prepare(
@@ -140,7 +140,7 @@ test('parent context: token budget falls back to one child and preserves room fo
     );
 
     assert.deepEqual(selected.map((chunk) => chunk.chunk_id), [first, other]);
-    assert.equal(selected[0]?.text, 'best child');
+    assert.equal(selected[0]?.text, 'best child\n\nsibling child');
   } finally {
     db.close();
   }
@@ -194,6 +194,7 @@ test('parent context: default limit expands page parents through 3300 tokens onl
     );
     assert.equal(childOnly.length, 1);
     assert.equal(childOnly[0]?.chunk_id, oversized[0]);
+    assert.match(childOnly[0]?.text ?? '', /child 3[\s\S]*child 4/);
     assert.ok(childOnly.every((chunk) => chunk.expanded_parent === null));
   } finally {
     db.close();
