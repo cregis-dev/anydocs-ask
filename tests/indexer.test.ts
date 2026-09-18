@@ -324,6 +324,29 @@ test('§4.6 #4 — page body edit re-embeds ONLY the chunks whose hash actually 
   }
 });
 
+test('incremental indexing rewrites stale page parents without re-embedding stable children', async () => {
+  const { root, db, embedder, indexer, cleanup } = await setupIndexer();
+  try {
+    await indexer.fullReindex();
+    const callsBefore = embedder.calls;
+    db.prepare(
+      `UPDATE chunk_parents SET content_hash = 'stale-parent' WHERE page_id = 'a' AND lang = 'zh'`,
+    ).run();
+
+    const stats = await indexer.applyChanges([pageEvt(root, 'zh', 'a', 'change')]);
+
+    assert.equal(stats.chunks.writtenPages, 1);
+    assert.equal(stats.embed.misses, 0);
+    assert.equal(embedder.calls, callsBefore);
+    const stale = db.prepare(
+      `SELECT COUNT(*) AS n FROM chunk_parents WHERE page_id = 'a' AND lang = 'zh' AND content_hash = 'stale-parent'`,
+    ).get() as { n: number };
+    assert.equal(stale.n, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('Indexer.applyChanges: unrelated path event is a no-op for chunks', async () => {
   const { root, embedder, indexer, cleanup } = await setupIndexer();
   try {

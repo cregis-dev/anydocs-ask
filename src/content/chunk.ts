@@ -17,7 +17,7 @@
 
 import { renderPageContent } from '@anydocs/core/render-page-content';
 import { CHUNK_MAX_CHARS_DEFAULT, CHUNK_OVERLAP_CHARS_DEFAULT } from './sections.ts';
-import { chunkMarkdownStructure } from './structural-chunks.ts';
+import { chunkMarkdownStructure, type StructuralChunkPiece } from './structural-chunks.ts';
 import { contentHash } from './normalize.ts';
 import { extractIndexedIdentifiers, type IndexedIdentifier } from './identifiers.ts';
 import type { PageDoc } from '../anydocs/types.ts';
@@ -80,15 +80,15 @@ export function chunkPage(page: PageDoc, options: ChunkPageOptions = {}): ChunkI
   const pieces = chunkMarkdownStructure(markdown, page.title, maxChars);
   const chunks: ChunkInput[] = [];
   const indexesByHeading = new Map<string, number>();
-  const parentTextByHeading = new Map<string, string>();
-
-  for (const piece of pieces) {
-    const key = piece.headingId || '$page';
-    const body = stripContextPrefix(piece.text);
-    const prefix = buildContextPrefix(page.title, piece.headingPath);
-    const current = parentTextByHeading.get(key);
-    parentTextByHeading.set(key, current ? `${current}\n\n${body}` : `${prefix}\n${body}`);
-  }
+  const pageParentText = buildPageParentText(page.title, pieces);
+  const pageParent: ParentChunkInput = {
+    parent_path: '$page',
+    heading_id: '',
+    heading_path: [],
+    text: pageParentText,
+    content_hash: contentHash(pageParentText),
+    token_count: estimateTokens(pageParentText),
+  };
 
   for (const piece of pieces) {
     const nextIndex = (indexesByHeading.get(piece.headingId) ?? 0) + 1;
@@ -97,8 +97,6 @@ export function chunkPage(page: PageDoc, options: ChunkPageOptions = {}): ChunkI
       ? `${piece.headingId}/p[${nextIndex}]`
       : `p[${nextIndex}]`;
 
-    const parentPath = piece.headingId || '$page';
-    const parentText = parentTextByHeading.get(parentPath) ?? piece.text;
     const objectPath = objectPathFor(piece.headingPath);
     chunks.push({
       page_id: page.id,
@@ -110,14 +108,7 @@ export function chunkPage(page: PageDoc, options: ChunkPageOptions = {}): ChunkI
       content_hash: contentHash(piece.text),
       token_count: estimateTokens(piece.text),
       is_code: piece.isCode ? 1 : 0,
-      parent: {
-        parent_path: parentPath,
-        heading_id: piece.headingId,
-        heading_path: piece.headingPath,
-        text: parentText,
-        content_hash: contentHash(parentText),
-        token_count: estimateTokens(parentText),
-      },
+      parent: pageParent,
       chunk_kind: chunkKindFor(piece.headingPath, piece.isCode),
       object_path: objectPath,
       identifiers: extractIndexedIdentifiers(stripContextPrefix(piece.text)),
@@ -125,6 +116,22 @@ export function chunkPage(page: PageDoc, options: ChunkPageOptions = {}): ChunkI
   }
 
   return chunks;
+}
+
+function buildPageParentText(pageTitle: string, pieces: StructuralChunkPiece[]): string {
+  const parts = [`Page: ${pageTitle.trim()}`];
+  let previousHeadingPath = '';
+
+  for (const piece of pieces) {
+    const headingPath = piece.headingPath.join(' > ');
+    if (headingPath && headingPath !== previousHeadingPath) {
+      parts.push(`Section: ${headingPath}`);
+    }
+    parts.push(stripContextPrefix(piece.text));
+    previousHeadingPath = headingPath;
+  }
+
+  return parts.filter(Boolean).join('\n\n');
 }
 
 function buildContextPrefix(pageTitle: string, headingPath: string[]): string {

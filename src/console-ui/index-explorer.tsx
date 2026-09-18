@@ -446,7 +446,7 @@ function ParentInspector({ data, group }: { data?: IndexedPageChunks; group: Par
       </div>
     );
   }
-  const expandsForGeneration = parent.child_count >= 2 && parent.text.length <= 6_000;
+  const expandsForGeneration = parent.child_count >= 2 && parent.token_count <= 3_300;
   const copy = async () => {
     await navigator.clipboard.writeText(parent.text);
     setCopied(true);
@@ -471,7 +471,7 @@ function ParentInspector({ data, group }: { data?: IndexedPageChunks; group: Par
             ? 'A matching child expands to this parent before answer generation.'
             : parent.child_count < 2
               ? 'Single-child parents stay precise and are not expanded.'
-              : 'This parent exceeds the 6,000-character expansion limit.'}
+              : 'This parent exceeds the 3,300-token expansion limit.'}
         </span>
       </div>
 

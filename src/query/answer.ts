@@ -52,7 +52,7 @@ const DEFAULT_RETRIEVAL_CONFIG: RetrievalConfig = {
 };
 const DEFAULT_MAX_CHUNKS = 8;
 const DEFAULT_CONTEXT_TOKEN_BUDGET = 8000;
-const DEFAULT_PARENT_TOKEN_LIMIT = 1600;
+const DEFAULT_PARENT_TOKEN_LIMIT = 3300;
 /**
  * Number of times we retry an LLM call when postprocess strips every
  * citation. Bumped 1 → 2 after codex round-11 found ~10 % of the
