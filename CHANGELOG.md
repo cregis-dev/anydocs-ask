@@ -4,11 +4,24 @@
 
 ## Unreleased
 
+## 0.4.0-alpha.7 — 2026-09-18
+
+评测与可观测性 alpha：打通 **Langfuse trace → Golden Dataset → Ragas Experiment** 闭环，增强检索诊断、会话流量分析和发布归因，并上线经 92 条 Golden A/B 验证的 page-level parent context。无 breaking change。
+
 ### 变更
+
+- **Page-level parent context（[#126](https://github.com/cregis-dev/anydocs-ask/pull/126)）** — child 仍用于精确检索；命中短 page parent 时在 3300-token 上限与 8000-token 总预算内展开整页，长文继续使用排名 child，避免整篇注入。Cregis 92-case A/B 中 Ragas context recall `0.636 → 0.805`、faithfulness `0.856 → 0.887`，MRR / Hit@5 / Context-P@5 保持 `0.81 / 0.96 / 0.74`。
+- **检索管线收敛（[#117](https://github.com/cregis-dev/anydocs-ask/pull/117)）** — 引入结构化 parent-child 索引、可配置检索上限与详细 pipeline diagnostics，移除不稳定的启发式 reranking；Console Index workspace 迁移到统一 React UI，可检查 parent / child 结构与 token 分布。
 
 - **Eval 指标收敛** —— 主指标统一为 MRR / Hit@5 / Context-P@5 / Citation-anchor / Kind-pass / API-rule-pass；删除与 Hit@5 重复的 `r_at_5`、与 `must_cite_pages` OR-set 语义冲突的伪 Context-R@5，以及依赖 allowlist 完整度的 strict Citation-pass。Hit@1 / Hit@3、Unexpected-citation-rate 与关键词重叠保留为诊断项；Console history 兼容读取旧报告的 `r_at_5`。
 
 ### 新增
+
+- **Langfuse 可观测性（[#119](https://github.com/cregis-dev/anydocs-ask/pull/119)）** — ask 主路径写入 intent、retrieval、context selection 和 generation observations，保留完整 prompt/context snapshot，支持从线上 trace 回溯评测。
+- **Ragas 评测闭环（[#122](https://github.com/cregis-dev/anydocs-ask/pull/122) / [#123](https://github.com/cregis-dev/anydocs-ask/pull/123) / [#125](https://github.com/cregis-dev/anydocs-ask/pull/125)）** — 新增离线 runner、judge request overrides、faithfulness / factual correctness / context recall 指标及 Langfuse Dataset/Experiment 回传。
+- **Golden 回归评测（[#124](https://github.com/cregis-dev/anydocs-ask/pull/124)）** — 强化 source-controlled Golden 数据集、reference facts / rubric 结构和逐 case trace，使检索与生成回归可重现。
+- **会话与发布归因（[#118](https://github.com/cregis-dev/anydocs-ask/pull/118) / [#120](https://github.com/cregis-dev/anydocs-ask/pull/120)）** — Traffic 按 session 分组，导出运行上下文、docs release、ask engine commit 和 build time，方便跨版本对照。
+- **Ask 并发保护（[#116](https://github.com/cregis-dev/anydocs-ask/pull/116)）** — HTTP 与 SSE ask 统一并发上限，超限返回结构化 `429`，生成首 token 前保持 SSE 连接存活。
 
 - **Console 级 MCP 知识库代理 `/mcp/:name`（CAWP 挂载，ADR-038）** —— 在 dev console（4100）上挂一个**稳定的 per-project MCP 反向代理**，把 RFC 0007 的 `POST /mcp`（位于动态、会被空闲回收的子进程端口上）暴露成一个固定 URL `http://<console>:4100/mcp/<project>`，供外部 agent（CAWP）按项目挂载为检索知识库。
   - **拓扑**：复用既有「按需 `registry.start` + `touch` + 反向代理到子进程」模式（[src/console/server.ts](src/console/server.ts)）。冷项目首次连接时 warm（bge-m3 ~5–10s），使用期间保持常驻。
@@ -18,6 +31,8 @@
   - **`GET /api/projects` 暴露 per-project `title` / `description`** —— 取自项目 `anydocs.config.json` 的 `name` / `description`，让 CAWP 的知识库 catalog（ADR-054）把每个库的身份与覆盖范围注入 agent 的 system prompt，多库并存时模型据此选对库。
 
 ### 修复
+
+- **BGE-M3 运行时 revision 固定（[#121](https://github.com/cregis-dev/anydocs-ask/pull/121)）** — 加载 embedding 模型时显式使用构建配置的 Hugging Face revision，避免重启后静默拉取新权重造成索引漂移。
 
 - **`search` 工具描述不再引用未暴露的 `ask`** —— CAWP 挂载形态只暴露 `search` / `fetch_page`，原描述里「use \`ask\` for that」会误导只看得到 `search` 的 agent。改为「returns passages only，自己成文并引用」。
 
