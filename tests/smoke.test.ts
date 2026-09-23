@@ -23,6 +23,8 @@ import { loadConfig } from '../src/config.ts';
 import { openDatabase } from '../src/db/index.ts';
 import { MockEmbedder } from '../src/embedding/mock.ts';
 import { MockLLM } from '../src/llm/mock.ts';
+import { MockLanguageModelV3 } from 'ai/test';
+import { tailRuns } from '../src/runs/writer.ts';
 
 async function buildProject(): Promise<{ root: string; cleanup: () => Promise<void> }> {
   const root = await fs.mkdtemp(join(tmpdir(), 'anydocs-ask-srv-'));
@@ -122,6 +124,99 @@ test('POST /v1/ask returns 503 while warming', async () => {
     assert.equal(res.status, 503);
   } finally {
     await cleanup();
+  }
+});
+
+test('POST /v1/ask uses the evidence-first agent when enabled', async () => {
+  const { root, cleanup: rmTmp } = await buildProject();
+  const stateRoot = await fs.mkdtemp(join(tmpdir(), 'anydocs-agent-smoke-state-'));
+  const { config } = await loadConfig(root);
+  config.agent.enabled = true;
+  config.llm.model = 'deepseek-flash';
+  let call = 0;
+  const agentModel = new MockLanguageModelV3({
+    doGenerate: (options) => {
+      call++;
+      const usage = {
+        inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+        outputTokens: { total: 5, text: 5, reasoning: 0 },
+      };
+      if (call === 1) {
+        return {
+          content: [{
+            type: 'tool-call',
+            toolCallId: 'catalog-1',
+            toolName: 'browseCatalog',
+            input: JSON.stringify({ lang: 'zh' }),
+          }],
+          finishReason: { unified: 'tool-calls', raw: 'tool-calls' },
+          usage,
+          warnings: [],
+        };
+      }
+      if (call === 2) {
+        return {
+          content: [{
+            type: 'tool-call',
+            toolCallId: 'read-1',
+            toolName: 'readDoc',
+            input: JSON.stringify({ pageId: 'auth', lang: 'zh', mode: 'page' }),
+          }],
+          finishReason: { unified: 'tool-calls', raw: 'tool-calls' },
+          usage,
+          warnings: [],
+        };
+      }
+      const evidenceId = JSON.stringify(options.prompt).match(/ev_[a-f0-9]{20}/)?.[0];
+      assert.ok(evidenceId, 'readDoc result must expose a stable evidence id to the model');
+      return {
+        content: [{ type: 'text', text: `文档说明使用 JWT bearer token 完成鉴权 [${evidenceId}]。` }],
+        finishReason: { unified: 'stop', raw: 'stop' },
+        usage,
+        warnings: [],
+      };
+    },
+  });
+  const runtime = new Runtime({
+    projectRoot: root,
+    stateRoot,
+    config,
+    db: openDatabase({ dbPath: ':memory:' }),
+    embedder: new MockEmbedder(),
+    agentModel,
+    skipWatcher: true,
+  });
+  try {
+    await runtime.start();
+    const app = createApp({ runtime });
+    const res = await app.request('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: '如何鉴权？' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      type: string;
+      answer_md: string;
+      citations: Array<{ page_id: string }>;
+    };
+    assert.equal(body.type, 'answer');
+    assert.match(body.answer_md, /\[cit_1\]/);
+    assert.equal(body.citations[0]?.page_id, 'auth');
+    assert.equal(call, 3);
+    const run = tailRuns({ stateRoot, count: 1 })[0];
+    assert.ok(run && !('type' in run));
+    if (run && !('type' in run)) {
+      assert.deepEqual(run.retrieval.agent?.tool_calls.map((entry) => entry.tool), [
+        'browseCatalog',
+        'readDoc',
+      ]);
+      assert.equal(run.retrieval.agent?.evidence.length, 1);
+    }
+  } finally {
+    await runtime.stop();
+    await rmTmp();
+    await fs.rm(stateRoot, { recursive: true, force: true });
   }
 });
 

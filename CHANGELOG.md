@@ -6,6 +6,7 @@
 
 ### 新增
 
+- **Evidence-first Agentic RAG（feature flag）** — 新增统一的单 Agent 问答入口与 `lookupExact`、`searchDocs`、`browseCatalog`、`readDoc` 四个进程内只读工具；候选只负责导航，只有读取后的稳定 evidence ID 可以成为引用。工具次数、步骤、超时和读取 token 均有硬预算，完整调用链写入 runs/Langfuse；`agent.enabled=false` 默认保持现有生产行为。
 - **Ragas Context Precision** — 离线评测新增基于人工 Golden reference 的语义 context precision，逐条判断实际生成上下文的相关性与排序，并作为 `ragas_context_precision` 回传 Langfuse；保留确定性的 Context-P@5 用于 page-ID 回归。
 - **可复现、保守融合的 BGE reranker** — 为 `bge-reranker-large` 与 `bge-reranker-v2-m3-ONNX` 固定 Hugging Face revision，并新增 `BGE_RERANKER_REVISION` 覆盖，避免模型仓库更新造成排序漂移。Cregis 92-case A/B 最终采用 large：只重排前 8 个候选，以 0.6 cross-encoder / 0.4 原始 RRF 做 reciprocal-rank 融合，避免精确 API 路径、错误码与字段名命中被纯语义排序降级；reranker 仍默认关闭。
 

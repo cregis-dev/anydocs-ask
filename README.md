@@ -379,6 +379,16 @@ the runtime workspace under `<workspace>/state/<projectId>/golden/cases.jsonl`.
     "historyTurns": 3                  // history 拼进 prompt 的最近轮数 [1, 20]
   },
 
+  // 证据优先的单 Agent 问答（默认 OFF）；ANYDOCS_AGENT_ENABLED=1 可覆盖
+  "agent": {
+    "enabled": false,
+    "maxSteps": 5,
+    "maxDiscoveryCalls": 2,
+    "maxReadCalls": 3,
+    "maxSupplementalSearchCalls": 1,
+    "readTokenLimit": 3300
+  },
+
   // RFC 0005 — citation 语义校验（异步 fire-and-forget，复用主 LLM）
   "citationSemanticCheck": {
     "enabled": false,
@@ -434,7 +444,7 @@ pnpm typecheck
 pnpm build                               # 输出到 dist/
 ```
 
-依赖：Node ≥ 20，pnpm ≥ 8。实现进度与变更历史见 [`CHANGELOG.md`](./CHANGELOG.md)。
+依赖：Node ≥ 22，pnpm ≥ 8。实现进度与变更历史见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
 ## 许可证
 

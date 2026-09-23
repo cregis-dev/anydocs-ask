@@ -130,6 +130,33 @@ export type AskTrace = {
    *  filter / group on multi-turn calls without re-joining on session_id.
    *  Undefined / 0 on single-turn or `multiTurn.enabled=false` paths. */
   history_window?: number;
+  /** Evidence-first Agentic RAG diagnostics. Present only when the candidate
+   *  implementation handled this request; additive for runs compatibility. */
+  agent?: {
+    steps: number;
+    tool_calls: Array<{
+      tool: string;
+      ok: boolean;
+      duration_ms: number;
+      result_count?: number;
+      error_code?: string;
+    }>;
+    evidence: Array<{
+      evidence_id: string;
+      page_id: string;
+      lang: DocsLang;
+      mode: string;
+      selector: string | null;
+      token_count: number;
+      truncated: boolean;
+      content_hash: string;
+    }>;
+    budget: {
+      discovery: { used: number; limit: number };
+      read: { used: number; limit: number };
+      supplemental: { used: number; limit: number };
+    };
+  };
 };
 
 export type AskStageTimings = {

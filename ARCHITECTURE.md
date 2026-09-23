@@ -604,7 +604,7 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
 
 | 维度 | 选择 | 备注 |
 |---|---|---|
-| 语言 / 运行时 | TypeScript / Node 20+ | 与 anydocs 同栈 |
+| 语言 / 运行时 | TypeScript / Node 22+ | 与 AI SDK 7、CI 和 Docker 运行时对齐 |
 | HTTP | Hono | 轻量；与 Cloudflare/Vercel 生态友好（v2 云部署伏笔） |
 | 存储 | SQLite + sqlite-vec + FTS5 | 单文件，零运维；100k chunk 内性能足够 |
 | Embedding（默认） | **bge-m3**（@xenova/transformers，本地） | 多语言，1024 维 fp32；与 PRD §4.8 多语言策略配套 |
@@ -683,6 +683,14 @@ v1 锁定算法（按顺序执行，每步输出作下一步输入）：
     "rrfK": 60,
     "maxChunksHardCap": 20
   },
+  "agent": {
+    "enabled": false,
+    "maxSteps": 5,
+    "maxDiscoveryCalls": 2,
+    "maxReadCalls": 3,
+    "maxSupplementalSearchCalls": 1,
+    "readTokenLimit": 3300
+  },
   "server": {
     "host": "127.0.0.1",
     "port": 3100,
@@ -709,6 +717,8 @@ LLM API key **仅从环境变量读取**，不写配置文件。配置里只写 
 `fastPathMaxChars` 的问题，以及带明确 endpoint / 错误码 / 异常名的问题跳过 Router LLM。
 其余路由结果按脱敏后的问题、语言和最近三轮历史的 SHA-256 键做进程内 TTL/LRU 缓存。
 设 `fastPathMaxChars = 0` 可关闭快路径，设 `cacheTtlMs = 0` 可关闭缓存。
+
+`agent.enabled=true`（或环境变量 `ANYDOCS_AGENT_ENABLED=1`）后，所有问答入口改走证据优先的单 Agent。Agent 先用精确匹配、混合检索或目录定位页面，再通过受 token 上限约束的规范读取取得 evidence；候选 snippet 不可直接引用。各类调用预算独立计数，触顶即由工具执行层拒绝，不依赖模型自律。该开关默认关闭，供离线 A/B 和灰度使用。
 
 `prompt` 是项目级追加说明：`assistantName` 只替换助手身份文案，`systemInstructions` 按行追加到 system prompt 末尾。它不能覆盖核心规则：答案仍必须只基于检索片段、必须内联 `[cit_N]` 引用、不能编造代码/API/路径。为控制 token 体积，加载和 Console 保存都会规范化空白字符，并限制 `assistantName` 最多 80 字符、`systemInstructions` 最多 20 条、每条最多 500 字符；被截断或忽略的内容会进入 warning。
 

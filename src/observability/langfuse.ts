@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { redactSensitiveText } from '../query/diagnostic-input.ts';
 
-type ObservationType = 'span' | 'generation' | 'embedding' | 'retriever';
+type ObservationType = 'span' | 'agent' | 'tool' | 'generation' | 'embedding' | 'retriever';
 
 export type Observation = {
   update(attributes: Record<string, unknown>): void;
@@ -18,6 +18,7 @@ type LangfuseState = {
 };
 
 let state: LangfuseState | null = null;
+let aiSdkTelemetryRegistered = false;
 
 export type LangfuseLifecycle = {
   enabled: boolean;
@@ -31,6 +32,7 @@ export type TraceTurnOptions = {
   question: string;
   currentPageId?: string | null;
   dryRun?: boolean;
+  agentic?: boolean;
 };
 
 export type TraceTurnResult<T> = {
@@ -54,12 +56,21 @@ export async function startLangfuseObservability(): Promise<LangfuseLifecycle> {
   try {
     // Import after loadConfig() has loaded the project env file. Both clients
     // read LANGFUSE_* values during construction.
-    const [{ NodeSDK }, { LangfuseSpanProcessor }, tracing, { LangfuseClient }] =
+    const [
+      { NodeSDK },
+      { LangfuseSpanProcessor },
+      tracing,
+      { LangfuseClient },
+      { registerTelemetry },
+      { LangfuseVercelAiSdkIntegration },
+    ] =
       await Promise.all([
         import('@opentelemetry/sdk-node'),
         import('@langfuse/otel'),
         import('@langfuse/tracing'),
         import('@langfuse/client'),
+        import('ai'),
+        import('@langfuse/vercel-ai-sdk'),
       ]);
     const baseUrl = process.env.LANGFUSE_BASE_URL?.trim();
     const processor = new LangfuseSpanProcessor({
@@ -71,6 +82,10 @@ export async function startLangfuseObservability(): Promise<LangfuseLifecycle> {
     });
     const sdk = new NodeSDK({ spanProcessors: [processor] });
     sdk.start();
+    if (!aiSdkTelemetryRegistered) {
+      registerTelemetry(new LangfuseVercelAiSdkIntegration());
+      aiSdkTelemetryRegistered = true;
+    }
     const client = new LangfuseClient({
       publicKey,
       secretKey,
@@ -98,7 +113,12 @@ export async function traceAskTurn<T>(
   const current = state;
   if (!current) return { value: await fn(), traceId: null };
 
-  const run = () => current.tracing.startActiveObservation(
+  const start = current.tracing.startActiveObservation as unknown as (
+    observationName: string,
+    callback: (observation: Observation) => Promise<TraceTurnResult<T>>,
+    options?: { asType: ObservationType },
+  ) => Promise<TraceTurnResult<T>>;
+  const run = () => start(
     'answer-docs-question',
     async (observation) => {
       observation.update({
@@ -120,6 +140,7 @@ export async function traceAskTurn<T>(
         throw err;
       }
     },
+    { asType: options.agentic ? 'agent' : 'span' },
   );
 
   return current.tracing.propagateAttributes(
@@ -131,7 +152,7 @@ export async function traceAskTurn<T>(
         source: options.source,
         dry_run: String(options.dryRun === true),
       },
-      tags: ['rag', options.source, ...(options.dryRun ? ['dry-run'] : [])],
+      tags: [options.agentic ? 'agentic-rag' : 'rag', options.source, ...(options.dryRun ? ['dry-run'] : [])],
     },
     run,
   );

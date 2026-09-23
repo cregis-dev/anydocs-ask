@@ -57,6 +57,34 @@ export type RunRetrievalTrace = {
   router_strategy?: 'fast_path' | 'cache' | 'llm' | 'fallback' | 'disabled';
   /** Per-stage wall-clock timings. Absent on runs written before this field existed. */
   timings?: RunStageTimings;
+  /** Evidence-first Agent diagnostics. Absent on legacy RAG runs. */
+  agent?: RunAgentTrace;
+};
+
+export type RunAgentTrace = {
+  steps: number;
+  tool_calls: Array<{
+    tool: string;
+    ok: boolean;
+    duration_ms: number;
+    result_count?: number;
+    error_code?: string;
+  }>;
+  evidence: Array<{
+    evidence_id: string;
+    page_id: string;
+    lang: string;
+    mode: string;
+    selector: string | null;
+    token_count: number;
+    truncated: boolean;
+    content_hash: string;
+  }>;
+  budget: {
+    discovery: { used: number; limit: number };
+    read: { used: number; limit: number };
+    supplemental: { used: number; limit: number };
+  };
 };
 
 export type RunStageTimings = {

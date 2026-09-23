@@ -88,7 +88,7 @@ flowchart LR
 
 ### 4.2 硬边界与降级
 
-初始预算是待测配置，而不是已验证的最优值：最多 2 次发现调用、2 次阅读调用、1 次定向补查、最多 5 次模型生成步骤；工具执行层另设单请求时间、累计上下文 token、输出 token 和并发上限。并行工具调用也要合计预算，不能只依赖 SDK 的 `stopWhen` 或网关参数。触顶时使用**已经核对过的证据**作简短答复；未覆盖的事实明说未知，绝不回退到无证据的旧 RAG 自由生成。
+初始预算是待测配置，而不是已验证的最优值：最多 2 次发现调用、3 次阅读调用、1 次定向补查、最多 5 次模型生成步骤；工具执行层另设单请求时间、累计上下文 token、输出 token 和并发上限。并行工具调用也要合计预算，不能只依赖 SDK 的 `stopWhen` 或网关参数。触顶时使用**已经核对过的证据**作简短答复；未覆盖的事实明说未知，绝不回退到无证据的旧 RAG 自由生成。
 
 工具超时、索引不可用、页面版本不一致、模型未调用工具、引用校验失败都有显式状态。可以对瞬时只读错误作一次受控重试；仍失败则返回可观察的部分结果/错误。流式接口只向用户推最终答案和状态，不泄露中间规划文本；在证据校验前不先流出无法撤回的事实断言。
 
@@ -121,7 +121,7 @@ flowchart LR
 
 选**单 Agent + 受控工具循环**，首选 AI SDK 的 `ToolLoopAgent`；其多步工具、`stopWhen` 与 `prepareStep` 能覆盖本方案，而执行层仍要自行限制调用和时间。现有 `src/llm/types.ts` 只有文本 `generate/streamGenerate`，不能直接承载工具调用；新增 tool-capable adapter，旧接口保留给其他用途。POC 已用 Anthropic 兼容网关验证 `deepseek-flash` 的工具调用与多步流程，但只覆盖一个真实文档问题，不构成生产质量/延迟证明。[AI SDK 工具循环说明](https://ai-sdk.dev/docs/agents/building-agents)。
 
-POC 验证版本为 `ai@7.0.111`、`@ai-sdk/anthropic@4.0.60`；第一阶段依赖以这些版本做可复现起点，实施前核对锁文件、provider 行为与安全更新。项目当前声明 Node `>=20`，而 POC 环境使用 Node 22；必须先做 Node 20/22 的 CI 与容器兼容矩阵，**不能仅凭 POC 直接升级运行时或发布依赖**。网关的 thinking/tool-choice 兼容性及 `disableParallelToolUse` 表现也要作为集成测试，而非依赖提示词假设。
+实现固定使用 `ai@7.0.111`、`@ai-sdk/anthropic@4.0.60` 和 Node `>=22`；仓库 CI 与 Docker 本就运行 Node 22/24，因此包声明已与实际运行时对齐。网关的 thinking/tool-choice 兼容性及 `disableParallelToolUse` 表现仍须通过真实端到端探针与集成测试确认，而不能只依赖提示词假设。
 
 Langfuse 继续使用仓库已固定的 `@langfuse/client`、`@langfuse/otel`、`@langfuse/tracing@5.11.1`；如采用 AI SDK 原生 telemetry，拟增配相同版本的 `@langfuse/vercel-ai-sdk`，实施前核实 peer dependencies 和实际 trace 树，避免重复上报。优先框架集成捕获模型/usage，业务证据链补手工 observation。[Langfuse AI SDK 集成](https://langfuse.com/docs/observability/get-started)。
 
@@ -182,6 +182,14 @@ Langfuse 继续使用仓库已固定的 `@langfuse/client`、`@langfuse/otel`、
 - **API 路径/版本识别**：需要处理“用户给的是示例路径”与“用户明确指定版本”的差异，避免硬过滤掉正确证据。
 - **Judge 可靠性**：部分低分是长答案/指标口径问题，不要为追分引入错误的文档或过度规则。
 - **Langfuse 数据安全**：精确记录证据足以复盘，但不能把 API key、日志原文和敏感用户字段写进 trace。
-- **依赖兼容**：AI SDK 7/Node 20 声明、Anthropic 兼容网关、OTel/Langfuse 版本组合需在实施前以锁文件和端到端 trace 实测。
+- **依赖兼容**：AI SDK 7/Node 22、Anthropic 兼容网关、OTel/Langfuse 版本组合已锁定，仍需在发布前用真实端到端 trace 复核。
+
+## 12. 当前实现状态
+
+第一阶段已落地为 feature flag：`agent.enabled=false` 保持现有生产行为，启用后 `/v1/ask`、SSE、Reader、Console 与 MCP `ask` 共用单 Agent 入口。Agent 暴露 `lookupExact`、`searchDocs`、`browseCatalog`、`readDoc` 四个进程内只读工具，执行层独立限制 discovery/read/supplemental-search 次数，并以稳定 `evidence_id` 校验最终引用。
+
+短页面按结构化 parent 去重后整页读取，长页面支持 section/field 定向读取并受 token 上限约束；候选 snippet 不能直接成为引用。Langfuse 顶层记录为 `agent`，每次发现/读取记录为 `retriever`，AI SDK telemetry 记录模型和 tool loop。SSE 首版在引用校验完成后发送一次答案 delta，暂不流出未经验证的中间文本。
+
+当前实现仍属于可运行的垂直切片，不等于已过生产闸门。下一步必须对第 9 节阻断集和固定 92 条 Golden 做旧管线/Agent A/B，并补齐 `required_fact` 覆盖统计、Agent query vector 对反馈链路的兼容，以及真实网关下的延迟/成本分布。
 
 本方案的第一项工程工作应是**阶段 0 + 阶段 1 的只读工具垂直切片**，用上述 8 类阻断题证明“找得到且读得全”；之后再接 Agent 循环与回答评测。这样可以明确新收益来自证据发现、证据阅读，还是最终生成，而不是只得到一个难解释的新总分。
