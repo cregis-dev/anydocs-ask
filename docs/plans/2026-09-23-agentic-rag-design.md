@@ -190,6 +190,31 @@ Langfuse 继续使用仓库已固定的 `@langfuse/client`、`@langfuse/otel`、
 
 短页面按结构化 parent 去重后整页读取，长页面支持 section/field 定向读取并受 token 上限约束；候选 snippet 不能直接成为引用。Langfuse 顶层记录为 `agent`，每次发现/读取记录为 `retriever`，AI SDK telemetry 记录模型和 tool loop。SSE 首版在引用校验完成后发送一次答案 delta，暂不流出未经验证的中间文本。
 
-当前实现仍属于可运行的垂直切片，不等于已过生产闸门。下一步必须对第 9 节阻断集和固定 92 条 Golden 做旧管线/Agent A/B，并补齐 `required_fact` 覆盖统计、Agent query vector 对反馈链路的兼容，以及真实网关下的延迟/成本分布。
+当前实现仍属于可运行的垂直切片，不等于已过生产闸门。固定 92 条 Golden 的旧管线/Agent A/B 已完成；结果见第 13 节。下一步需补齐 `required_fact` 覆盖检查、Agent query vector 对反馈链路的兼容，并优化真实网关下的延迟和 token 成本。
 
-本方案的第一项工程工作应是**阶段 0 + 阶段 1 的只读工具垂直切片**，用上述 8 类阻断题证明“找得到且读得全”；之后再接 Agent 循环与回答评测。这样可以明确新收益来自证据发现、证据阅读，还是最终生成，而不是只得到一个难解释的新总分。
+阶段 0、阶段 1 与首个 Agent 垂直切片已经落地，完整 A/B 也验证了收益主要来自证据发现和精确阅读。后续仍按同一原则迭代：每次只改变证据覆盖、生成约束或工具成本中的一个变量，并复用相同 Golden 做配对评测，避免只得到难解释的新总分。
+
+## 13. 92 条 Golden A/B 结论
+
+2026-09-23 已在相同 Golden、索引、回答模型和 Judge 条件下完成现有 RAG 与 Agentic RAG 的完整对照。两组均完成 92/92 条回答，Ragas Judge 无执行错误。Agent 的确定性指标按最终 `selected_context` 证据账本计算，不能用工具循环中累计出现的 `fused` 搜索候选代替。
+
+| 指标 | 现有 RAG | Agentic RAG | 变化 |
+| --- | ---: | ---: | ---: |
+| Ragas Context Precision | 0.679 | 0.945 | +26.6pp |
+| Ragas Context Recall | 0.808 | 0.797 | -1.1pp |
+| Ragas Faithfulness | 0.935 | 0.910 | -2.5pp |
+| Ragas Rubric Compliance | 0.820 | 0.880 | +6.0pp |
+| Hit@1 | 0.707 | 0.902 | +19.6pp |
+| Hit@5 | 0.957 | 0.978 | +2.2pp |
+| Context-P@5 | 0.757 | 0.928 | +17.1pp |
+| Unexpected Citation Rate | 0.260 | 0.072 | -18.8pp |
+
+POC 已证明 Agent 能显著收敛证据范围、提高权威页面的首位命中，并解决 `/address/inner`、`sub_address_withdrawal`、订单金额范围和 payout 签名原串等既有失败题。但它平均使用 3.16 个步骤、约 3.98 次工具调用，平均延迟由 2.26 秒增至 4.14 秒，平均输入 token 由 5.4k 增至 12.5k。最终证据文本虽减少约 55%，工具 schema、历史和中间结果仍造成较高开销。
+
+当前不应直接开启生产默认开关。下一阶段集中做三项改造：
+
+1. 在回答前维护精简的 `required_facts` 清单，只为 `missing` 子问题补查，解决“读得准但读不全”；
+2. 对最终 claim 做 evidence binding，禁止把合理常识写成未被文档支持的确定结论；
+3. 压缩 `searchDocs`/`readDoc` 返回值和工具历史，明确路径问题优先走 `lookupExact -> readDoc`。
+
+另有两条 Golden 需要先校准：`cregis-tokens-zh-usdt-network-choice` 未明确产品域，`cregis-tokens-en-testnet-mainnet-separation` 的允许引用页不完整。修订后应固定新的 Golden hash，并用相同 92 条重新执行配对实验。建议下一轮在保持 Context Precision `>=0.90`、Rubric `>=0.88` 和非预期引用率 `<=0.10` 的同时，将 Context Recall 恢复到 `>=0.80`、Faithfulness 恢复到 `>=0.925`，并把 p95 延迟压到 5 秒、平均输入 token 压到 8k 左右，再进入影子流量。

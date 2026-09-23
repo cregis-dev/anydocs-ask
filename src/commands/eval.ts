@@ -93,7 +93,7 @@ export type EvalRagasSample = {
   reference_facts: string[];
   rubric: Record<string, string>;
   /** Full redacted prompt snapshot is preferred; preview is test/legacy fallback. */
-  context_source: 'prompt_snapshot' | 'trace_preview' | 'none';
+  context_source: 'prompt_snapshot' | 'agent_evidence' | 'trace_preview' | 'none';
 };
 
 export type RetrievalEvalCaseTraceRecord = {
@@ -210,7 +210,19 @@ export async function runEval(opts: EvalOptions): Promise<number> {
   opts.onProgress?.({ type: 'warm', bootMs: start.boot_ms, chunks: start.initialIndex.chunks.totalChunks });
 
   // 3. Run cases.
-  const deps = askDepsForRetrievalEval(runtime, { noRouter: opts.retrievalNoRouter === true });
+  const agentEnabled = runtime.config.agent.enabled;
+  // The Agent owns its evidence-search dependencies. Supplying retrieval-only
+  // deps here keeps the retry harness type-safe without constructing the
+  // legacy answer/router LLMs on an Agent eval run.
+  const deps = agentEnabled
+    ? askDepsForRetrievalEval(runtime, { noRouter: true })
+    : askDepsForEval(runtime);
+  const askOnce: EvalAskFn = agentEnabled
+    ? (_deps, req) => runtime.agentRunner.ask(req)
+    : askWithTraceForEval;
+  process.stdout.write(
+    `anydocs-ask eval: execution mode=${agentEnabled ? 'agent' : 'legacy'}\n`,
+  );
   const results: CaseResult[] = [];
   const caseTraces: EvalCaseTraceRecord[] = [];
   for (let i = 0; i < cases.length; i++) {
@@ -224,7 +236,7 @@ export async function runEval(opts: EvalOptions): Promise<number> {
     let traced;
     let caseResult: CaseResult;
     try {
-      traced = await runEvalCaseWithRetries(c, deps);
+      traced = await runEvalCaseWithRetries(c, deps, askOnce);
       caseResult = scoreCase(c, traced.result, traced.trace);
       caseResult.latency_ms = Math.round(performance.now() - t1);
     } catch (err) {
@@ -394,7 +406,12 @@ export async function runEvalCaseWithRetries(
 }
 
 export function shouldRetryEvalResult(result: AskResult): boolean {
-  return result.type === 'error' && (result.code === 'llm_failed' || result.code === 'no_citations');
+  return result.type === 'error' && (
+    result.code === 'llm_failed' ||
+    result.code === 'no_citations' ||
+    result.code === 'agent_failed' ||
+    result.code === 'agent_invalid_citations'
+  );
 }
 
 function delay(ms: number): Promise<void> {
@@ -530,7 +547,9 @@ export function buildRagasSample(
     context_source: snapshotContexts.length > 0
       ? 'prompt_snapshot'
       : previewContexts.length > 0
-        ? 'trace_preview'
+        ? trace?.agent
+          ? 'agent_evidence'
+          : 'trace_preview'
         : 'none',
   };
 }

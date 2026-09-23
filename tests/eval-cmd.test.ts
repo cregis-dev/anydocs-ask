@@ -85,6 +85,9 @@ test('evalAskModeForDeps prefers streaming when the configured LLM supports it',
 test('shouldRetryEvalResult retries only transient generation failures', () => {
   assert.equal(shouldRetryEvalResult({ type: 'error', code: 'llm_failed', message: 'temporary' }), true);
   assert.equal(shouldRetryEvalResult({ type: 'error', code: 'no_citations', message: 'temporary' }), true);
+  assert.equal(shouldRetryEvalResult({ type: 'error', code: 'agent_failed', message: 'temporary' }), true);
+  assert.equal(shouldRetryEvalResult({ type: 'error', code: 'agent_invalid_citations', message: 'temporary' }), true);
+  assert.equal(shouldRetryEvalResult({ type: 'error', code: 'agent_no_evidence', message: 'missing evidence' }), false);
   assert.equal(shouldRetryEvalResult({ type: 'error', code: 'invalid_question', message: 'bad input' }), false);
   assert.equal(shouldRetryEvalResult({ type: 'answer', answer_id: 'a', answer_lang: 'en', answer_md: 'ok [cit_1]', citations: [], used_chunks: 1, model: 'm', latency_ms: 1 }), false);
 });
@@ -327,6 +330,101 @@ test('writeCaseTraceJsonl persists per-case result, score, and retrieval trace w
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('buildEvalCaseTraceRecord labels complete Agent evidence as generation context', () => {
+  const c = {
+    id: 'agent-case',
+    query: 'What is the exact signature order?',
+    lang: 'en',
+    filters: {},
+    expected: { must_cite_pages: [], must_contain: [], forbid_contain: [] },
+  };
+  const caseResult = {
+    case_id: c.id,
+    query: c.query,
+    kind: 'answer',
+    expected_kind: 'answer',
+    kind_pass: true,
+    hit_at_5: true,
+    hit_at_1: true,
+    hit_at_3: true,
+    mrr: 1,
+    context_precision_at_5: 1,
+    citation_anchor_pass: true,
+    unexpected_citation_pages: [],
+    unexpected_citation_rate: 0,
+    answer_rule_pass: true,
+    api_rule_pass: null,
+    retrieval_content_pass: null,
+    retrieved_pages_top5: [],
+    cited_pages: [],
+    missing_must_contain: [],
+    missing_must_contain_regex: [],
+    missing_must_retrieve_regex: [],
+    hit_forbid_contain: [],
+    hit_forbid_contain_regex: [],
+    missing_must_cite_operations: [],
+    missing_must_cite_urls: [],
+    error_code: null,
+    error_message: null,
+    error_detail: null,
+    latency_ms: 1,
+  };
+  const traced = {
+    result: {
+      type: 'answer',
+      answer_id: 'ans-agent',
+      answer_lang: 'en',
+      answer_md: 'Sorted evidence.',
+      citations: [],
+      used_chunks: 1,
+      model: 'mock',
+      latency_ms: 1,
+    },
+    trace: {
+      fused: [],
+      selected_context: [{
+        chunk_id: 1,
+        page_id: 'waas-authentication',
+        lang: 'en',
+        page_title: 'Authentication',
+        page_url: '/en/waas-authentication',
+        in_page_path: 'signature',
+        text_preview: 'Complete evidence body.',
+        rrf_score: 0,
+        final_score: 0,
+        vec_rank: null,
+        bm25_rank: null,
+        exact_rank: null,
+        nav_index: null,
+        context_rank: 1,
+        context_token_count: 3,
+        expanded_parent: null,
+      }],
+      subtree_ask_triggered: false,
+      top_final_score: 0,
+      timings: { router_ms: 0, embedding_ms: 0, retrieval_ms: 0, rerank_ms: 0, generation_ms: 1 },
+      tokens_in: 10,
+      tokens_out: 2,
+      agent: {
+        steps: 2,
+        tool_calls: [],
+        evidence: [],
+        budget: {
+          discovery: { used: 1, limit: 2 },
+          read: { used: 1, limit: 3 },
+          supplemental: { used: 0, limit: 1 },
+        },
+      },
+    },
+    queryVector: null,
+  };
+
+  const record = buildEvalCaseTraceRecord({ c, index: 0, total: 1, caseResult, traced });
+
+  assert.equal(record.ragas_sample.context_source, 'agent_evidence');
+  assert.deepEqual(record.ragas_sample.retrieved_contexts, ['Complete evidence body.']);
 });
 
 test('renderReport separates core quality, retrieval diagnostics, citation calibration, and answer text diagnostics', () => {

@@ -8,7 +8,7 @@ export type CaseResult = {
   kind: 'answer' | 'clarify' | 'error';
   expected_kind: 'answer' | 'clarify' | 'error';
   kind_pass: boolean;
-  /** Any page represented by the top-5 fused chunks is in the must-cite OR-set. */
+  /** Any page represented by the top-5 scored contexts is in the must-cite OR-set. */
   hit_at_5: boolean;
   /** Top-ranked unique page is in must_cite_pages. */
   hit_at_1: boolean;
@@ -16,12 +16,13 @@ export type CaseResult = {
   hit_at_3: boolean;
   /**
    * Mean Reciprocal Rank of the first must-cite page over unique pages in the
-   * fused trace (1 / position; 0 when no must-cite page appears anywhere in
-   * the trace). Position is 1-indexed.
+   * scored context sequence (1 / position; 0 when no must-cite page appears
+   * anywhere in the sequence). Position is 1-indexed. Legacy runs score fused
+   * retrieval; Agent runs score the readDoc evidence sent to generation.
    */
   mrr: number;
   /**
-   * Fraction of the retrieved top-5 chunks whose page is in
+   * Fraction of the top-5 scored contexts whose page is in
    * must_cite ∪ allow_cite (the denominator is smaller when fewer are returned).
    * Continuous signal that Hit@K can't give — exposes top-K noise
    * even when at least one correct page is present.
@@ -116,17 +117,25 @@ export function scoreCase(c: GoldenCase, result: AskResult, trace: AskTrace): Ca
     ...(c.expected.allow_cite_pages ?? []),
   ]);
 
-  // Page-level metrics work over the unique-page sequence — top-5 chunks may
+  // Agent fused candidates are navigation hints accumulated across multiple
+  // searches. They are not the generation context. Score the authoritative
+  // readDoc evidence instead, while preserving historical fused scoring for
+  // the single-pass legacy pipeline.
+  const scoredContexts = trace.agent && trace.selected_context?.length
+    ? trace.selected_context
+    : trace.fused;
+
+  // Page-level metrics work over the unique-page sequence — top-5 contexts may
   // resolve to fewer than 5 unique pages. Chunk-level metrics (context-P@5)
   // work over the raw chunk sequence so they see top-K noise even when all
   // chunks happen to come from the same page.
-  const uniquePagesInOrder = uniqueOrdered(trace.fused.map((f) => f.page_id));
-  const top5Pages = uniqueOrdered(trace.fused.slice(0, 5).map((f) => f.page_id));
+  const uniquePagesInOrder = uniqueOrdered(scoredContexts.map((f) => f.page_id));
+  const top5Pages = uniqueOrdered(scoredContexts.slice(0, 5).map((f) => f.page_id));
   const hit_at_5 = top5Pages.some((p) => mustPages.has(p));
   const hit_at_1 = uniquePagesInOrder.length > 0 && mustPages.has(uniquePagesInOrder[0]!);
   const hit_at_3 = uniquePagesInOrder.slice(0, 3).some((p) => mustPages.has(p));
   const mrr = computeMrr(uniquePagesInOrder, mustPages);
-  const top5Chunks = trace.fused.slice(0, 5);
+  const top5Chunks = scoredContexts.slice(0, 5);
   const context_precision_at_5 = computeContextPrecision(top5Chunks, allowedCitationPages);
   const retrievalContent = scoreRetrievalContent(c, top5Chunks);
 

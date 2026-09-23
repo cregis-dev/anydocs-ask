@@ -20,11 +20,14 @@ def publish_experiment(
         environment="evaluation",
         release=str(metadata.get("release") or "unknown"),
     )
-    _ensure_dataset(langfuse, dataset_name, golden_hash)
+    existing_item_ids = _ensure_dataset(langfuse, dataset_name, golden_hash)
     for case_id, sample in samples_by_id.items():
+        item_id = str(uuid5(NAMESPACE_URL, f"{dataset_name}:{case_id}"))
+        if item_id in existing_item_ids:
+            continue
         langfuse.create_dataset_item(
             dataset_name=dataset_name,
-            id=str(uuid5(NAMESPACE_URL, f"{dataset_name}:{case_id}")),
+            id=item_id,
             input={
                 "case_id": case_id,
                 "user_input": sample["user_input"],
@@ -54,7 +57,7 @@ def publish_experiment(
         result = results_by_id[str(input["case_id"])]
         return _evaluations_for_result(result)
 
-    dataset = langfuse.get_dataset(dataset_name)
+    dataset = langfuse.get_dataset(dataset_name, fetch_items_page_size=100)
     experiment = dataset.run_experiment(
         name=experiment_name,
         run_name=experiment_name,
@@ -87,12 +90,20 @@ def _evaluations_for_result(result: dict[str, Any]) -> list[Any]:
     ]
 
 
-def _ensure_dataset(langfuse: Any, dataset_name: str, golden_hash: str) -> None:
+def _ensure_dataset(
+    langfuse: Any,
+    dataset_name: str,
+    golden_hash: str,
+) -> set[str]:
     from langfuse.api.core.api_error import ApiError
 
     try:
-        langfuse.get_dataset(dataset_name, fetch_items_page_size=1)
-        return
+        dataset = langfuse.get_dataset(dataset_name, fetch_items_page_size=100)
+        return {
+            str(item.id)
+            for item in dataset.items
+            if getattr(item, "id", None) is not None
+        }
     except ApiError as error:
         if error.status_code != 404:
             raise
@@ -107,3 +118,4 @@ def _ensure_dataset(langfuse: Any, dataset_name: str, golden_hash: str) -> None:
         # Another evaluator may have created the same hash-versioned dataset.
         if error.status_code != 409:
             raise
+    return set()

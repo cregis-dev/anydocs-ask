@@ -86,6 +86,17 @@ def extract_sample(record: dict[str, Any]) -> EvalSample:
     if isinstance(raw, dict):
         contexts = _string_list(raw.get("retrieved_contexts"))
         facts = _string_list(raw.get("reference_facts"))
+        context_source = _optional_string(raw.get("context_source")) or "none"
+        trace = record.get("trace")
+        if (
+            context_source == "trace_preview"
+            and isinstance(trace, dict)
+            and isinstance(trace.get("agent"), dict)
+            and contexts
+        ):
+            # Agent selected_context contains the complete readDoc evidence
+            # sent to generation, not a truncated diagnostic preview.
+            context_source = "agent_evidence"
         return EvalSample(
             case_id=_required_string(record.get("case_id"), "case_id"),
             user_input=_required_string(raw.get("user_input"), "ragas_sample.user_input"),
@@ -94,7 +105,7 @@ def extract_sample(record: dict[str, Any]) -> EvalSample:
             reference=_optional_string(raw.get("reference")),
             reference_facts=facts,
             rubric=_string_dict(raw.get("rubric")),
-            context_source=_optional_string(raw.get("context_source")) or "none",
+            context_source=context_source,
             lang=_optional_string(record.get("lang")) or "unknown",
         )
 
@@ -148,7 +159,10 @@ def _extract_legacy_sample(record: dict[str, Any]) -> EvalSample:
 
 def coverage(samples: list[EvalSample]) -> dict[str, int | float]:
     total = len(samples)
-    full_context = sum(sample.context_source == "prompt_snapshot" for sample in samples)
+    full_context = sum(
+        sample.context_source in {"prompt_snapshot", "agent_evidence"}
+        for sample in samples
+    )
     references = sum(sample.reference is not None for sample in samples)
     answers = sum(sample.response is not None for sample in samples)
     rubrics = sum(bool(sample.rubric) for sample in samples)

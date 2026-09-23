@@ -148,6 +148,57 @@ test('scoreCase computes MRR / Hit@K / context_precision over the fused trace', 
   );
 });
 
+test('scoreCase uses final Agent evidence instead of accumulated navigation candidates', () => {
+  const c = golden({
+    expected: {
+      must_cite_pages: ['payment-engine-api'],
+      must_contain: [],
+      forbid_contain: [],
+      must_retrieve_regex: ['valid_time'],
+    },
+  });
+  const agentTrace: AskTrace = {
+    ...trace(['noise-1', 'noise-2', 'noise-3', 'noise-4', 'noise-5']),
+    selected_context: [{
+      chunk_id: 10,
+      page_id: 'payment-engine-api',
+      lang: 'en',
+      page_title: 'Payment Engine API',
+      page_url: '/en/payment-engine-api',
+      in_page_path: 'request/valid_time',
+      text_preview: 'valid_time is the payment window in minutes',
+      rrf_score: 0,
+      final_score: 0,
+      vec_rank: null,
+      bm25_rank: null,
+      exact_rank: null,
+      nav_index: null,
+      context_rank: 1,
+      context_token_count: 8,
+      expanded_parent: null,
+    }],
+    agent: {
+      steps: 3,
+      tool_calls: [],
+      evidence: [],
+      budget: {
+        discovery: { used: 1, limit: 2 },
+        read: { used: 1, limit: 3 },
+        supplemental: { used: 0, limit: 1 },
+      },
+    },
+  };
+
+  const scored = scoreCase(c, answer(), agentTrace);
+
+  assert.equal(scored.hit_at_1, true);
+  assert.equal(scored.hit_at_5, true);
+  assert.equal(scored.mrr, 1);
+  assert.equal(scored.context_precision_at_5, 1);
+  assert.equal(scored.retrieval_content_pass, true);
+  assert.deepEqual(scored.retrieved_pages_top5, ['payment-engine-api']);
+});
+
 test('scoreCase MRR / Hit@K are 0/false when no must-cite page appears in the trace', () => {
   const c = golden();
   const scored = scoreCase(c, answer(), trace(['noise-a', 'noise-b', 'noise-c']));
