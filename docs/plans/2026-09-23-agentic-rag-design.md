@@ -228,3 +228,58 @@ POC 已证明 Agent 能显著收敛证据范围、提高权威页面的首位命
 因此，当前 `child top8 -> rerank -> page 去重` 不作为 Agent 默认配置。下一次仅验证页面级方案：先按 `page_id` 去重并回填 12–20 个真实页面候选，再用“标题 + 命中章节 + 最佳 snippet”重排；精确 path、operation、错误码、字段和当前页候选必须 pin/boost，`lookupExact -> readDoc` 不经过语义 reranker。先在 Hit@1 变化题和 recall 回退题上做小样本配对，满足完成率 100%、Hit@1 不低于 `0.90` 且答案指标有实质收益后，才值得重跑完整 92 条。
 
 本轮使用相同 Golden hash 和文档 Git 版本，但重建索引为 84 pages / 768 chunks，上一轮记录为 84 / 767，且旧实验没有保存可核对的 index hash。因此该实验足以否决当前接法的默认启用，不应用于宣称严格可复现的微小百分点提升。下一轮须把 index manifest/hash 纳入实验元数据。完整本地报告位于文档项目忽略目录 `eval/local-reports/agentic-rag-reranker-20260923/`，Langfuse run 为 [agentic-rag-reranker-large-top8-w06-05676bd-20260923](https://jp.cloud.langfuse.com/project/cmu2a8k6q00rkad0d5ryxpy3n/datasets/cmu6djv1p003had0i1nx61bbt/runs/26e31c8b-85ce-43a7-801a-58626419ba25)。
+
+### 13.2 页面级 reranker 复验
+
+针对 13.1 暴露出的“同一页面多个 child 抢占 top8”问题，Agent 的 `searchDocs` 改为以下顺序：
+
+```text
+BM25 / Vector / Exact child candidates
+  -> RRF
+  -> 扩大 child 召回窗口
+  -> 按 page_id 去重，每页保留最佳 child
+  -> 前 8 个真实页面用“标题 + breadcrumb + 命中 section + snippet”重排
+  -> RRF 融合，返回 20 个页面候选
+  -> Agent 选择 readDoc
+```
+
+此改动只影响 Agent 的发现工具；旧问答路径和 MCP `search` 仍沿用原 child 级 reranker。明确 API path、operation ID、错误码、字段以及 `current_page_id` 命中的页面保留原槽位，语义 reranker 只重排其余页面；`lookupExact -> readDoc` 仍不经过语义重排。
+
+先对 92 条 Golden 做不调用回答模型的纯搜索比较，`top8` 优于 `top12`：
+
+| 页面级配置 | Hit@1 | Hit@3 | Hit@5 | MRR | 未命中 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| top8 + 0.6 | 0.696 | 0.935 | 0.989 | 0.821 | 0 |
+| top12 + 0.6 | 0.696 | 0.924 | 0.978 | 0.818 | 0 |
+
+扩大到 12 个页面没有救回新案例，反而让跨产品/相邻主题页面进入重排窗口，因此保留现有 `top8 + 0.6`。这里的 `top8` 已是 8 个不同 page，不再是 8 个可能属于同一 page 的 child。
+
+随后在 84 pages / 768 chunks 的同一索引上跑满 92 条 Agent 端到端评测。与 13.1 的 child 级 reranker 对比：
+
+| 指标 | child top8 | page top8 | 变化 |
+| --- | ---: | ---: | ---: |
+| Hit@1 | 0.870 | 0.924 | +5.4pp |
+| Hit@3 / Hit@5 | 0.978 | 0.978 | 0 |
+| MRR | 0.922 | 0.949 | +2.7pp |
+| Context-P@5 | 0.926 | 0.929 | +0.3pp |
+| Citation Anchor | 0.967 | 0.967 | 0 |
+| 平均延迟 | 4,876ms | 4,652ms | -224ms |
+| p95 延迟 | 7,066ms | 6,994ms | -72ms |
+
+Hit@1 有 7 条改善、2 条回退。错误码优先级、凭证隔离、无效 token 名、API key 安全和 callback URL 等题恢复首位权威页，说明页面级目标与 Agent 后续 `readDoc` 的决策单位一致。两个回退案例是 `cregis-pe-zh-crypto-order-currency` 和 `cregis-setup-en-base-url-per-project`，后续需继续逐题观察，但没有造成 Hit@5 覆盖下降。
+
+Ragas 全量复验完成，92 条均成功评分，五项指标均为 0 errors。与 child 级 reranker 的共同样本配对结果如下：
+
+| 指标 | child top8 | page top8 | 配对变化 |
+| --- | ---: | ---: | ---: |
+| Context Precision | 0.932 | 0.944 | +1.22pp |
+| Context Recall | 0.816 | 0.802 | -1.36pp |
+| Factual Correctness | 0.408 | 0.422 | +1.43pp |
+| Faithfulness | 0.910 | 0.909 | -0.12pp |
+| Rubric Compliance | 0.883 | 0.872 | -1.02pp |
+
+与 Agent 不开 reranker 相比，页面组的 Context Precision `0.945 -> 0.947`、Context Recall `0.797 -> 0.794`、Factual Correctness `0.427 -> 0.416`、Faithfulness `0.910 -> 0.909`、Rubric `0.880 -> 0.875`，应整体解读为持平。页面 reranker 同时使平均延迟 `4.14s -> 4.65s`、p95 `6.19s -> 6.99s`；它改善了首位页面排序，但没有扩大前五覆盖，也没有形成稳定的答案质量收益。
+
+本轮仍有 1 条非检索错误：`cregis-waas-zh-deposit-callback-new-address` 已读取正确的 webhook 与 address/create 页面，但模型连续两次输出了无法映射到 evidence ledger 的引用，最终为 `agent_invalid_citations`。这应通过结构化引用或确定性 citation repair 解决，不能继续调 reranker。另有 2 条 citation-anchor 失败来自 Golden 的产品域/允许引用页歧义，需在下一次严格发布实验前校准。
+
+最终决策是保留页面级实现：只要 Agent 启用 reranker，就使用 page top8，而不再使用 child top8；但 `reranker.enabled` 默认值继续保持 `false`。下一阶段优先做 `required_facts` 缺口补查和 citation binding，完成后再评估页面 reranker 的额外延迟是否值得。完整报告位于忽略目录 `eval/local-reports/agentic-rag-page-reranker-20260923/`，Langfuse run 为 [agent-page-rerank-top8-b139ae5-20260923](https://jp.cloud.langfuse.com/project/cmu2a8k6q00rkad0d5ryxpy3n/datasets/cmu6djv1p003had0i1nx61bbt/runs/039e6462-982a-48bd-85b0-bdc112e275e2)。

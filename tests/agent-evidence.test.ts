@@ -1,9 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { RerankerConfig } from '../src/config.ts';
 import { openDatabase, type DbHandle } from '../src/db/index.ts';
-import { EvidenceService, EvidenceToolError } from '../src/agent/evidence.ts';
+import {
+  EvidenceService,
+  EvidenceToolError,
+  rerankPageCandidates,
+} from '../src/agent/evidence.ts';
 import { MockEmbedder } from '../src/embedding/mock.ts';
 import { MockLLM } from '../src/llm/mock.ts';
+import type { SearchHit } from '../src/query/types.ts';
+import type { Reranker, RerankerInputDoc } from '../src/reranker/types.ts';
 
 function insertPage(
   db: DbHandle,
@@ -58,7 +65,11 @@ function insertChild(
   ).run(pageId, lang, path, text, `child-${lang}-${path}`, parentId, objectPath).lastInsertRowid);
 }
 
-function service(db: DbHandle): EvidenceService {
+function service(
+  db: DbHandle,
+  reranker: Reranker | null = null,
+  rerankerConfig?: RerankerConfig,
+): EvidenceService {
   return new EvidenceService({
     db,
     searchDeps: {
@@ -66,8 +77,51 @@ function service(db: DbHandle): EvidenceService {
       embedder: new MockEmbedder(),
       llm: new MockLLM(),
       intentRouter: null,
+      reranker,
+      rerankerConfig,
     },
   });
+}
+
+function rerankerConfig(overrides: Partial<RerankerConfig> = {}): RerankerConfig {
+  return {
+    enabled: true,
+    provider: 'mock',
+    model: 'test/page-reranker',
+    revision: null,
+    preferQuantized: true,
+    maxLength: 512,
+    rerankTopK: 20,
+    weight: 1,
+    ...overrides,
+  };
+}
+
+class ReverseCaptureReranker implements Reranker {
+  readonly model = 'test/reverse-capture';
+  readonly ready = true;
+  calls: RerankerInputDoc[][] = [];
+
+  async warmUp(): Promise<void> {}
+
+  async rerank(_query: string, docs: RerankerInputDoc[]) {
+    this.calls.push(docs);
+    return docs.map((doc, index) => ({ chunk_id: doc.chunk_id, score: index }));
+  }
+}
+
+function searchHit(pageId: string, rank: number): SearchHit {
+  return {
+    chunk_id: rank,
+    page_id: pageId,
+    lang: 'en',
+    title: `Title ${pageId}`,
+    breadcrumb: [{ id: pageId, title: `Crumb ${pageId}`, type: 'page' }],
+    url: `/en/${pageId}`,
+    snippet: `Snippet for ${pageId}`,
+    in_page_path: `section-${pageId}/p[1]`,
+    score: 1 / rank,
+  };
 }
 
 test('lookupExact preserves API version, language, metadata, and scope', () => {
@@ -146,6 +200,109 @@ test('searchDocs over-fetches child hits to fill the requested unique-page candi
       new Set(result.candidates.map((candidate) => candidate.page_id)),
       new Set(['repeated', 'dedicated-operation', 'reference']),
     );
+  } finally {
+    db.close();
+  }
+});
+
+test('searchDocs reranks one representative per page after child collapse', async () => {
+  const db = openDatabase({ dbPath: ':memory:' });
+  const reranker = new ReverseCaptureReranker();
+  try {
+    for (const [index, pageId] of ['repeated', 'dedicated-operation', 'reference'].entries()) {
+      insertPage(db, pageId, 'en', 'waas', index + 1);
+      const childCount = pageId === 'repeated' ? 4 : 1;
+      for (let child = 0; child < childCount; child++) {
+        const path = `section-${child}`;
+        const parent = insertParent(db, pageId, 'en', path, `withdraw address ${pageId} ${child}`, 8);
+        insertChild(db, pageId, 'en', parent, `${path}/p[1]`, `withdraw address ${pageId} ${child}`);
+      }
+    }
+
+    const result = await service(db, reranker, rerankerConfig()).searchDocs({
+      query: 'withdraw address',
+      limit: 3,
+    });
+
+    assert.equal(reranker.calls.length, 1);
+    assert.equal(reranker.calls[0]?.length, 3);
+    assert.match(reranker.calls[0]?.[0]?.text ?? '', /^Title:/);
+    assert.match(reranker.calls[0]?.[0]?.text ?? '', /Section:/);
+    const submittedPageIds = reranker.calls[0]!.map((doc) =>
+      doc.text.match(/^Title: (\S+) en$/m)?.[1]);
+    assert.deepEqual(
+      result.candidates.map((candidate) => candidate.page_id),
+      submittedPageIds.reverse(),
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('page reranker keeps protected candidates in their original slots', async () => {
+  const reranker = new ReverseCaptureReranker();
+  const candidates = [searchHit('first', 1), searchHit('protected', 2), searchHit('third', 3)];
+
+  const output = await rerankPageCandidates(
+    reranker,
+    'query',
+    candidates,
+    rerankerConfig({ rerankTopK: 3 }),
+    new Set(['protected']),
+  );
+
+  assert.deepEqual(output.map((candidate) => candidate.page_id), ['third', 'protected', 'first']);
+  assert.ok(output.every((candidate, index) => index === 0 || output[index - 1]!.score >= candidate.score));
+});
+
+test('page reranker leaves candidates outside its top-k window unchanged', async () => {
+  const reranker = new ReverseCaptureReranker();
+  const candidates = [
+    searchHit('first', 1),
+    searchHit('second', 2),
+    searchHit('tail-one', 3),
+    searchHit('tail-two', 4),
+  ];
+
+  const output = await rerankPageCandidates(
+    reranker,
+    'query',
+    candidates,
+    rerankerConfig({ rerankTopK: 2 }),
+  );
+
+  assert.deepEqual(output.map((candidate) => candidate.page_id), [
+    'second',
+    'first',
+    'tail-one',
+    'tail-two',
+  ]);
+  assert.equal(reranker.calls[0]?.length, 2);
+});
+
+test('searchDocs protects pages matched by an exact identifier', async () => {
+  const db = openDatabase({ dbPath: ':memory:' });
+  const reranker = new ReverseCaptureReranker();
+  try {
+    for (const [index, pageId] of ['error-codes', 'generic-one', 'generic-two'].entries()) {
+      insertPage(db, pageId, 'en', 'waas', index + 1);
+      const parent = insertParent(db, pageId, 'en', 'response', `B0001 response ${pageId}`, 8);
+      const child = insertChild(db, pageId, 'en', parent, 'response/p[1]', `B0001 response ${pageId}`);
+      if (pageId === 'error-codes') {
+        db.prepare(
+          `INSERT INTO chunk_identifiers (chunk_id, identifier, normalized, kind)
+           VALUES (?, 'B0001', 'b0001', 'error-code')`,
+        ).run(child);
+      }
+    }
+
+    const result = await service(db, reranker, rerankerConfig()).searchDocs({
+      query: 'What does B0001 mean?',
+      scopeId: 'waas',
+      limit: 3,
+    });
+
+    assert.equal(result.candidates[0]?.page_id, 'error-codes');
   } finally {
     db.close();
   }

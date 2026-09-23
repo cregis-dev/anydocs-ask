@@ -1,10 +1,14 @@
 import { createHash } from 'node:crypto';
 import type { DocsLang } from '../anydocs/types.ts';
+import type { RerankerConfig } from '../config.ts';
+import { extractIndexedIdentifiers } from '../content/identifiers.ts';
 import type { BreadcrumbNode } from '../db/schema.ts';
 import type { DbHandle } from '../db/index.ts';
+import { observeLangfuse } from '../observability/langfuse.ts';
 import { search, type AskDeps } from '../query/answer.ts';
 import { fallbackRoute, type IntentRouter } from '../query/intent-router.ts';
 import type { SearchHit } from '../query/types.ts';
+import type { Reranker } from '../reranker/types.ts';
 
 export const AGENT_SEARCH_LIMIT = 20;
 const AGENT_SEARCH_OVERFETCH_MULTIPLIER = 5;
@@ -12,6 +16,8 @@ const AGENT_SEARCH_OVERFETCH_CAP = 100;
 export const AGENT_CATALOG_LIMIT = 50;
 export const AGENT_READ_TOKEN_LIMIT = 3300;
 export const AGENT_READ_TOKEN_HARD_CAP = 8000;
+const DEFAULT_AGENT_PAGE_RERANK_TOP_K = 8;
+const DEFAULT_AGENT_PAGE_RERANK_WEIGHT = 0.6;
 
 const EVIDENCE_SEARCH_ROUTER: IntentRouter = {
   async route({ question }) {
@@ -137,6 +143,11 @@ export class EvidenceService {
     const result = await search(
       {
         ...this.deps.searchDeps,
+        // The Agent reasons over pages, not child chunks. Keep the public
+        // search()/legacy Ask child reranker unchanged, but disable it for
+        // this discovery call so one page cannot consume the cross-encoder
+        // window with several sibling children before page collapse.
+        reranker: null,
         // The legacy hard cap counts child chunks. Agent discovery counts
         // unique pages, so fetch a wider navigation window before collapsing
         // siblings. This does not change the public MCP search contract.
@@ -165,12 +176,53 @@ export class EvidenceService {
     // one page should not crowd a dedicated operation page out of the tool
     // result; keep the best child as that page's navigation clue.
     const seenPages = new Set<string>();
-    const candidates = result.hits.filter((hit) => {
+    const pageCandidates = result.hits.filter((hit) => {
       const key = hit.page_id;
       if (seenPages.has(key)) return false;
       seenPages.add(key);
       return true;
-    }).slice(0, requestedLimit);
+    });
+    const protectedPageIds = protectedCandidatePageIds(
+      this.deps.db,
+      input.query,
+      input.scopeId ?? null,
+      input.currentPageId ?? null,
+      pageCandidates,
+    );
+    const ranked = this.deps.searchDeps.reranker
+      ? await observeLangfuse(
+          'rerank-page-candidates',
+          'retriever',
+          {
+            input: {
+              query: input.query,
+              candidates: pageCandidates.length,
+              protected_page_ids: [...protectedPageIds],
+            },
+          },
+          async (observation) => {
+            const output = await rerankPageCandidates(
+              this.deps.searchDeps.reranker!,
+              input.query,
+              pageCandidates,
+              this.deps.searchDeps.rerankerConfig,
+              protectedPageIds,
+              configuredRetrieval.rrfK,
+            );
+            observation?.update({
+              output: output.map((candidate, index) => ({
+                rank: index + 1,
+                page_id: candidate.page_id,
+                chunk_id: candidate.chunk_id,
+                score: candidate.score,
+                protected: protectedPageIds.has(candidate.page_id),
+              })),
+            });
+            return output;
+          },
+        )
+      : pageCandidates;
+    const candidates = ranked.slice(0, requestedLimit);
     return { type: 'candidates' as const, candidates };
   }
 
@@ -369,6 +421,115 @@ export class EvidenceService {
       contentHash,
     };
   }
+}
+
+/**
+ * Reorder unique page candidates with one representative document per page.
+ * Exact/current-page candidates keep their original slots; the reranker only
+ * competes for the remaining slots. Score slots are reassigned after sorting
+ * so callers retain a monotonic, retrieval-scale score sequence.
+ */
+export async function rerankPageCandidates(
+  reranker: Reranker,
+  query: string,
+  candidates: SearchHit[],
+  config?: RerankerConfig,
+  protectedPageIds: ReadonlySet<string> = new Set(),
+  rrfK = 60,
+): Promise<SearchHit[]> {
+  if (candidates.length === 0) return candidates;
+  const topK = Math.min(
+    candidates.length,
+    config?.rerankTopK ?? DEFAULT_AGENT_PAGE_RERANK_TOP_K,
+  );
+  const weight = config?.weight ?? DEFAULT_AGENT_PAGE_RERANK_WEIGHT;
+  const window = candidates.slice(0, topK);
+  const tail = candidates.slice(topK);
+  const scores = await reranker.rerank(
+    query,
+    window.map((candidate) => ({
+      chunk_id: candidate.chunk_id,
+      text: pageCandidateText(candidate),
+    })),
+  );
+  const rawScoreByChunk = new Map(scores.map((score) => [score.chunk_id, score.score]));
+  const originalRank = new Map(window.map((candidate, index) => [candidate.chunk_id, index + 1]));
+  const semanticRank = new Map(
+    [...window]
+      .filter((candidate) => !protectedPageIds.has(candidate.page_id))
+      .sort((left, right) =>
+        (rawScoreByChunk.get(right.chunk_id) ?? Number.NEGATIVE_INFINITY)
+        - (rawScoreByChunk.get(left.chunk_id) ?? Number.NEGATIVE_INFINITY))
+      .map((candidate, index) => [candidate.chunk_id, index + 1]),
+  );
+  const movable = window
+    .filter((candidate) => !protectedPageIds.has(candidate.page_id))
+    .map((candidate) => {
+      const lexicalRank = originalRank.get(candidate.chunk_id)!;
+      const rerankedPosition = semanticRank.get(candidate.chunk_id) ?? lexicalRank;
+      return {
+        candidate,
+        score:
+          weight / (rrfK + rerankedPosition)
+          + (1 - weight) / (rrfK + lexicalRank),
+      };
+    })
+    .sort((left, right) => right.score - left.score)
+    .map((item) => item.candidate);
+
+  let movableIndex = 0;
+  const reordered = window.map((candidate) =>
+    protectedPageIds.has(candidate.page_id)
+      ? candidate
+      : movable[movableIndex++]!);
+  const scoreSlots = window.map((candidate) => candidate.score).sort((a, b) => b - a);
+  return [
+    ...reordered.map((candidate, index) => ({ ...candidate, score: scoreSlots[index]! })),
+    ...tail,
+  ];
+}
+
+function pageCandidateText(candidate: SearchHit): string {
+  const breadcrumb = candidate.breadcrumb.map((item) => item.title).join(' > ');
+  return [
+    `Title: ${candidate.title}`,
+    breadcrumb ? `Breadcrumb: ${breadcrumb}` : '',
+    `Section: ${candidate.in_page_path}`,
+    candidate.snippet,
+  ].filter(Boolean).join('\n');
+}
+
+function protectedCandidatePageIds(
+  db: DbHandle,
+  query: string,
+  scopeId: string | null,
+  currentPageId: string | null,
+  candidates: SearchHit[],
+): Set<string> {
+  const candidatePageIds = new Set(candidates.map((candidate) => candidate.page_id));
+  const protectedPageIds = new Set<string>();
+  if (currentPageId && candidatePageIds.has(currentPageId)) {
+    protectedPageIds.add(currentPageId);
+  }
+
+  const identifiers = [...new Set(
+    extractIndexedIdentifiers(query).map((identifier) => identifier.normalized),
+  )];
+  if (identifiers.length === 0) return protectedPageIds;
+  const placeholders = identifiers.map(() => '?').join(',');
+  const rows = db.prepare(
+    `SELECT DISTINCT c.page_id
+       FROM chunk_identifiers ci
+       JOIN chunks c ON c.chunk_id = ci.chunk_id
+       JOIN pages p ON p.page_id = c.page_id AND p.lang = c.lang
+      WHERE ci.normalized IN (${placeholders})
+        AND p.status = 'published'
+        AND (? IS NULL OR p.subtree_root = ?)`,
+  ).all(...identifiers, scopeId, scopeId) as Array<{ page_id: string }>;
+  for (const row of rows) {
+    if (candidatePageIds.has(row.page_id)) protectedPageIds.add(row.page_id);
+  }
+  return protectedPageIds;
 }
 
 export class EvidenceToolError extends Error {
