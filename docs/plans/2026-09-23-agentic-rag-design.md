@@ -218,3 +218,13 @@ POC 已证明 Agent 能显著收敛证据范围、提高权威页面的首位命
 3. 压缩 `searchDocs`/`readDoc` 返回值和工具历史，明确路径问题优先走 `lookupExact -> readDoc`。
 
 另有两条 Golden 需要先校准：`cregis-tokens-zh-usdt-network-choice` 未明确产品域，`cregis-tokens-en-testnet-mainnet-separation` 的允许引用页不完整。修订后应固定新的 Golden hash，并用相同 92 条重新执行配对实验。建议下一轮在保持 Context Precision `>=0.90`、Rubric `>=0.88` 和非预期引用率 `<=0.10` 的同时，将 Context Recall 恢复到 `>=0.80`、Faithfulness 恢复到 `>=0.925`，并把 p95 延迟压到 5 秒、平均输入 token 压到 8k 左右，再进入影子流量。
+
+### 13.1 Agent 路径 reranker 复验
+
+同日增加第三组实验：Agent 保持不变，开启 `Xenova/bge-reranker-large`，采用 `topK=8`、融合权重 `0.6`。候选组的 Ragas Context Recall 为 `0.816`，高于无 reranker Agent 的 `0.797`；但共同有效样本的配对净增只有 `1.09pp`，同时 Context Precision 配对净降 `1.04pp`、Factual Correctness 净降 `2.51pp`。Faithfulness `0.910 -> 0.911`、Rubric `0.880 -> 0.883`，均可视为持平。
+
+确定性指标没有显示稳定收益：Hit@1 `0.902 -> 0.870`，MRR `0.938 -> 0.922`，Hit@3/Hit@5 均不变；平均延迟 `4.14s -> 4.88s`，p95 `6.19s -> 7.07s`。候选组还出现 1 条 `agent_no_evidence`：错误码查询被多个 API Reference 的通用 `code=00000` child 占据候选，Agent 未读到权威错误码页便耗尽 discovery 预算。
+
+因此，当前 `child top8 -> rerank -> page 去重` 不作为 Agent 默认配置。下一次仅验证页面级方案：先按 `page_id` 去重并回填 12–20 个真实页面候选，再用“标题 + 命中章节 + 最佳 snippet”重排；精确 path、operation、错误码、字段和当前页候选必须 pin/boost，`lookupExact -> readDoc` 不经过语义 reranker。先在 Hit@1 变化题和 recall 回退题上做小样本配对，满足完成率 100%、Hit@1 不低于 `0.90` 且答案指标有实质收益后，才值得重跑完整 92 条。
+
+本轮使用相同 Golden hash 和文档 Git 版本，但重建索引为 84 pages / 768 chunks，上一轮记录为 84 / 767，且旧实验没有保存可核对的 index hash。因此该实验足以否决当前接法的默认启用，不应用于宣称严格可复现的微小百分点提升。下一轮须把 index manifest/hash 纳入实验元数据。完整本地报告位于文档项目忽略目录 `eval/local-reports/agentic-rag-reranker-20260923/`，Langfuse run 为 [agentic-rag-reranker-large-top8-w06-05676bd-20260923](https://jp.cloud.langfuse.com/project/cmu2a8k6q00rkad0d5ryxpy3n/datasets/cmu6djv1p003had0i1nx61bbt/runs/26e31c8b-85ce-43a7-801a-58626419ba25)。
