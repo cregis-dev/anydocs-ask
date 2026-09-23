@@ -9,6 +9,7 @@ from .models import EvalSample
 
 SUPPORTED_METRICS = (
     "faithfulness",
+    "context_precision",
     "context_recall",
     "answer_relevancy",
     "factual_correctness",
@@ -23,6 +24,7 @@ class MetricScorer(Protocol):
 @dataclass(frozen=True)
 class Scorers:
     faithfulness: MetricScorer | None = None
+    context_precision: MetricScorer | None = None
     context_recall: MetricScorer | None = None
     answer_relevancy: MetricScorer | None = None
     factual_correctness: MetricScorer | None = None
@@ -68,6 +70,7 @@ def build_scorers(settings: ProviderSettings, metrics: set[str]) -> Scorers:
     from ragas.llms import llm_factory
     from ragas.metrics.collections import (
         AnswerRelevancy,
+        ContextPrecision,
         ContextRecall,
         Faithfulness,
         FactualCorrectness,
@@ -125,6 +128,9 @@ def build_scorers(settings: ProviderSettings, metrics: set[str]) -> Scorers:
 
     return Scorers(
         faithfulness=Faithfulness(llm=llm) if "faithfulness" in metrics else None,
+        context_precision=ContextPrecision(llm=llm)
+        if "context_precision" in metrics
+        else None,
         context_recall=ContextRecall(llm=llm) if "context_recall" in metrics else None,
         answer_relevancy=relevancy,
         factual_correctness=FactualCorrectness(llm=llm)
@@ -182,6 +188,24 @@ async def score_sample(sample: EvalSample, scorers: Scorers) -> dict[str, Any]:
             await _score_metric(
                 "context_recall",
                 scorers.context_recall,
+                scores,
+                errors,
+                user_input=sample.user_input,
+                retrieved_contexts=sample.retrieved_contexts,
+                reference=sample.reference,
+            )
+
+    if scorers.context_precision is not None:
+        if sample.reference is None:
+            skipped["context_precision"] = (
+                "golden case has no reference answer or facts"
+            )
+        elif not sample.retrieved_contexts:
+            skipped["context_precision"] = "no retrieved contexts"
+        else:
+            await _score_metric(
+                "context_precision",
+                scorers.context_precision,
                 scores,
                 errors,
                 user_input=sample.user_input,

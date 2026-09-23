@@ -46,6 +46,7 @@ def test_scores_available_metrics_and_skips_missing_reference():
             sample,
             Scorers(
                 faithfulness=FakeMetric(0.8),
+                context_precision=FakeMetric(0.75),
                 context_recall=FakeMetric(0.85),
                 answer_relevancy=FakeMetric(0.7),
                 factual_correctness=FakeMetric(0.9),
@@ -55,6 +56,10 @@ def test_scores_available_metrics_and_skips_missing_reference():
     )
     assert result["scores"]["faithfulness"]["value"] == 0.8
     assert result["scores"]["answer_relevancy"]["value"] == 0.7
+    assert (
+        result["skipped"]["context_precision"]
+        == "golden case has no reference answer or facts"
+    )
     assert (
         result["skipped"]["context_recall"]
         == "golden case has no reference answer or facts"
@@ -106,6 +111,52 @@ def test_context_recall_skips_empty_retrieval_context():
     assert result["skipped"]["context_recall"] == "no retrieved contexts"
 
 
+def test_context_precision_scores_ranked_context_usefulness_without_generated_answer():
+    class ContextPrecisionMetric:
+        async def ascore(self, **kwargs):
+            assert kwargs == {
+                "user_input": "Which endpoint creates a payout?",
+                "retrieved_contexts": [
+                    "POST /api/v1/payout creates a payout.",
+                    "POST /api/v1/coins lists supported assets.",
+                ],
+                "reference": "Use /api/v1/payout to create a payout.",
+            }
+            return Result(1.0, "the relevant context is ranked first")
+
+    sample = EvalSample(
+        case_id="case-context-precision",
+        user_input="Which endpoint creates a payout?",
+        response=None,
+        retrieved_contexts=[
+            "POST /api/v1/payout creates a payout.",
+            "POST /api/v1/coins lists supported assets.",
+        ],
+        reference="Use /api/v1/payout to create a payout.",
+    )
+    result = asyncio.run(
+        score_sample(sample, Scorers(context_precision=ContextPrecisionMetric()))
+    )
+    assert result["scores"]["context_precision"] == {
+        "value": 1.0,
+        "reason": "the relevant context is ranked first",
+    }
+
+
+def test_context_precision_skips_empty_retrieval_context():
+    sample = EvalSample(
+        case_id="case-no-context",
+        user_input="Which endpoint creates a payout?",
+        response="Use /api/v1/payout.",
+        retrieved_contexts=[],
+        reference="Use /api/v1/payout to create a payout.",
+    )
+    result = asyncio.run(
+        score_sample(sample, Scorers(context_precision=FakeMetric(1.0)))
+    )
+    assert result["skipped"]["context_precision"] == "no retrieved contexts"
+
+
 def test_rubric_compliance_receives_case_guidance_and_atomic_facts():
     class RubricMetric:
         async def ascore(self, **kwargs):
@@ -142,7 +193,13 @@ def test_anthropic_provider_reuses_existing_gateway_environment(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "secret")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example.test")
     settings = provider_settings(
-        {"faithfulness", "context_recall", "factual_correctness", "rubric_compliance"}
+        {
+            "faithfulness",
+            "context_precision",
+            "context_recall",
+            "factual_correctness",
+            "rubric_compliance",
+        }
     )
     assert settings.judge_provider == "anthropic"
     assert settings.judge_model == "internal-model"
@@ -154,9 +211,16 @@ def test_anthropic_provider_reuses_existing_gateway_environment(monkeypatch):
 
     scorers = build_scorers(
         settings,
-        {"faithfulness", "context_recall", "factual_correctness", "rubric_compliance"},
+        {
+            "faithfulness",
+            "context_precision",
+            "context_recall",
+            "factual_correctness",
+            "rubric_compliance",
+        },
     )
     assert type(scorers.faithfulness).__name__ == "Faithfulness"
+    assert type(scorers.context_precision).__name__ == "ContextPrecision"
     assert type(scorers.context_recall).__name__ == "ContextRecall"
     assert type(scorers.factual_correctness).__name__ == "FactualCorrectness"
     assert type(scorers.rubric_compliance).__name__ == "NormalizedFivePointScorer"

@@ -467,6 +467,7 @@ async function runRetrievalPipeline(
             searchQuestion,
             rrfRanked,
             deps.rerankerConfig,
+            retrievalConfig.rrfK,
           );
           observation?.update({
             output: output.map((chunk) => ({
@@ -1130,46 +1131,69 @@ function previewText(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 240);
 }
 
-const DEFAULT_RERANK_TOP_K = 20;
+const DEFAULT_RERANK_TOP_K = 8;
+const DEFAULT_RERANK_WEIGHT = 0.6;
 
 /**
  * Cross-encoder rerank — feeds the top-N RRF-ranked candidates to a
- * Reranker as (query, chunk_text) pairs and reorders by relevance score.
+ * Reranker as (query, chunk_text) pairs, then blends the cross-encoder rank
+ * with the original RRF rank. This preserves strong exact/BM25 evidence while
+ * still letting semantic relevance promote better candidates.
  *
  * The chunk text already carries its heading_path prefix (set in
  * extractMarkdownSections) so the reranker sees enough context to score
  * field-table chunks against natural-language questions without us having
  * to re-stitch the breadcrumb here.
  *
- * Score normalization: bge-reranker-v2-m3 emits raw logits in roughly
- * [-10, +10]. We sigmoid them into (0, 1) and overwrite `final_score` for
- * the reranked window so aggregation sees one coherent scale within the
- * top-N. Chunks beyond rerankTopK retain their RRF score.
+ * The blend is weighted reciprocal-rank fusion. Raw cross-encoder logits are
+ * used only to derive their order because score scales differ across models.
+ * Chunks beyond rerankTopK keep their RRF order after the blended window.
  *
  * Returns a NEW array — input is not mutated.
  */
-async function applyCrossEncoderRerank(
+export async function applyCrossEncoderRerank(
   reranker: Reranker,
   query: string,
   rrfRanked: RerankedChunk[],
   config: RerankerConfig | undefined,
+  rrfK: number,
 ): Promise<RerankedChunk[]> {
   const topK = config?.rerankTopK ?? DEFAULT_RERANK_TOP_K;
+  const weight = config?.weight ?? DEFAULT_RERANK_WEIGHT;
   if (rrfRanked.length === 0) return rrfRanked;
   const window = rrfRanked.slice(0, topK);
   const tail = rrfRanked.slice(topK);
   const docs = window.map((c) => ({ chunk_id: c.chunk_id, text: c.text }));
   const scores = await reranker.rerank(query, docs);
-  const scoreByChunk = new Map<number | bigint, number>();
-  for (const s of scores) scoreByChunk.set(s.chunk_id, sigmoid(s.score));
-  const rescored = window
-    .map((c) => ({ ...c, final_score: scoreByChunk.get(c.chunk_id) ?? 0 }))
+  const rawScoreByChunk = new Map(scores.map((s) => [s.chunk_id, s.score]));
+  const rerankerRank = new Map(
+    [...window]
+      .sort((a, b) =>
+        (rawScoreByChunk.get(b.chunk_id) ?? Number.NEGATIVE_INFINITY)
+        - (rawScoreByChunk.get(a.chunk_id) ?? Number.NEGATIVE_INFINITY))
+      .map((chunk, index) => [chunk.chunk_id, index + 1]),
+  );
+  const rrfRank = new Map(window.map((chunk, index) => [chunk.chunk_id, index + 1]));
+  const reordered = window
+    .map((c) => {
+      const originalRank = rrfRank.get(c.chunk_id)!;
+      const semanticRank = rerankerRank.get(c.chunk_id) ?? originalRank;
+      const finalScore =
+        weight / (rrfK + semanticRank)
+        + (1 - weight) / (rrfK + originalRank);
+      return { ...c, final_score: finalScore };
+    })
     .sort((a, b) => b.final_score - a.final_score);
+  // Aggregation consumes final_score, while the untouched tail still carries
+  // RRF scores. Reassign the original window's descending score slots to the
+  // blended order so scores remain monotonic and on one scale across the
+  // rerank boundary.
+  const scoreSlots = window.map((chunk) => chunk.final_score).sort((a, b) => b - a);
+  const rescored = reordered.map((chunk, index) => ({
+    ...chunk,
+    final_score: scoreSlots[index]!,
+  }));
   return [...rescored, ...tail];
-}
-
-function sigmoid(x: number): number {
-  return 1 / (1 + Math.exp(-x));
 }
 
 // ---------------------------------------------------------------------------
@@ -1306,6 +1330,7 @@ const ENTITY_SPLIT_RE = /,|、|\s+(?:and|or|nor|vs\.?|versus)\s+/gi;
 // to retain both subjects in prompt guidance. A two-entity comparison has only
 // one separator, unlike a longer comma-separated list.
 const ENTITY_COMPARE_HINT_RE = /\b(compare|compares|comparison|vs\.?|versus)\b/i;
+const ENTITY_CLAUSE_START_RE = /^(?:do|does|did|is|are|was|were|can|could|should|would|will|must|may|might|have|has|had|what|when|where|which|who|why|how|if|but|however)\b/i;
 const ENTITY_STOP_WORDS = new Set([
   'the', 'and', 'for', 'with', 'from', 'into', 'your', 'this', 'that',
   'are', 'how', 'what', 'when', 'where', 'which', 'who', 'work', 'does',
@@ -1331,8 +1356,19 @@ export function extractEntityTerms(question: string): string[] | undefined {
   // of each segment. We use a fresh regex (the global flag mutates lastIndex
   // between match/split, so reuse is unsafe here).
   const splitRe = /,|、|\s+(?:and|or|nor|vs\.?|versus)\s+/gi;
+  const segments = question.split(splitRe);
+  // Enumeration starts with a short subject. Long introductory clauses and
+  // question clauses after separators are not named entities.
+  if (
+    (segments[0]?.trim().split(/\s+/).length ?? 0) > 4
+    || segments.slice(0, -1).some((segment) => /[?？]/.test(segment))
+    || segments.slice(1, -1).some((segment) => /[，。]/.test(segment))
+    || segments.slice(1).some((segment) => ENTITY_CLAUSE_START_RE.test(segment.trim()))
+  ) {
+    return undefined;
+  }
   const terms: string[] = [];
-  for (const segment of question.split(splitRe)) {
+  for (const segment of segments) {
     const cleaned = segment.replace(ENTITY_SEGMENT_STRIP, '').trim().toLowerCase();
     // Walk the segment and take the FIRST non-stop-word ≥3 chars. The old
     // logic took only [0]; segments like "how do sessions" then dropped to

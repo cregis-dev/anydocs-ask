@@ -19,6 +19,7 @@ export function buildDefaultReranker(config: ResolvedConfig): Reranker | null {
   if (config.reranker.provider === 'mock') return new MockReranker();
   return new BgeCrossEncoder({
     model: config.reranker.model,
+    revision: config.reranker.revision ?? undefined,
     preferQuantized: config.reranker.preferQuantized,
     cacheDir: resolveTransformersCacheDir(config),
     maxLength: config.reranker.maxLength,

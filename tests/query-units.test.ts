@@ -192,6 +192,24 @@ test('extractEntityTerms: plain 2-entity question without compare hint still ski
   assert.equal(extractEntityTerms('how does sessions and memory work?'), undefined);
 });
 
+test('extractEntityTerms: alternative project question is not an entity list', () => {
+  assert.equal(
+    extractEntityTerms('For API payout or withdrawals, do I only need a Payment Engine project, or should I also create a WaaS API project?'),
+    undefined,
+  );
+});
+
+test('extractEntityTerms: clauses and a second question do not trigger entity coverage', () => {
+  assert.equal(
+    extractEntityTerms('`/api/v1/coins` returns code `00000`, but one or more coin lists are `null`. What can I conclude?'),
+    undefined,
+  );
+  assert.equal(
+    extractEntityTerms('我要给一个用户创建充值子地址，应该调用哪个 WaaS 接口？chain_id、alias、callback_url 怎么填？'),
+    undefined,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // sanitize.ts
 // ---------------------------------------------------------------------------
@@ -373,6 +391,26 @@ test('LLMIntentRouter: exact diagnostic anchors skip the router LLM', async () =
   assert.equal(route.routerStrategy, 'fast_path');
   assert.ok(route.apiReferenceHints.includes('/api/v1/payout'));
   assert.deepEqual(route.diagnostic?.errorCodes, ['E0008']);
+});
+
+test('LLMIntentRouter: API request wording preserves a normal documentation question', async () => {
+  const question = 'For a WaaS /api/v1/payout request, can you show the exact ordered string used before MD5 signature computation?';
+  const prepared = prepareDiagnosticInput(question);
+  const llm = new RouterTestLLM('not used');
+  const route = await new LLMIntentRouter(llm, { fastPathMaxChars: 240 }).route({
+    question,
+    lang: 'en',
+  });
+
+  assert.equal(prepared.diagnostic.structured, false);
+  assert.equal(prepared.fallbackRetrievalQuestion, question);
+  assert.equal(route.effectiveQuestion, question);
+  assert.equal(route.diagnostic, undefined);
+  assert.equal(llm.calls.length, 0);
+  assert.equal(
+    buildDiagnosticPromptQuestion(prepared, prepared.diagnostic, route.effectiveQuestion),
+    question,
+  );
 });
 
 test('LLMIntentRouter: caches contextual routes by question and recent history', async () => {
@@ -1065,7 +1103,7 @@ test('buildPrompt: adds API reference citation rule when context contains API re
 
   assert.match(prompt.system, /API reference/);
   assert.match(prompt.system, /完整接口路径/);
-  assert.match(prompt.system, /回答检查清单/);
+  assert.doesNotMatch(prompt.user.split('参考片段：')[0]!, /回答检查清单/);
 });
 
 test('buildPrompt: adds grounded answer checklist for API status and callback facts', () => {
@@ -1100,12 +1138,10 @@ test('buildPrompt: adds grounded answer checklist for API status and callback fa
   });
 
   assert.match(prompt.user, /回答检查清单/);
-  assert.match(prompt.user, /\/api\/v2\/order\/info/);
   assert.match(prompt.user, /data\.status/);
   assert.match(prompt.user, /event_type/);
   assert.match(prompt.user, /必须写出“回调事件类型”/);
   assert.match(prompt.user, /状态映射/);
-  assert.match(prompt.user, /幂等/);
   assert.match(prompt.user, /\[cit_1\]/);
   assert.match(prompt.user, /\[cit_2\]/);
 });
@@ -1132,6 +1168,104 @@ test('buildPrompt: zh signature checklist says sign is excluded explicitly', () 
 
   assert.match(prompt.user, /必须明确写出：排除 `sign` 字段/);
   assert.match(prompt.user, /`sign` 不参与签名计算/);
+});
+
+test('buildPrompt: signature checklist excludes unrelated payout workflow facts', () => {
+  const prompt = buildPrompt({
+    question: 'For a WaaS /api/v1/payout request, can you show the exact ordered string used before MD5 signature computation?',
+    chunks: [
+      {
+        ...fakeRetrieved({
+          chunk_id: 1,
+          lang: 'en',
+          page_id: 'api-waas-api-post-api-v1-payout',
+          page_title: 'POST /api/v1/payout — Create Wallet Payout',
+          text: 'HTTP Request POST /api/v1/payout. Exclude sign before signature calculation. currency uses chain_id@token_id. Save cid and handle callback events idempotently.',
+          breadcrumb: [{ id: 'api', title: 'API Reference', type: 'section' }],
+        }),
+        final_score: 0.2,
+      },
+      {
+        ...fakeRetrieved({
+          chunk_id: 2,
+          lang: 'en',
+          page_id: 'payment-engine-authentication',
+          page_title: 'Payment Engine Authentication and Signature',
+          text: 'Exclude sign before signature calculation.',
+          breadcrumb: [{ id: 'payment-engine', title: 'Payment Engine', type: 'section' }],
+        }),
+        final_score: 0.18,
+      },
+    ],
+    answerLang: 'en',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+  });
+
+  const checklist = prompt.user.split('Context snippets:')[0]!;
+  assert.match(checklist, /Cite the API reference endpoint `POST \/api\/v1\/payout`/);
+  assert.match(checklist, /Exclude `sign`/);
+  assert.doesNotMatch(checklist, /\bcid\b|chain_id@token_id|callback|idempoten/i);
+  assert.equal((checklist.match(/Exclude `sign`/g) ?? []).length, 1);
+});
+
+test('buildPrompt: unrelated API references do not become answer requirements', () => {
+  const chunks = [
+    ['api-waas-api-post-api-v1-collection', 'POST /api/v1/collection — Create Fund Collection'],
+    ['api-waas-api-post-api-v2-payout', 'POST /api/v2/payout — Create Wallet Payout'],
+    ['api-waas-api-post-api-v1-sub-address-withdrawal', 'POST /api/v1/sub_address_withdrawal — Create Sub-address Withdrawal'],
+  ].map(([page_id, page_title], index) => ({
+    ...fakeRetrieved({
+      chunk_id: index + 1,
+      lang: 'en' as const,
+      page_id,
+      page_title,
+      text: `API reference: WaaS API\nHTTP Request ${page_title!.split(' — ')[0]}`,
+      breadcrumb: [{ id: 'api', title: 'API Reference', type: 'section' as const }],
+    }),
+    final_score: 0.2 - index * 0.01,
+  }));
+  const prompt = buildPrompt({
+    question: 'Which collection endpoint uses from_address and to_address?',
+    chunks,
+    answerLang: 'en',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+  });
+
+  const instructions = prompt.user.split('Context snippets:')[0]!;
+  assert.match(instructions, /POST \/api\/v1\/collection/);
+  assert.doesNotMatch(instructions, /\/api\/v2\/payout|\/api\/v1\/sub_address_withdrawal/);
+  assert.match(prompt.system, /prefer citing the relevant API reference/);
+});
+
+test('buildPrompt: generic create suffix does not choose an arbitrary API', () => {
+  const prompt = buildPrompt({
+    question: 'Which endpoint creates one deposit address?',
+    chunks: [
+      {
+        ...fakeRetrieved({
+          page_id: 'api-waas-api-post-api-v1-batch-address-create',
+          page_title: 'POST /api/v1/batch/address/create — Batch Create',
+          text: 'API reference: WaaS API\nPOST /api/v1/batch/address/create',
+        }),
+        final_score: 0.2,
+      },
+      {
+        ...fakeRetrieved({
+          page_id: 'api-waas-api-post-api-v1-address-create',
+          page_title: 'POST /api/v1/address/create — Create One',
+          text: 'API reference: WaaS API\nPOST /api/v1/address/create',
+        }),
+        final_score: 0.19,
+      },
+    ],
+    answerLang: 'en',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+  });
+
+  assert.doesNotMatch(prompt.user.split('Context snippets:')[0]!, /Cite the API reference endpoint/);
 });
 
 test('buildPrompt: adds grounded answer checklist for signature and webhook success facts', () => {
@@ -1198,7 +1332,7 @@ test('buildPrompt: adds grounded answer checklist for direct crypto order amount
   assert.doesNotMatch(prompt.user, /Mention the CoinMarketCap \/ CMC exchange-rate behavior/);
 });
 
-test('buildPrompt: adds grounded answer checklist for token identifier examples', () => {
+test('buildPrompt: token identifiers do not force an unrelated network example', () => {
   const prompt = buildPrompt({
     question: 'For USDT payouts on Ethereum versus Polygon, what changes in the WaaS payout request?',
     chunks: [
@@ -1222,7 +1356,25 @@ test('buildPrompt: adds grounded answer checklist for token identifier examples'
 
   assert.match(prompt.user, /Answer checklist/);
   assert.match(prompt.user, /chain_id@token_id/);
-  assert.match(prompt.user, /195@195/);
+  assert.doesNotMatch(prompt.user.split('Context snippets:')[0]!, /195@195/);
+});
+
+test('buildPrompt: keeps the token example when the user asks about it', () => {
+  const prompt = buildPrompt({
+    question: 'Why is currency written as 195@195?',
+    chunks: [{
+      ...fakeRetrieved({
+        lang: 'en',
+        text: 'currency uses chain_id@token_id, for example 195@195.',
+      }),
+      final_score: 0.2,
+    }],
+    answerLang: 'en',
+    isCrossLang: false,
+    formatHint: 'paragraph',
+  });
+
+  assert.match(prompt.user.split('Context snippets:')[0]!, /195@195/);
 });
 
 test('buildPrompt: adds grounded answer checklist for test-token environment limits', () => {

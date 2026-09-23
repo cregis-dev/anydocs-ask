@@ -43,8 +43,8 @@ into a reference. `rubric_compliance` evaluates the answer against the
 canonical answer, atomic facts, retrieved context, and the case-specific
 `evaluation_rubric`; its native 1-5 result is normalized to 0-1. Cases without
 ground truth still receive Faithfulness and Answer Relevancy scores. Context
-Recall is skipped when no reference or retrieved context is present, while
-Rubric Compliance is skipped when no rubric is present.
+Precision and Context Recall are skipped when no reference or retrieved context
+is present, while Rubric Compliance is skipped when no rubric is present.
 
 Run a full eval, not `eval --no-router`: retrieval-only traces intentionally
 have no generated answer and cannot produce the semantic scores.
@@ -85,14 +85,21 @@ RAGAS_EMBEDDING_BASE_URL=http://embeddings.internal/v1
 The default metrics are:
 
 - `faithfulness`: answer claims supported by the actual generation context.
+- `context_precision`: useful generation contexts ranked ahead of irrelevant ones,
+  judged against reviewed Golden ground truth.
 - `context_recall`: reviewed reference claims covered by the retrieved context.
 - `answer_relevancy`: answer relevance to the user question.
 - `factual_correctness`: answer agreement with reviewed Golden ground truth.
 - `rubric_compliance`: case-specific groundedness and precision requirements.
 
 Use
-`--metrics faithfulness,context_recall,factual_correctness,rubric_compliance`
+`--metrics faithfulness,context_precision,context_recall,factual_correctness,rubric_compliance`
 when the judge endpoint does not expose an embedding model.
+
+`context_precision` complements the deterministic `Context-P@5` reported by the
+TypeScript evaluator. `Context-P@5` checks page-ID membership and is cheap and
+reproducible; Ragas context precision judges the semantic usefulness and order
+of the exact contexts that reached generation.
 
 For an Anthropic-compatible judge, including an internal gateway already used
 by Ask, set:

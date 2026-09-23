@@ -1,23 +1,19 @@
 /**
  * BGE-family cross-encoder reranker via @huggingface/transformers.
  *
- * Default model: 'Xenova/bge-reranker-large' (community ONNX export of
- * BAAI/bge-reranker-large). bge-reranker-v2-m3 would be the SOTA pick
- * for our zh+en use case but as of 2026-05-22 has no Xenova-converted
- * ONNX build with q8 quantization; bge-reranker-large is the closest
- * available substitute (568M params, multilingual focus on zh+en,
- * 512-token window). Swap via the `model` constructor arg / config
- * field when a v2-m3 ONNX port lands.
+ * Default model: Xenova's Transformers.js-compatible ONNX export of
+ * BAAI/bge-reranker-large. It supports Chinese and English with a 512-token
+ * window, which matches the child chunks reranked here. v2-m3 remains a
+ * supported pinned alternative, but the Cregis 92-case A/B favored large.
  *
- *   - dtype: q8 by default (~280MB) — fp32 is ~560MB and slower for the
- *     small cross-encoder gains we typically see on multilingual docs.
+ *   - dtype: q8 by default (~570MB); fp32 is ~2.3GB.
  *
  * The cross-encoder takes pairs of (query, doc) and emits a single logit per
- * pair. We sigmoid it lightly only for reporting / debug — the order is what
- * matters and applying sigmoid is monotonic.
+ * pair. The query pipeline uses those logits only to derive semantic rank;
+ * absolute score scales are not compared across model families.
  *
- * First call to warmUp() downloads the model and may take 5-15s. After warm,
- * a 20-doc rerank batch takes ~80-200ms on CPU.
+ * First call to warmUp() downloads the model. Warm inference cost is linear
+ * in the configured rerank window and depends heavily on the host CPU.
  *
  * Tests do NOT exercise this path by default — they use MockReranker.
  */
@@ -26,8 +22,22 @@ import { mkdirSync } from 'node:fs';
 import type { PreTrainedTokenizer, PreTrainedModel, Tensor } from '@huggingface/transformers';
 import type { Reranker, RerankerInputDoc, RerankerScore } from './types.ts';
 
+export const DEFAULT_BGE_RERANKER_MODEL = 'Xenova/bge-reranker-large';
+export const DEFAULT_BGE_RERANKER_REVISION =
+  '3c4ff3c9420fb24ea62acd31e3884e09c8827f2a';
+export const BGE_RERANKER_V2_M3_MODEL = 'onnx-community/bge-reranker-v2-m3-ONNX';
+export const BGE_RERANKER_V2_M3_REVISION =
+  '6f5ff65298512715a1e669753bc754d2bc8f367b';
+
+const PINNED_MODEL_REVISIONS: Readonly<Record<string, string>> = {
+  [DEFAULT_BGE_RERANKER_MODEL]: DEFAULT_BGE_RERANKER_REVISION,
+  [BGE_RERANKER_V2_M3_MODEL]: BGE_RERANKER_V2_M3_REVISION,
+};
+
 export type BgeCrossEncoderOptions = {
   model?: string;
+  /** Optional Hugging Face revision. Falls back to BGE_RERANKER_REVISION. */
+  revision?: string;
   preferQuantized?: boolean;
   /** Cache directory passed to transformers.js. Defaults to its own pick. */
   cacheDir?: string;
@@ -36,11 +46,19 @@ export type BgeCrossEncoderOptions = {
   maxLength?: number;
 };
 
+export function resolveBgeRerankerRevision(
+  explicitRevision: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  return explicitRevision?.trim() || env.BGE_RERANKER_REVISION?.trim() || undefined;
+}
+
 export class BgeCrossEncoder implements Reranker {
   readonly model: string;
   ready = false;
 
   private readonly hfModel: string;
+  private readonly revision: string | undefined;
   private readonly preferQuantized: boolean;
   private readonly cacheDir: string | undefined;
   private readonly maxLength: number;
@@ -48,11 +66,14 @@ export class BgeCrossEncoder implements Reranker {
   private xmodel: PreTrainedModel | null = null;
 
   constructor(opts: BgeCrossEncoderOptions = {}) {
-    this.hfModel = opts.model ?? 'Xenova/bge-reranker-large';
+    this.hfModel = opts.model ?? DEFAULT_BGE_RERANKER_MODEL;
+    const modelDefaultRevision = PINNED_MODEL_REVISIONS[this.hfModel];
+    this.revision = resolveBgeRerankerRevision(opts.revision) ?? modelDefaultRevision;
     this.preferQuantized = opts.preferQuantized ?? true;
     this.cacheDir = opts.cacheDir;
     this.maxLength = opts.maxLength ?? 512;
-    this.model = this.preferQuantized ? `${this.hfModel}:q8` : this.hfModel;
+    const revision = this.revision ? `@${this.revision}` : '';
+    this.model = `${this.hfModel}${revision}${this.preferQuantized ? ':q8' : ''}`;
   }
 
   async warmUp(): Promise<void> {
@@ -69,13 +90,19 @@ export class BgeCrossEncoder implements Reranker {
     tx.env.allowRemoteModels = true;
 
     const dtype = this.preferQuantized ? 'q8' : 'fp32';
+    const revisionLabel = this.revision ? `, revision=${this.revision}` : '';
     process.stderr.write(
-      `[ask/reranker] loading ${this.hfModel} (dtype=${dtype}, cache=${this.cacheDir ?? 'default'}) — first run downloads ~${this.preferQuantized ? '280' : '560'} MB\n`,
+      `[ask/reranker] loading ${this.hfModel} (dtype=${dtype}, cache=${this.cacheDir ?? 'default'}${revisionLabel}) — first run downloads ~${this.preferQuantized ? '570' : '2300'} MB\n`,
     );
     try {
-      this.tokenizer = await tx.AutoTokenizer.from_pretrained(this.hfModel);
+      const modelOptions = this.revision ? { revision: this.revision } : {};
+      this.tokenizer = await tx.AutoTokenizer.from_pretrained(
+        this.hfModel,
+        modelOptions,
+      );
       this.xmodel = await tx.AutoModelForSequenceClassification.from_pretrained(this.hfModel, {
         dtype,
+        ...modelOptions,
       });
       // Single warm pass so the ONNX session is hot before the first real call.
       const probe = this.tokenizer(['warm'], {
@@ -87,7 +114,7 @@ export class BgeCrossEncoder implements Reranker {
       await this.xmodel(probe);
     } catch (err) {
       throw new Error(
-        `[ask/reranker] failed to load model "${this.hfModel}" (dtype=${dtype}, cache=${this.cacheDir ?? 'default'}).\n` +
+        `[ask/reranker] failed to load model "${this.hfModel}" (dtype=${dtype}, cache=${this.cacheDir ?? 'default'}${revisionLabel}).\n` +
           `  allowRemoteModels=${tx.env.allowRemoteModels} allowLocalModels=${tx.env.allowLocalModels}\n` +
           `  Cause: ${(err as Error).message}`,
         { cause: err },

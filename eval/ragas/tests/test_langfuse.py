@@ -53,6 +53,7 @@ def test_evaluations_use_langfuse_sdk_type():
         {
             "scores": {
                 "faithfulness": {"value": 0.75, "reason": "grounded"},
+                "context_precision": {"value": 1.0, "reason": "useful first"},
                 "factual_correctness": {"value": 0.5, "reason": None},
             }
         }
@@ -61,5 +62,6 @@ def test_evaluations_use_langfuse_sdk_type():
     assert all(isinstance(evaluation, Evaluation) for evaluation in evaluations)
     assert [(evaluation.name, evaluation.value) for evaluation in evaluations] == [
         ("ragas_faithfulness", 0.75),
+        ("ragas_context_precision", 1.0),
         ("ragas_factual_correctness", 0.5),
     ]
