@@ -196,13 +196,14 @@ export function diagnosticRetrievalHints(diagnostic: DiagnosticContext): string[
 
 function isStructuredDiagnosticInput(question: string): boolean {
   if (question.length > QUESTION_REWRITE_THRESHOLD_CHARS) return true;
-  const signals = [
-    /["'][A-Za-z_][A-Za-z0-9_.-]*["']\s*:/,
-    /\b(?:request|response|payload|body|请求|响应|报错|错误)\b/i,
-    /\/(?:openapi|api)\/v\d+/i,
-    /\b(?:curl|HTTP\/[12]|Exception|stack trace)\b/i,
-  ];
-  return signals.filter((pattern) => pattern.test(question)).length >= 2;
+  // Endpoint documentation questions commonly contain both "request" and an
+  // API path. Those words alone do not make the input a diagnostic payload:
+  // compacting them discards the user's actual operation or field question.
+  const hasJsonLikePayload = /[{[]\s*["'][A-Za-z_][A-Za-z0-9_.-]*["']\s*:/.test(question);
+  const hasHttpTranscript = /\b(?:curl\s|HTTP\/[12](?:\.\d)?|stack trace)\b/i.test(question);
+  const hasExceptionLine = /\b[A-Za-z_$][A-Za-z0-9_$.]*(?:Exception|Error)\s*[:\n]/.test(question);
+  const hasLabeledPayload = /(?:^|\n)\s*(?:request|response|payload|请求|响应|日志)\s*[:{]/im.test(question);
+  return hasJsonLikePayload || hasHttpTranscript || hasExceptionLine || hasLabeledPayload;
 }
 
 function extractJsonLikeKeys(question: string): string[] {

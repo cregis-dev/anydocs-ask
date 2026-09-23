@@ -76,6 +76,7 @@ export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
   const chunkBlocks: string[] = [];
   const answerChecklistItems: string[] = [];
   const hasApiReference = chunks.some(isApiReferenceChunk);
+  const endpointHintIndex = endpointHintChunkIndex(question, chunks);
   chunks.forEach((c, idx) => {
     const id = `cit_${idx + 1}`;
     chunkById.set(id, c);
@@ -83,7 +84,7 @@ export function buildPrompt(opts: BuildPromptOptions): BuiltPrompt {
     chunkBlocks.push(
       `[${id}] [${breadcrumb} (${c.lang})]\n${c.text}`,
     );
-    answerChecklistItems.push(...answerChecklistItemsForChunk(answerLang, c, id));
+    answerChecklistItems.push(...answerChecklistItemsForChunk(answerLang, c, id, question, idx === endpointHintIndex));
   });
 
   const system = systemPromptFor(
@@ -319,7 +320,13 @@ function historyBlockFor(
 }
 
 function answerChecklistFor(lang: DocsLang, items: string[]): string {
-  const unique = [...new Set(items)].slice(0, 8);
+  const seenFacts = new Set<string>();
+  const unique = items.filter((item) => {
+    const fact = item.replace(/\s+\[cit_\d+\]\s*$/, '').toLowerCase();
+    if (seenFacts.has(fact)) return false;
+    seenFacts.add(fact);
+    return true;
+  }).slice(0, 8);
   if (unique.length === 0) return '';
   const label = lang === 'zh'
     ? '回答检查清单（从参考片段抽取；若与问题相关，请覆盖并内联对应 citation）：'
@@ -327,90 +334,101 @@ function answerChecklistFor(lang: DocsLang, items: string[]): string {
   return `\n\n${label}\n${unique.map((item) => `- ${item}`).join('\n')}`;
 }
 
-function answerChecklistItemsForChunk(lang: DocsLang, c: RerankedChunk, citationId: string): string[] {
+function answerChecklistItemsForChunk(
+  lang: DocsLang,
+  c: RerankedChunk,
+  citationId: string,
+  question: string,
+  includeEndpoint: boolean,
+): string[] {
   const text = `${c.page_title}\n${c.text}`;
   const items: string[] = [];
   const marker = `[${citationId}]`;
-  const endpoint = extractEndpoint(text);
-  if (endpoint) {
-    const apiLabel = isApiReferenceChunk(c);
+  const asksStatus = /\b(?:data\.status|event_type|status|state|terminal)\b|状态|终态|流转|映射/i.test(question);
+  const asksCallback = /\b(?:callback|webhook|notification|retry|duplicate|idempoten(?:t|cy|tly))\b|回调|通知|重试|重复|幂等/i.test(question);
+  const asksIdempotency = /\b(?:retry|duplicate|idempoten(?:t|cy|tly))\b|重试|重复|幂等/i.test(question);
+  const asksCid = /\bcid\b|(?:payout|出款|提币).{0,32}(?:query|status|callback|查询|状态|回调)/i.test(question);
+  const asksCurrency = /\b(?:currency|chain_id|token_id|token|network|USDT|USDC|TRX|195@195)\b|币种|代币|链|网络/i.test(question);
+  const asksCurrencyExample = /\b195@195\b|\b(?:example|e\.g\.)\b|例如|示例/i.test(question);
+  const asksEnvironment = /\b(?:testnet|test token|development|production|environment)\b|测试网|测试代币|开发环境|生产环境/i.test(question);
+  const asksSignature = /\b(?:signature|sign|signed|MD5|authentication)\b|签名|验签|鉴权/i.test(question);
+  const asksCryptoAmount = /\b(?:order_currency|order_amount|crypto(?:currency)?|CoinMarketCap|CMC|FX|USDT|USDC)\b|加密货币|虚币|虚拟币|数字货币|汇率/i.test(question);
+  const asksProjectBoundary = /\b(?:Payment Engine|WaaS).{0,48}(?:project|boundary|difference|payout|withdrawal)|项目边界|项目类型|区别|出款|提币/i.test(question);
+  if (includeEndpoint) {
+    const endpoint = extractEndpoint(text)!;
     items.push(
       lang === 'zh'
-        ? `${apiLabel ? '必须引用 API reference 并写出' : '接口路径'} \`${endpoint.method} ${endpoint.path}\` ${marker}`
-        : `${apiLabel ? 'Cite the API reference endpoint' : 'Endpoint'} \`${endpoint.method} ${endpoint.path}\` ${marker}`,
+        ? `必须引用 API reference 并写出 \`${endpoint.method} ${endpoint.path}\` ${marker}`
+        : `Cite the API reference endpoint \`${endpoint.method} ${endpoint.path}\` ${marker}`,
     );
   }
-  if (/\bdata\.status\b/i.test(text)) {
+  if (asksStatus && /\bdata\.status\b/i.test(text)) {
     items.push(
       lang === 'zh'
         ? `查询接口返回字段 \`data.status\` 表示当前状态 ${marker}`
         : `Response/status field \`data.status\` represents the current status ${marker}`,
     );
   }
-  if (/\bevent_type\b/i.test(text)) {
+  if ((asksStatus || asksCallback) && /\bevent_type\b/i.test(text)) {
     items.push(
       lang === 'zh'
         ? `必须写出“回调事件类型”：\`event_type\` 是回调事件类型，并需要做“状态映射” ${marker}`
         : `Callbacks use \`event_type\` for the event type ${marker}`,
     );
   }
-  if (/幂等|\bidempoten(?:t|cy|tly)\b/i.test(text)) {
+  if (asksIdempotency && /幂等|\bidempoten(?:t|cy|tly)\b/i.test(text)) {
     items.push(
       lang === 'zh'
         ? `处理回调或重复事件时需要做好幂等 ${marker}`
         : `Handle callbacks or duplicate events idempotently ${marker}`,
     );
   }
-  if (/\bcid\b/i.test(text)) {
+  if (asksCid && /\bcid\b/i.test(text)) {
     items.push(
       lang === 'zh'
         ? `保存并使用 \`cid\` 关联后续查询或回调 ${marker}`
         : `Persist and use \`cid\` for follow-up query or callback handling ${marker}`,
     );
   }
-  if (/\bchain_id@token_id\b/i.test(text) || /\b195@195\b/.test(text)) {
+  if (asksCurrency && (/\bchain_id@token_id\b/i.test(text) || /\b195@195\b/.test(text))) {
+    const example = asksCurrencyExample && /\b195@195\b/.test(text)
+      ? (lang === 'zh' ? '，示例为 `195@195`' : ', with `195@195` as the documented example')
+      : '';
     items.push(
       lang === 'zh'
-        ? `说明 \`currency\` 使用 \`chain_id@token_id\` 格式，并保留示例 \`195@195\`（如上下文提供） ${marker}`
-        : `State that \`currency\` uses the \`chain_id@token_id\` format and keep the example \`195@195\` when provided ${marker}`,
+        ? `说明 \`currency\` 使用 \`chain_id@token_id\` 格式${example} ${marker}`
+        : `State that \`currency\` uses the \`chain_id@token_id\` format${example} ${marker}`,
     );
   }
-  if (/测试代币|开发环境|\btest tokens?\b|\bdevelopment environments?\b/i.test(text)) {
+  if (asksEnvironment && /测试代币|开发环境|\btest tokens?\b|\bdevelopment environments?\b/i.test(text)) {
     items.push(
       lang === 'zh'
         ? `必须明确写出测试代币只能用于开发环境，不能直接用于生产环境 ${marker}`
         : `State that test tokens are for development environments only and should not be used directly in production ${marker}`,
     );
   }
-  if (/\bcallback\b/i.test(text) || /回调/.test(text)) {
-    items.push(
-      lang === 'zh'
-        ? `说明回调 / callback 处理要求 ${marker}`
-        : `Mention callback handling requirements ${marker}`,
-    );
-  }
-  if (isSignExcluded(text)) {
+  if (asksSignature && isSignExcluded(text)) {
     items.push(
       lang === 'zh'
         ? `必须明确写出：排除 \`sign\` 字段，\`sign\` 不参与签名计算 ${marker}`
         : `Exclude \`sign\` from signature calculation ${marker}`,
     );
   }
-  if (/HTTP\s*200|\b200\b/i.test(text) && /\bsuccess\b|成功/i.test(text)) {
+  if (asksCallback && /HTTP\s*200|\b200\b/i.test(text) && /\bsuccess\b|成功/i.test(text)) {
     items.push(
       lang === 'zh'
         ? `Webhook 成功响应需包含 HTTP 200 和 \`success\` ${marker}`
         : `Webhook success response should include HTTP 200 and \`success\` ${marker}`,
     );
   }
-  if (mentionsDirectCryptoOrderAmount(text)) {
+  if (asksCryptoAmount && mentionsDirectCryptoOrderAmount(text)) {
     items.push(
       lang === 'zh'
         ? `说明可直接使用加密货币订单币种和金额，订单按该加密货币金额创建 ${marker}`
         : `State that the order can use the crypto order currency and amount directly ${marker}`,
     );
   }
-  if (/\bPayment Engine\b/i.test(text) && /\bWaaS API project\b/i.test(text)) {
+  if (asksProjectBoundary && /\bPayment Engine\b/i.test(text) && /\bWaaS API project\b/i.test(text)) {
     items.push(
       lang === 'zh'
         ? `说明 Payment Engine 项目用于订单/收银台/回调；如需出款或提币，还要创建 WaaS API 项目 ${marker}`
@@ -418,6 +436,23 @@ function answerChecklistItemsForChunk(lang: DocsLang, c: RerankedChunk, citation
     );
   }
   return items;
+}
+
+function endpointHintChunkIndex(question: string, chunks: RerankedChunk[]): number {
+  if (!/\bendpoint\b|\bAPI path\b|接口|接口路径/i.test(question) && !/\/api\//i.test(question)) {
+    return -1;
+  }
+  const lowerQuestion = question.toLowerCase();
+  return chunks.findIndex((chunk) => {
+    if (!isApiReferenceChunk(chunk)) return false;
+    const endpoint = extractEndpoint(`${chunk.page_title}\n${chunk.text}`);
+    if (!endpoint) return false;
+    const leaf = endpoint.path.split('/').at(-1)!;
+    return lowerQuestion.includes(endpoint.path.toLowerCase())
+      || (leaf.length >= 5
+        && !/^(?:create|query|update|info|page)$/i.test(leaf)
+        && lowerQuestion.includes(leaf.toLowerCase()));
+  });
 }
 
 function extractEndpoint(text: string): { method: string; path: string } | null {

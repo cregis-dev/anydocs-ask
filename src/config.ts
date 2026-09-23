@@ -64,19 +64,25 @@ export type RetrievalConfig = {
  * Cross-encoder reranker — optionally re-scores the top RRF candidates as
  * (query, doc) pairs. Disabled by default.
  *
- * When enabled, the reranker re-sorts the top {@link rerankTopK} candidates
- * before aggregation. The size balances recall against linear inference cost.
+ * When enabled, the reranker scores the top {@link rerankTopK} candidates and
+ * blends that ordering with the original hybrid-retrieval order. The window
+ * size balances recall against linear inference cost.
  */
 export type RerankerConfig = {
   enabled: boolean;
   provider: 'bge-cross-encoder' | 'mock';
   model: string;
+  /** Pinned Hugging Face model revision for reproducible ONNX loading. */
+  revision: string | null;
   preferQuantized: boolean;
   /** Tokens per (query, doc) pair fed into the cross-encoder. 512 = model native. */
   maxLength: number;
   /** Size of the RRF candidate window sent to the cross-encoder. Inference is
    *  O(N) in this number. */
   rerankTopK: number;
+  /** Cross-encoder rank weight in the final reciprocal-rank blend. The
+   *  remaining weight preserves exact/BM25/vector retrieval evidence. */
+  weight: number;
 };
 
 export type ServerConfig = {
@@ -324,9 +330,11 @@ const DEFAULTS: ResolvedConfig = {
     enabled: false,
     provider: 'bge-cross-encoder',
     model: 'Xenova/bge-reranker-large',
+    revision: null,
     preferQuantized: true,
     maxLength: 512,
-    rerankTopK: 20,
+    rerankTopK: 8,
+    weight: 0.6,
   },
   server: {
     host: '127.0.0.1',
@@ -513,7 +521,7 @@ function mergeWithDefaults(
   applySection(user.llm, out.llm, 'llm', warnings);
   applyRouter(user.router, out.router, warnings);
   applyRetrieval(user.retrieval, out.retrieval, warnings);
-  applySection(user.reranker, out.reranker, 'reranker', warnings);
+  applyReranker(user.reranker, out.reranker, warnings);
   applyServer(user.server, out.server, warnings);
   applySection(user.indexing, out.indexing, 'indexing', warnings);
   applyRuns(user.runs, out.runs, warnings);
@@ -1045,6 +1053,35 @@ function applyRetrieval(
       continue;
     }
     target[key] = valueForKey;
+  }
+}
+
+function applyReranker(
+  value: unknown,
+  target: RerankerConfig,
+  warnings: string[],
+): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'reranker' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  applySection(obj, target as unknown as Record<string, unknown>, 'reranker', warnings);
+
+  if (obj.rerankTopK !== undefined) {
+    const v = obj.rerankTopK;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > 100) {
+      target.rerankTopK = DEFAULTS.reranker.rerankTopK;
+      warnings.push('anydocs.ask.json: reranker.rerankTopK must be an integer from 1 to 100; using default');
+    }
+  }
+  if (obj.weight !== undefined) {
+    const v = obj.weight;
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) {
+      target.weight = DEFAULTS.reranker.weight;
+      warnings.push('anydocs.ask.json: reranker.weight must be a number from 0 to 1; using default');
+    }
   }
 }
 

@@ -4,6 +4,15 @@
 
 ## Unreleased
 
+### 新增
+
+- **Ragas Context Precision** — 离线评测新增基于人工 Golden reference 的语义 context precision，逐条判断实际生成上下文的相关性与排序，并作为 `ragas_context_precision` 回传 Langfuse；保留确定性的 Context-P@5 用于 page-ID 回归。
+- **可复现、保守融合的 BGE reranker** — 为 `bge-reranker-large` 与 `bge-reranker-v2-m3-ONNX` 固定 Hugging Face revision，并新增 `BGE_RERANKER_REVISION` 覆盖，避免模型仓库更新造成排序漂移。Cregis 92-case A/B 最终采用 large：只重排前 8 个候选，以 0.6 cross-encoder / 0.4 原始 RRF 做 reciprocal-rank 融合，避免精确 API 路径、错误码与字段名命中被纯语义排序降级；reranker 仍默认关闭。
+
+### 修复
+
+- **API 问题意图与回答范围保真** — 仅出现 `request` 与 API 路径时保留完整用户问题；只有长输入、JSON/HTTP transcript、异常栈等真实结构化诊断载荷才走脱敏压缩。回答 checklist 也改为按问题主题筛选并去除跨 chunk 的重复事实，避免签名字段等具体意图丢失后扩写无关 payout / callback 流程。
+
 ## 0.4.0-alpha.7 — 2026-09-18
 
 评测与可观测性 alpha：打通 **Langfuse trace → Golden Dataset → Ragas Experiment** 闭环，增强检索诊断、会话流量分析和发布归因，并上线经 92 条 Golden A/B 验证的 page-level parent context。无 breaking change。

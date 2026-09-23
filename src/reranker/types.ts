@@ -13,8 +13,8 @@
  * Implementations:
  *   - MockReranker (./mock): deterministic identity (returns input order with
  *     dummy scores). Used in unit tests and when reranker is disabled.
- *   - BgeRerankerV2M3 (./bge-reranker-v2-m3): @huggingface/transformers backed,
- *     real model. Multilingual (English + Chinese both strong), ~280MB q8.
+ *   - BgeCrossEncoder (./bge-cross-encoder): @huggingface/transformers backed,
+ *     multilingual model. The supported q8 exports are about 570MB on disk.
  */
 
 export type RerankerInputDoc = {

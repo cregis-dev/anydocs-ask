@@ -55,6 +55,27 @@ test('loadConfig: missing file -> defaults, source = null', async () => {
     assert.equal(r.config.server.port, 3100);
     assert.equal(r.config.server.maxConcurrentAsk, 12);
     assert.deepEqual(r.config.server.cors.allowedOrigins, []);
+    assert.equal(r.config.reranker.model, 'Xenova/bge-reranker-large');
+    assert.equal(r.config.reranker.rerankTopK, 8);
+    assert.equal(r.config.reranker.weight, 0.6);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: reranker validates rank window and blend weight', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({ reranker: { rerankTopK: 0, weight: 1.5 } }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.reranker.rerankTopK, 8);
+    assert.equal(r.config.reranker.weight, 0.6);
+    assert.ok(r.warnings.some((w) => /reranker\.rerankTopK/.test(w)));
+    assert.ok(r.warnings.some((w) => /reranker\.weight/.test(w)));
   } finally {
     await cleanup();
   }
