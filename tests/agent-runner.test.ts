@@ -67,8 +67,7 @@ test('AgenticRagRunner forces discovery + read and binds evidence citations', as
       pageId: 'waas-auth',
       lang: 'en',
     });
-    const model = new MockLanguageModelV3({
-      doGenerate: [
+    const responses = [
         generated([
           {
             type: 'tool-call',
@@ -95,7 +94,13 @@ test('AgenticRagRunner forces discovery + read and binds evidence citations', as
             text: `Sort parameter names, concatenate key and value, prepend the API Key, then calculate lowercase MD5 [${expectedEvidence.evidenceId}].`,
           },
         ], 'stop'),
-      ],
+      ];
+    const modelCalls: Array<{ toolChoice?: { type: string }; tools?: unknown[] }> = [];
+    const model = new MockLanguageModelV3({
+      doGenerate: (options) => {
+        modelCalls.push(options);
+        return responses.shift()!;
+      },
     });
     const runner = new AgenticRagRunner({
       model,
@@ -115,6 +120,8 @@ test('AgenticRagRunner forces discovery + read and binds evidence citations', as
       'lookupExact',
       'readDoc',
     ]);
+    assert.deepEqual(modelCalls[2]?.toolChoice, { type: 'none' });
+    assert.equal(modelCalls[2]?.tools?.length ?? 0, 0);
     assert.equal(response.trace.agent?.evidence[0]?.evidence_id, expectedEvidence.evidenceId);
   } finally {
     db.close();

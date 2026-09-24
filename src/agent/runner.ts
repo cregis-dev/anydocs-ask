@@ -276,6 +276,13 @@ export class AgenticRagRunner {
             activeTools: [] as const,
           };
         }
+        if (checklist.size > 0 && missingFacts.length === 0) {
+          return {
+            instructions,
+            toolChoice: 'none' as const,
+            activeTools: [] as const,
+          };
+        }
         if (missingFacts.length > 0 && budget.canUse('read')) {
           const lastTool = toolTrace.at(-1)?.tool;
           const mustReadAfterDiscovery = lastTool === 'searchDocs' || lastTool === 'lookupExact';
