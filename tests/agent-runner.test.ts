@@ -120,8 +120,11 @@ test('AgenticRagRunner forces discovery + read and binds evidence citations', as
       'lookupExact',
       'readDoc',
     ]);
-    assert.deepEqual(modelCalls[2]?.toolChoice, { type: 'none' });
-    assert.equal(modelCalls[2]?.tools?.length ?? 0, 0);
+    assert.deepEqual(modelCalls[2]?.toolChoice, { type: 'auto' });
+    assert.deepEqual(modelCalls[2]?.tools?.map((entry) => (entry as { name?: string }).name).sort(), [
+      'readDoc',
+      'searchDocs',
+    ]);
     assert.equal(response.trace.agent?.evidence[0]?.evidence_id, expectedEvidence.evidenceId);
   } finally {
     db.close();

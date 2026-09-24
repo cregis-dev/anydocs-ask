@@ -276,13 +276,6 @@ export class AgenticRagRunner {
             activeTools: [] as const,
           };
         }
-        if (checklist.size > 0 && missingFacts.length === 0) {
-          return {
-            instructions,
-            toolChoice: 'none' as const,
-            activeTools: [] as const,
-          };
-        }
         if (missingFacts.length > 0 && budget.canUse('read')) {
           const lastTool = toolTrace.at(-1)?.tool;
           const mustReadAfterDiscovery = lastTool === 'searchDocs' || lastTool === 'lookupExact';
@@ -294,10 +287,31 @@ export class AgenticRagRunner {
               : ['readDoc', 'searchDocs'] as const,
           };
         }
+        if (budget.canUse('read') && budget.canUse('supplemental')) {
+          return {
+            instructions,
+            toolChoice: 'auto' as const,
+            activeTools: ['readDoc', 'searchDocs'] as const,
+          };
+        }
+        if (budget.canUse('read')) {
+          return {
+            instructions,
+            toolChoice: 'auto' as const,
+            activeTools: ['readDoc'] as const,
+          };
+        }
+        if (budget.canUse('supplemental')) {
+          return {
+            instructions,
+            toolChoice: 'auto' as const,
+            activeTools: ['searchDocs'] as const,
+          };
+        }
         return {
           instructions,
-          toolChoice: 'auto' as const,
-          activeTools: ['lookupExact', 'searchDocs', 'readDoc'] as const,
+          toolChoice: 'none' as const,
+          activeTools: [] as const,
         };
       },
     });
@@ -504,7 +518,7 @@ Rules:
 6. If decisive evidence is missing, use at most one focused supplemental search. Say the documentation did not specify something only after checking the authoritative page.
 7. For an exact algorithm, signature input, formula, ordering rule, or calculation, an endpoint/schema page that only mentions the field is insufficient. Read the authoritative rule page and verify that the decisive operations appear in evidence before answering.
 8. Prefer a dedicated operation whose title and description match the user's source object and action. Do not substitute a generic endpoint merely because it exposes overlapping fields; search again when a more specific operation may exist.
-9. Before the final answer, silently check that every required fact is covered by decisive evidence. If the runtime checklist says a fact is missing and tool budget remains, read another candidate or run one focused supplemental search. Never narrate this check or mention the checklist.
+9. Before the final answer, silently check that every required fact is explicitly supported by decisive evidence. A runtime status of covered means only that related wording was found; it does not prove the full fact. If the body does not explicitly entail the fact, read another candidate or run one focused supplemental search while budget remains. Never narrate this check or mention the checklist.
 10. Answer only the requested parts. Unless asked, omit full request/response examples, setup, rate limits, and related workflows; normally stay under 250 words.
 11. Respond in ${lang === 'zh' ? 'Chinese' : 'English'}. Keep the final answer concise and practical.${checklist}${custom}`;
 }
