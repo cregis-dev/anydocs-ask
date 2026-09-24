@@ -93,6 +93,10 @@ test('EvidenceChecklist reports missing terms and combines coverage across read 
       description: 'callback notification content',
       searchTerms: ['回调通知内容'],
     },
+    {
+      description: 'localhost callback support',
+      searchTerms: ['localhost callback url'],
+    },
   ]);
   const auth = {
     ...evidence('ev_11111111111111111111', 'auth'),
@@ -104,6 +108,7 @@ test('EvidenceChecklist reports missing terms and combines coverage across read 
   assert.equal(first[1]?.covered, false);
   assert.deepEqual(first[1]?.missingTerms, ['lowercase MD5']);
   assert.equal(first[2]?.covered, false);
+  assert.equal(first[3]?.covered, false);
 
   const hashing = {
     ...evidence('ev_22222222222222222222', 'hashing'),
@@ -120,7 +125,8 @@ test('EvidenceChecklist reports missing terms and combines coverage across read 
   assert.deepEqual(complete[1]?.evidenceIds, [hashing.evidenceId]);
   assert.equal(complete[2]?.covered, true, 'CJK aliases tolerate a partial phrase match');
   assert.deepEqual(complete[2]?.evidenceIds, [callback.evidenceId]);
+  assert.equal(complete[3]?.covered, false, 'technical aliases require every distinctive token');
 
   checklist.capture([{ description: 'replacement plan', searchTerms: ['ignored'] }]);
-  assert.equal(checklist.size, 3, 'later discovery calls cannot replace the original plan');
+  assert.equal(checklist.size, 4, 'later discovery calls cannot replace the original plan');
 });

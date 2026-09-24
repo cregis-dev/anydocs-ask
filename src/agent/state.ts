@@ -184,15 +184,14 @@ function matchesCoverageTerm(normalizedBody: string, rawTerm: string): boolean {
   if (normalizedBody.includes(term)) return true;
 
   const technicalTokens = [...new Set(term.match(/[a-z0-9_@/.:-]{3,}/g) ?? [])];
-  if (technicalTokens.length > 0) {
-    const matches = technicalTokens.filter((token) => normalizedBody.includes(token)).length;
-    if (matches / technicalTokens.length >= 0.6) return true;
+  if (technicalTokens.length > 0 && !technicalTokens.every((token) => normalizedBody.includes(token))) {
+    return false;
   }
 
   const cjk = [...term.matchAll(/[\p{Script=Han}]{2,}/gu)]
     .map((match) => match[0]!)
     .join('');
-  if (cjk.length < 4) return false;
+  if (cjk.length < 4) return technicalTokens.length > 0;
   const bigrams = [...new Set(Array.from({ length: cjk.length - 1 }, (_, index) => cjk.slice(index, index + 2)))];
   const matches = bigrams.filter((bigram) => normalizedBody.includes(bigram)).length;
   return matches / bigrams.length >= 0.6;
