@@ -89,6 +89,10 @@ test('EvidenceChecklist reports missing terms and combines coverage across read 
       description: 'the digest is lowercase MD5',
       searchTerms: ['lowercase MD5'],
     },
+    {
+      description: 'callback notification content',
+      searchTerms: ['回调通知内容'],
+    },
   ]);
   const auth = {
     ...evidence('ev_11111111111111111111', 'auth'),
@@ -99,17 +103,24 @@ test('EvidenceChecklist reports missing terms and combines coverage across read 
   assert.deepEqual(first[0]?.missingTerms, []);
   assert.equal(first[1]?.covered, false);
   assert.deepEqual(first[1]?.missingTerms, ['lowercase MD5']);
+  assert.equal(first[2]?.covered, false);
 
   const hashing = {
     ...evidence('ev_22222222222222222222', 'hashing'),
     body: 'Calculate the result as lowercase MD5.',
   };
-  const complete = checklist.snapshot([auth, hashing]);
+  const callback = {
+    ...evidence('ev_44444444444444444444', 'callback'),
+    body: '收到充值后，系统会发送回调通知。',
+  };
+  const complete = checklist.snapshot([auth, hashing, callback]);
   assert.equal(complete[0]?.covered, true);
   assert.deepEqual(complete[0]?.evidenceIds, [auth.evidenceId]);
   assert.equal(complete[1]?.covered, true);
   assert.deepEqual(complete[1]?.evidenceIds, [hashing.evidenceId]);
+  assert.equal(complete[2]?.covered, true, 'CJK aliases tolerate a partial phrase match');
+  assert.deepEqual(complete[2]?.evidenceIds, [callback.evidenceId]);
 
   checklist.capture([{ description: 'replacement plan', searchTerms: ['ignored'] }]);
-  assert.equal(checklist.size, 2, 'later discovery calls cannot replace the original plan');
+  assert.equal(checklist.size, 3, 'later discovery calls cannot replace the original plan');
 });
