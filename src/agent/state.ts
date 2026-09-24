@@ -1,6 +1,18 @@
 import type { AgentConfig } from '../config.ts';
 import type { EvidenceRecord } from './evidence.ts';
 
+export type RequiredFactInput = {
+  description: string;
+  searchTerms: string[];
+};
+
+export type RequiredFactStatus = RequiredFactInput & {
+  id: string;
+  covered: boolean;
+  evidenceIds: string[];
+  missingTerms: string[];
+};
+
 export type AgentToolKind = 'discovery' | 'read' | 'supplemental';
 
 export class AgentBudget {
@@ -105,6 +117,66 @@ export class EvidenceLedger {
       unknownIds,
     };
   }
+}
+
+/**
+ * A compact, deterministic guard against premature answers. The model states
+ * the facts it needs while issuing its first discovery call, then this class
+ * checks whether the requested technical terms actually occur in readDoc
+ * evidence. It does not claim semantic entailment; it only decides whether
+ * another read/search step is warranted.
+ */
+export class EvidenceChecklist {
+  private facts: RequiredFactInput[] = [];
+
+  capture(facts: RequiredFactInput[] | undefined): void {
+    if (this.facts.length > 0 || !facts?.length) return;
+    const seen = new Set<string>();
+    this.facts = facts.flatMap((fact) => {
+      const description = fact.description.trim();
+      const searchTerms = [...new Set(fact.searchTerms.map((term) => term.trim()).filter(Boolean))]
+        .slice(0, 5);
+      const key = `${description.toLocaleLowerCase()}\0${searchTerms.join('\0').toLocaleLowerCase()}`;
+      if (!description || searchTerms.length === 0 || seen.has(key)) return [];
+      seen.add(key);
+      return [{ description, searchTerms }];
+    }).slice(0, 6);
+  }
+
+  get size(): number {
+    return this.facts.length;
+  }
+
+  snapshot(evidence: EvidenceRecord[]): RequiredFactStatus[] {
+    const normalizedEvidence = evidence.map((record) => ({
+      id: record.evidenceId,
+      body: normalizeForCoverage(record.body),
+    }));
+    return this.facts.map((fact, index) => {
+      const missingTerms = fact.searchTerms.filter((term) => {
+        const normalizedTerm = normalizeForCoverage(term);
+        return !normalizedTerm || !normalizedEvidence.some((record) => record.body.includes(normalizedTerm));
+      });
+      const evidenceIds = normalizedEvidence
+        .filter((record) => fact.searchTerms.some((term) => record.body.includes(normalizeForCoverage(term))))
+        .map((record) => record.id);
+      return {
+        id: `fact_${index + 1}`,
+        ...fact,
+        covered: missingTerms.length === 0,
+        evidenceIds,
+        missingTerms,
+      };
+    });
+  }
+
+  missing(evidence: EvidenceRecord[]): RequiredFactStatus[] {
+    return this.snapshot(evidence).filter((fact) => !fact.covered);
+  }
+}
+
+function normalizeForCoverage(value: string): string {
+  return value.normalize('NFKC').toLocaleLowerCase().replace(/\s+/g, ' ').trim();
 }
 
 export class AgentBudgetExceededError extends Error {

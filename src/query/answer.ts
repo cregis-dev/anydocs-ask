@@ -134,6 +134,7 @@ export type AskTrace = {
    *  implementation handled this request; additive for runs compatibility. */
   agent?: {
     steps: number;
+    citation_retry_count?: number;
     tool_calls: Array<{
       tool: string;
       ok: boolean;
@@ -150,6 +151,14 @@ export type AskTrace = {
       token_count: number;
       truncated: boolean;
       content_hash: string;
+    }>;
+    required_facts?: Array<{
+      id: string;
+      description: string;
+      search_terms: string[];
+      covered: boolean;
+      evidence_ids: string[];
+      missing_terms: string[];
     }>;
     budget: {
       discovery: { used: number; limit: number };

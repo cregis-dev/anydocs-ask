@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AgentConfig } from '../src/config.ts';
-import { AgentBudget, AgentBudgetExceededError, EvidenceLedger } from '../src/agent/state.ts';
+import {
+  AgentBudget,
+  AgentBudgetExceededError,
+  EvidenceChecklist,
+  EvidenceLedger,
+} from '../src/agent/state.ts';
 import type { EvidenceRecord } from '../src/agent/evidence.ts';
 
 const config: AgentConfig = {
@@ -71,4 +76,32 @@ test('EvidenceLedger deduplicates reads and binds only known evidence ids', () =
   assert.equal(resolved.answer, 'Use the auth rule [cit_1], then submit [cit_2]. Ignore .');
   assert.deepEqual(resolved.records.map((record) => record.pageId), ['auth', 'payout']);
   assert.deepEqual(resolved.unknownIds, ['ev_ffffffffffffffffffff']);
+});
+
+test('EvidenceChecklist reports missing terms and combines coverage across read evidence', () => {
+  const checklist = new EvidenceChecklist();
+  checklist.capture([
+    {
+      description: 'canonical signature preimage',
+      searchTerms: ['lexicographical order', 'API Key', 'lowercase MD5'],
+    },
+  ]);
+  const auth = {
+    ...evidence('ev_11111111111111111111', 'auth'),
+    body: 'Sort parameter names in lexicographical order and prepend the API Key.',
+  };
+  const first = checklist.snapshot([auth]);
+  assert.equal(first[0]?.covered, false);
+  assert.deepEqual(first[0]?.missingTerms, ['lowercase MD5']);
+
+  const hashing = {
+    ...evidence('ev_22222222222222222222', 'hashing'),
+    body: 'Calculate the result as lowercase MD5.',
+  };
+  const complete = checklist.snapshot([auth, hashing]);
+  assert.equal(complete[0]?.covered, true);
+  assert.deepEqual(complete[0]?.evidenceIds, [auth.evidenceId, hashing.evidenceId]);
+
+  checklist.capture([{ description: 'replacement plan', searchTerms: ['ignored'] }]);
+  assert.equal(checklist.size, 1, 'later discovery calls cannot replace the original plan');
 });
