@@ -288,7 +288,7 @@ export class AgenticRagRunner {
           const mustReadAfterDiscovery = lastTool === 'searchDocs' || lastTool === 'lookupExact';
           return {
             instructions,
-            toolChoice: 'required' as const,
+            toolChoice: mustReadAfterDiscovery ? 'required' as const : 'auto' as const,
             activeTools: mustReadAfterDiscovery || !budget.canUse('supplemental')
               ? ['readDoc'] as const
               : ['readDoc', 'searchDocs'] as const,
