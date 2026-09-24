@@ -82,8 +82,12 @@ test('EvidenceChecklist reports missing terms and combines coverage across read 
   const checklist = new EvidenceChecklist();
   checklist.capture([
     {
-      description: 'canonical signature preimage',
-      searchTerms: ['lexicographical order', 'API Key', 'lowercase MD5'],
+      description: 'parameters are sorted lexicographically',
+      searchTerms: ['lexicographical order', 'dictionary order'],
+    },
+    {
+      description: 'the digest is lowercase MD5',
+      searchTerms: ['lowercase MD5'],
     },
   ]);
   const auth = {
@@ -91,8 +95,10 @@ test('EvidenceChecklist reports missing terms and combines coverage across read 
     body: 'Sort parameter names in lexicographical order and prepend the API Key.',
   };
   const first = checklist.snapshot([auth]);
-  assert.equal(first[0]?.covered, false);
-  assert.deepEqual(first[0]?.missingTerms, ['lowercase MD5']);
+  assert.equal(first[0]?.covered, true);
+  assert.deepEqual(first[0]?.missingTerms, []);
+  assert.equal(first[1]?.covered, false);
+  assert.deepEqual(first[1]?.missingTerms, ['lowercase MD5']);
 
   const hashing = {
     ...evidence('ev_22222222222222222222', 'hashing'),
@@ -100,8 +106,10 @@ test('EvidenceChecklist reports missing terms and combines coverage across read 
   };
   const complete = checklist.snapshot([auth, hashing]);
   assert.equal(complete[0]?.covered, true);
-  assert.deepEqual(complete[0]?.evidenceIds, [auth.evidenceId, hashing.evidenceId]);
+  assert.deepEqual(complete[0]?.evidenceIds, [auth.evidenceId]);
+  assert.equal(complete[1]?.covered, true);
+  assert.deepEqual(complete[1]?.evidenceIds, [hashing.evidenceId]);
 
   checklist.capture([{ description: 'replacement plan', searchTerms: ['ignored'] }]);
-  assert.equal(checklist.size, 1, 'later discovery calls cannot replace the original plan');
+  assert.equal(checklist.size, 2, 'later discovery calls cannot replace the original plan');
 });

@@ -153,9 +153,9 @@ export class EvidenceChecklist {
       body: normalizeForCoverage(record.body),
     }));
     return this.facts.map((fact, index) => {
-      const missingTerms = fact.searchTerms.filter((term) => {
+      const matchedTerms = fact.searchTerms.filter((term) => {
         const normalizedTerm = normalizeForCoverage(term);
-        return !normalizedTerm || !normalizedEvidence.some((record) => record.body.includes(normalizedTerm));
+        return normalizedTerm && normalizedEvidence.some((record) => record.body.includes(normalizedTerm));
       });
       const evidenceIds = normalizedEvidence
         .filter((record) => fact.searchTerms.some((term) => record.body.includes(normalizeForCoverage(term))))
@@ -163,9 +163,9 @@ export class EvidenceChecklist {
       return {
         id: `fact_${index + 1}`,
         ...fact,
-        covered: missingTerms.length === 0,
+        covered: matchedTerms.length > 0,
         evidenceIds,
-        missingTerms,
+        missingTerms: matchedTerms.length > 0 ? [] : fact.searchTerms,
       };
     });
   }

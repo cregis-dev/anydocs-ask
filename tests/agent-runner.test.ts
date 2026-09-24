@@ -267,16 +267,22 @@ test('AgenticRagRunner continues discovery when required facts are absent from t
           identifier: '/api/v1/payout',
           lang: 'en',
           requiredFacts: [{
-            description: 'canonical signature construction',
-            searchTerms: ['lexicographical order', 'lowercase MD5'],
+            description: 'parameters are sorted lexicographically',
+            searchTerms: ['lexicographical order'],
+          }, {
+            description: 'the digest uses lowercase MD5',
+            searchTerms: ['lowercase MD5'],
           }],
         }) }], 'tool-calls'),
         generated([{ type: 'tool-call', toolCallId: 'call-2', toolName: 'readDoc', input: JSON.stringify({ pageId: 'payout', lang: 'en', mode: 'page' }) }], 'tool-calls'),
         generated([{ type: 'tool-call', toolCallId: 'call-3', toolName: 'searchDocs', input: JSON.stringify({
           query: 'lexicographical order lowercase MD5 signature',
           requiredFacts: [{
-            description: 'canonical signature construction',
-            searchTerms: ['lexicographical order', 'lowercase MD5'],
+            description: 'parameters are sorted lexicographically',
+            searchTerms: ['lexicographical order'],
+          }, {
+            description: 'the digest uses lowercase MD5',
+            searchTerms: ['lowercase MD5'],
           }],
         }) }], 'tool-calls'),
         generated([{ type: 'tool-call', toolCallId: 'call-4', toolName: 'readDoc', input: JSON.stringify({ pageId: 'auth', lang: 'en', mode: 'page' }) }], 'tool-calls'),
