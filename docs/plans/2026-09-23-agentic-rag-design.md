@@ -186,7 +186,7 @@ Langfuse 继续使用仓库已固定的 `@langfuse/client`、`@langfuse/otel`、
 
 ## 12. 当前实现状态
 
-第一阶段已落地为 feature flag：`agent.enabled=false` 保持现有生产行为，启用后 `/v1/ask`、SSE、Reader、Console 与 MCP `ask` 共用单 Agent 入口。Agent 暴露 `lookupExact`、`searchDocs`、`browseCatalog`、`readDoc` 四个进程内只读工具，执行层独立限制 discovery/read/supplemental-search 次数，并以稳定 `evidence_id` 校验最终引用。
+第一阶段已落地为 feature flag：`agent.enabled=false` 保持现有生产行为，启用后 `/v1/ask`、SSE、Reader、Console 与 MCP `ask` 共用单 Agent 入口。Agent 暴露 `lookupExact`、`searchDocs`、`browseCatalog`、`readDoc` 四个进程内只读工具，执行层独立限制 discovery/read/supplemental-search 次数，并以稳定 `evidence_id` 校验最终引用。`browseCatalog` 是零参数导航工具，按当前问题语言返回完整的 section/folder/page 结构树，不受 scope 或 discovery 次数预算裁剪，且从第一步起到最终回答前始终可用；目录项本身不能作为引用。
 
 短页面按结构化 parent 去重后整页读取，长页面支持 section/field 定向读取并受 token 上限约束；候选 snippet 不能直接成为引用。Langfuse 顶层记录为 `agent`，每次发现/读取记录为 `retriever`，AI SDK telemetry 记录模型和 tool loop。SSE 首版在引用校验完成后发送一次答案 delta，暂不流出未经验证的中间文本。
 

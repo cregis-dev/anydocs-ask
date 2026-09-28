@@ -147,10 +147,7 @@ test('POST /v1/ask uses the evidence-first agent when enabled', async () => {
             type: 'tool-call',
             toolCallId: 'catalog-1',
             toolName: 'browseCatalog',
-            input: JSON.stringify({
-              lang: 'zh',
-              requiredFacts: [{ description: '鉴权方式', searchTerms: ['JWT', 'bearer token'] }],
-            }),
+            input: JSON.stringify({}),
           }],
           finishReason: { unified: 'tool-calls', raw: 'tool-calls' },
           usage,
@@ -215,6 +212,7 @@ test('POST /v1/ask uses the evidence-first agent when enabled', async () => {
         'readDoc',
       ]);
       assert.equal(run.retrieval.agent?.evidence.length, 1);
+      assert.equal(run.retrieval.agent?.budget.discovery.used, 0);
     }
   } finally {
     await runtime.stop();

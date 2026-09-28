@@ -6,12 +6,15 @@
 
 ### 新增
 
+- **Eval 低分 trace 下钻** — 完整 Golden eval 现在为每条 case 记录真实 Agent Langfuse trace，并将确定性质量指标、required-fact 覆盖、工具错误和 citation retry 写成 observation scores；Ragas 发布器把语义分数回写到原始 trace，Experiment 输出同时保留 source trace / observation ID、reference answer、原子 reference facts 与 case rubric，可从低分样本直接对照 Golden 并定位规划、检索、读文档与生成阶段。
 - **Evidence-first Agentic RAG（feature flag）** — 新增统一的单 Agent 问答入口与 `lookupExact`、`searchDocs`、`browseCatalog`、`readDoc` 四个进程内只读工具；候选只负责导航，只有读取后的稳定 evidence ID 可以成为引用。工具次数、步骤、超时和读取 token 均有硬预算，完整调用链写入 runs/Langfuse；`agent.enabled=false` 默认保持现有生产行为。
+- **结构化全量文档目录** — `browseCatalog` 改为零参数工具，按问题语言返回完整的 section/folder/page 导航树，不受 `scope_id` 或 discovery 次数预算裁剪，并在 Agent 最终回答前的每一步均可用于选页；目录项仍只负责导航，必须经 `readDoc` 才能形成可引用证据。
 - **Ragas Context Precision** — 离线评测新增基于人工 Golden reference 的语义 context precision，逐条判断实际生成上下文的相关性与排序，并作为 `ragas_context_precision` 回传 Langfuse；保留确定性的 Context-P@5 用于 page-ID 回归。
 - **可复现、保守融合的 BGE reranker** — 为 `bge-reranker-large` 与 `bge-reranker-v2-m3-ONNX` 固定 Hugging Face revision，并新增 `BGE_RERANKER_REVISION` 覆盖，避免模型仓库更新造成排序漂移。Cregis 92-case A/B 最终采用 large：只重排前 8 个候选，以 0.6 cross-encoder / 0.4 原始 RRF 做 reciprocal-rank 融合，避免精确 API 路径、错误码与字段名命中被纯语义排序降级；reranker 仍默认关闭。
 
 ### 修复
 
+- **Agent 工具调用协议恢复** — `deepseek-flash` 在强制工具调用阶段偶发返回普通文本时，首步无证据场景会执行一次明确的工具调用重试；已经读取证据的晚期失败则进入一次无工具、仅限 Evidence Ledger 的收尾生成，并继续通过引用解析、修复与校验。新增 `forced_finalization_count` 诊断和 Langfuse score；Cregis 92-case 回归由 11 条 `agent_failed` 降至 0 条。
 - **API 问题意图与回答范围保真** — 仅出现 `request` 与 API 路径时保留完整用户问题；只有长输入、JSON/HTTP transcript、异常栈等真实结构化诊断载荷才走脱敏压缩。回答 checklist 也改为按问题主题筛选并去除跨 chunk 的重复事实，避免签名字段等具体意图丢失后扩写无关 payout / callback 流程。
 
 ## 0.4.0-alpha.7 — 2026-09-18

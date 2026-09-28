@@ -47,11 +47,7 @@ def publish_experiment(
     def task(*, item: Any, **_: Any) -> dict[str, Any]:
         case_id = str(item.input["case_id"])
         sample = samples_by_id[case_id]
-        return {
-            "case_id": case_id,
-            "response": sample["response"],
-            "retrieved_contexts": sample["retrieved_contexts"],
-        }
+        return _experiment_output(case_id, sample)
 
     def evaluator(*, input: Any, **_: Any) -> list[Any]:
         result = results_by_id[str(input["case_id"])]
@@ -73,8 +69,23 @@ def publish_experiment(
             "judge_model": str(metadata["judge_model"]),
         },
     )
+    _publish_source_trace_scores(langfuse, samples_by_id, results)
     langfuse.flush()
     return experiment.dataset_run_url
+
+
+def _experiment_output(case_id: str, sample: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "case_id": case_id,
+        "response": sample["response"],
+        "retrieved_contexts": sample["retrieved_contexts"],
+        "reference_answer": sample.get("reference"),
+        "reference_facts": sample.get("reference_facts", []),
+        "evaluation_rubric": sample.get("rubric", {}),
+        "source_trace_id": sample.get("source_trace_id"),
+        "source_observation_id": sample.get("source_observation_id"),
+        "agent_diagnostics": sample.get("agent_diagnostics", {}),
+    }
 
 
 def _evaluations_for_result(result: dict[str, Any]) -> list[Any]:
@@ -88,6 +99,36 @@ def _evaluations_for_result(result: dict[str, Any]) -> list[Any]:
         )
         for name, score in result["scores"].items()
     ]
+
+
+def _publish_source_trace_scores(
+    langfuse: Any,
+    samples_by_id: dict[str, dict[str, Any]],
+    results: list[dict[str, Any]],
+) -> int:
+    published = 0
+    for result in results:
+        case_id = str(result["case_id"])
+        sample = samples_by_id.get(case_id, {})
+        trace_id = sample.get("source_trace_id")
+        observation_id = sample.get("source_observation_id")
+        if not isinstance(trace_id, str) or not trace_id.strip():
+            continue
+        for name, score in result["scores"].items():
+            score_id = str(uuid5(NAMESPACE_URL, f"anydocs-ragas:{trace_id}:{name}"))
+            langfuse.create_score(
+                score_id=score_id,
+                trace_id=trace_id,
+                observation_id=observation_id
+                if isinstance(observation_id, str) and observation_id.strip()
+                else None,
+                name=f"ragas_{name}",
+                value=float(score["value"]),
+                data_type="NUMERIC",
+                comment=score.get("reason"),
+            )
+            published += 1
+    return published
 
 
 def _ensure_dataset(

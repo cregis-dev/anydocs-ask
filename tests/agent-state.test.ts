@@ -97,6 +97,15 @@ test('EvidenceChecklist reports missing terms and combines coverage across read 
       description: 'localhost callback support',
       searchTerms: ['localhost callback url'],
     },
+    {
+      description: 'Payment Engine callback identity',
+      searchTerms: ['callback identity', 'cregis_id'],
+      requiredTerms: ['Payment Engine', 'cregis_id'],
+    },
+    {
+      description: 'webhook signature verification procedure',
+      searchTerms: ['webhook signature verification algorithm'],
+    },
   ]);
   const auth = {
     ...evidence('ev_11111111111111111111', 'auth'),
@@ -109,6 +118,8 @@ test('EvidenceChecklist reports missing terms and combines coverage across read 
   assert.deepEqual(first[1]?.missingTerms, ['lowercase MD5']);
   assert.equal(first[2]?.covered, false);
   assert.equal(first[3]?.covered, false);
+  assert.equal(first[4]?.covered, false);
+  assert.equal(first[5]?.covered, false);
 
   const hashing = {
     ...evidence('ev_22222222222222222222', 'hashing'),
@@ -126,7 +137,38 @@ test('EvidenceChecklist reports missing terms and combines coverage across read 
   assert.equal(complete[2]?.covered, true, 'CJK aliases tolerate a partial phrase match');
   assert.deepEqual(complete[2]?.evidenceIds, [callback.evidenceId]);
   assert.equal(complete[3]?.covered, false, 'technical aliases require every distinctive token');
+  assert.equal(complete[4]?.covered, false, 'an identifier without its product scope is insufficient');
+  assert.equal(complete[5]?.covered, false);
+
+  const scopedCallback = {
+    ...evidence('ev_55555555555555555555', 'payment-callback'),
+    body: 'Payment Engine webhook callbacks use cregis_id as the callback identity. ' +
+      'The signature verification procedure is documented here.',
+  };
+  const scoped = checklist.snapshot([auth, hashing, callback, scopedCallback]);
+  assert.equal(scoped[4]?.covered, true);
+  assert.deepEqual(scoped[4]?.evidenceIds, [scopedCallback.evidenceId]);
+  assert.equal(scoped[5]?.covered, true, 'natural-language aliases tolerate one framing word');
 
   checklist.capture([{ description: 'replacement plan', searchTerms: ['ignored'] }]);
-  assert.equal(checklist.size, 4, 'later discovery calls cannot replace the original plan');
+  assert.equal(checklist.size, 6, 'later discovery calls cannot replace the original plan');
+});
+
+test('EvidenceChecklist discards speculative exact anchors not present in the question', () => {
+  const checklist = new EvidenceChecklist();
+  checklist.capture([
+    {
+      description: 'hash algorithm used for callback verification',
+      searchTerms: ['SHA256', 'MD5', 'hash algorithm'],
+      requiredTerms: ['SHA256', 'MD5', 'webhook'],
+    },
+  ], 'Which hash algorithm does the webhook use?');
+
+  const callback = {
+    ...evidence('ev_66666666666666666666', 'webhook'),
+    body: 'Webhook signatures use lowercase MD5.',
+  };
+  const [status] = checklist.snapshot([callback]);
+  assert.deepEqual(status?.requiredTerms, ['webhook']);
+  assert.equal(status?.covered, true);
 });

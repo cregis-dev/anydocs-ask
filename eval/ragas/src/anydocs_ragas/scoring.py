@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import json
 from typing import Any, Protocol
 
 from .models import EvalSample
@@ -11,6 +12,7 @@ SUPPORTED_METRICS = (
     "faithfulness",
     "context_precision",
     "context_recall",
+    "reference_fact_recall",
     "answer_relevancy",
     "factual_correctness",
     "rubric_compliance",
@@ -26,6 +28,7 @@ class Scorers:
     faithfulness: MetricScorer | None = None
     context_precision: MetricScorer | None = None
     context_recall: MetricScorer | None = None
+    reference_fact_recall: MetricScorer | None = None
     answer_relevancy: MetricScorer | None = None
     factual_correctness: MetricScorer | None = None
     rubric_compliance: MetricScorer | None = None
@@ -126,12 +129,20 @@ def build_scorers(settings: ProviderSettings, metrics: set[str]) -> Scorers:
         )
         relevancy = AnswerRelevancy(llm=llm, embeddings=embeddings)
 
+    context_recall_scorer = (
+        ContextRecall(llm=llm)
+        if {"context_recall", "reference_fact_recall"}.intersection(metrics)
+        else None
+    )
     return Scorers(
         faithfulness=Faithfulness(llm=llm) if "faithfulness" in metrics else None,
         context_precision=ContextPrecision(llm=llm)
         if "context_precision" in metrics
         else None,
-        context_recall=ContextRecall(llm=llm) if "context_recall" in metrics else None,
+        context_recall=context_recall_scorer if "context_recall" in metrics else None,
+        reference_fact_recall=(
+            context_recall_scorer if "reference_fact_recall" in metrics else None
+        ),
         answer_relevancy=relevancy,
         factual_correctness=FactualCorrectness(llm=llm)
         if "factual_correctness" in metrics
@@ -193,6 +204,19 @@ async def score_sample(sample: EvalSample, scorers: Scorers) -> dict[str, Any]:
                 user_input=sample.user_input,
                 retrieved_contexts=sample.retrieved_contexts,
                 reference=sample.reference,
+            )
+
+    if scorers.reference_fact_recall is not None:
+        if not sample.reference_facts:
+            skipped["reference_fact_recall"] = "golden case has no atomic reference facts"
+        elif not sample.retrieved_contexts:
+            skipped["reference_fact_recall"] = "no retrieved contexts"
+        else:
+            await _score_reference_fact_recall(
+                scorers.reference_fact_recall,
+                sample,
+                scores,
+                errors,
             )
 
     if scorers.context_precision is not None:
@@ -286,6 +310,44 @@ async def _score_metric(
         }
     except Exception as error:  # The batch must survive one judge/provider failure.
         errors[name] = f"{type(error).__name__}: {error}"
+
+
+async def _score_reference_fact_recall(
+    scorer: MetricScorer,
+    sample: EvalSample,
+    scores: dict[str, dict[str, Any]],
+    errors: dict[str, str],
+) -> None:
+    """Score each curated reference fact independently, then macro-average.
+
+    Ragas ContextRecall may decompose a multi-clause reference answer into a
+    single statement. A single omitted clause can therefore turn an otherwise
+    useful result into 0. This companion metric preserves the curated Golden
+    fact boundaries so the score remains attributable and actionable.
+    """
+    fact_results: list[dict[str, Any]] = []
+    try:
+        for fact in sample.reference_facts:
+            result = await scorer.ascore(
+                user_input=sample.user_input,
+                retrieved_contexts=sample.retrieved_contexts,
+                reference=fact,
+            )
+            fact_results.append(
+                {
+                    "fact": fact,
+                    "value": float(result.value),
+                    "reason": getattr(result, "reason", None),
+                }
+            )
+    except Exception as error:  # Keep batch behaviour consistent with other metrics.
+        errors["reference_fact_recall"] = f"{type(error).__name__}: {error}"
+        return
+
+    scores["reference_fact_recall"] = {
+        "value": sum(result["value"] for result in fact_results) / len(fact_results),
+        "reason": json.dumps(fact_results, ensure_ascii=False),
+    }
 
 
 def _rubric_reference(sample: EvalSample) -> str | None:

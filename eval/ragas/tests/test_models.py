@@ -16,6 +16,18 @@ def test_extracts_v2_ragas_sample(tmp_path):
         "schema_version": 2,
         "case_id": "case-1",
         "lang": "zh",
+        "langfuse_trace_id": "trace-1",
+        "langfuse_observation_id": "observation-1",
+        "trace": {
+            "agent": {
+                "steps": 3,
+                "tool_choice_retry_count": 1,
+                "forced_finalization_count": 1,
+                "citation_retry_count": 1,
+                "required_facts": [{"covered": True}, {"covered": False}],
+                "tool_calls": [{"ok": True}, {"ok": False}],
+            }
+        },
         "ragas_sample": {
             "user_input": "手续费怎么计算？",
             "response": "按文档公式计算。",
@@ -31,7 +43,19 @@ def test_extracts_v2_ragas_sample(tmp_path):
     assert sample.case_id == "case-1"
     assert sample.reference == "手续费按公式计算。"
     assert sample.retrieved_contexts == ["手续费公式"]
+    assert sample.source_trace_id == "trace-1"
+    assert sample.source_observation_id == "observation-1"
+    assert sample.agent_diagnostics == {
+        "steps": 3,
+        "tool_choice_retry_count": 1,
+        "forced_finalization_count": 1,
+        "citation_retry_count": 1,
+        "required_fact_count": 2,
+        "missing_fact_count": 1,
+        "tool_error_count": 1,
+    }
     assert coverage([sample])["reference_coverage"] == 1.0
+    assert coverage([sample])["source_trace_coverage"] == 1.0
 
 
 def test_legacy_trace_builds_reference_from_atomic_facts():

@@ -4,6 +4,13 @@ import type { EvidenceRecord } from './evidence.ts';
 export type RequiredFactInput = {
   description: string;
   searchTerms: string[];
+  /**
+   * Exact anchors copied from the user question that must occur together in
+   * one evidence record. searchTerms remain alternative ways to locate the
+   * fact; requiredTerms prevent a broad alias from declaring a scoped fact
+   * covered without letting the model guess the unknown answer in advance.
+   */
+  requiredTerms?: string[];
 };
 
 export type RequiredFactStatus = RequiredFactInput & {
@@ -129,17 +136,28 @@ export class EvidenceLedger {
 export class EvidenceChecklist {
   private facts: RequiredFactInput[] = [];
 
-  capture(facts: RequiredFactInput[] | undefined): void {
+  capture(facts: RequiredFactInput[] | undefined, anchorSource?: string): void {
     if (this.facts.length > 0 || !facts?.length) return;
     const seen = new Set<string>();
+    const normalizedAnchorSource = anchorSource == null
+      ? null
+      : normalizeForCoverage(anchorSource);
     this.facts = facts.flatMap((fact) => {
       const description = fact.description.trim();
       const searchTerms = [...new Set(fact.searchTerms.map((term) => term.trim()).filter(Boolean))]
         .slice(0, 5);
-      const key = `${description.toLocaleLowerCase()}\0${searchTerms.join('\0').toLocaleLowerCase()}`;
+      const requiredTerms = [...new Set(
+        (fact.requiredTerms ?? []).map((term) => term.trim()).filter(Boolean),
+      )]
+        .filter((term) => normalizedAnchorSource == null
+          || normalizedAnchorSource.includes(normalizeForCoverage(term)))
+        .slice(0, 5);
+      const key = [description, ...searchTerms, ...requiredTerms]
+        .join('\0')
+        .toLocaleLowerCase();
       if (!description || searchTerms.length === 0 || seen.has(key)) return [];
       seen.add(key);
-      return [{ description, searchTerms }];
+      return [{ description, searchTerms, ...(requiredTerms.length ? { requiredTerms } : {}) }];
     }).slice(0, 6);
   }
 
@@ -153,18 +171,28 @@ export class EvidenceChecklist {
       body: normalizeForCoverage(record.body),
     }));
     return this.facts.map((fact, index) => {
-      const matchedTerms = fact.searchTerms.filter((term) => {
-        return normalizedEvidence.some((record) => matchesCoverageTerm(record.body, term));
-      });
-      const evidenceIds = normalizedEvidence
-        .filter((record) => fact.searchTerms.some((term) => matchesCoverageTerm(record.body, term)))
-        .map((record) => record.id);
+      const matchingEvidence = normalizedEvidence.filter((record) =>
+        fact.searchTerms.some((term) => matchesCoverageTerm(record.body, term))
+        && (fact.requiredTerms ?? []).every((term) => matchesCoverageTerm(record.body, term)),
+      );
+      const missingRequiredTerms = (fact.requiredTerms ?? []).filter((term) =>
+        !normalizedEvidence.some((record) => matchesCoverageTerm(record.body, term)),
+      );
+      const searchTermCovered = normalizedEvidence.some((record) =>
+        fact.searchTerms.some((term) => matchesCoverageTerm(record.body, term)),
+      );
       return {
         id: `fact_${index + 1}`,
         ...fact,
-        covered: matchedTerms.length > 0,
-        evidenceIds,
-        missingTerms: matchedTerms.length > 0 ? [] : fact.searchTerms,
+        covered: matchingEvidence.length > 0,
+        evidenceIds: matchingEvidence.map((record) => record.id),
+        missingTerms: matchingEvidence.length > 0
+          ? []
+          : missingRequiredTerms.length > 0
+            ? missingRequiredTerms
+            : searchTermCovered
+              ? (fact.requiredTerms ?? [])
+              : fact.searchTerms,
       };
     });
   }
@@ -184,8 +212,14 @@ function matchesCoverageTerm(normalizedBody: string, rawTerm: string): boolean {
   if (normalizedBody.includes(term)) return true;
 
   const technicalTokens = [...new Set(term.match(/[a-z0-9_@/.:-]{3,}/g) ?? [])];
-  if (technicalTokens.length > 0 && !technicalTokens.every((token) => normalizedBody.includes(token))) {
-    return false;
+  if (technicalTokens.length > 0) {
+    const exactAnchors = technicalTokens.filter((token) => /[_@/.:-]|\d/.test(token));
+    if (!exactAnchors.every((token) => normalizedBody.includes(token))) return false;
+    const tokenMatches = technicalTokens.filter((token) => normalizedBody.includes(token)).length;
+    const minimumMatches = technicalTokens.length <= 3
+      ? technicalTokens.length
+      : Math.ceil(technicalTokens.length * 0.75);
+    if (tokenMatches < minimumMatches) return false;
   }
 
   const cjk = [...term.matchAll(/[\p{Script=Han}]{2,}/gu)]

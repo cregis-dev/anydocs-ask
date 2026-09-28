@@ -134,6 +134,8 @@ export type AskTrace = {
    *  implementation handled this request; additive for runs compatibility. */
   agent?: {
     steps: number;
+    tool_choice_retry_count?: number;
+    forced_finalization_count?: number;
     citation_retry_count?: number;
     tool_calls: Array<{
       tool: string;

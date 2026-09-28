@@ -7,6 +7,7 @@ import {
   askDepsForEval,
   askDepsForRetrievalEval,
   buildEvalCaseTraceRecord,
+  buildLangfuseEvalScores,
   buildRetrievalEvalCaseTraceRecord,
   evalAskModeForDeps,
   renderRetrievalReport,
@@ -307,7 +308,10 @@ test('writeCaseTraceJsonl persists per-case result, score, and retrieval trace w
 
     const raw = await readFile(out, 'utf8');
     const parsed = JSON.parse(raw.trim());
-    assert.equal(parsed.schema_version, 2);
+    assert.equal(parsed.schema_version, 3);
+    assert.equal(parsed.eval_run_id, null);
+    assert.equal(parsed.langfuse_trace_id, null);
+    assert.equal(parsed.langfuse_observation_id, null);
     assert.equal(parsed.runtime_build, null);
     assert.equal(parsed.case_id, 'case-1');
     assert.equal(parsed.result.answer_id, 'ans_1');
@@ -425,6 +429,78 @@ test('buildEvalCaseTraceRecord labels complete Agent evidence as generation cont
 
   assert.equal(record.ragas_sample.context_source, 'agent_evidence');
   assert.deepEqual(record.ragas_sample.retrieved_contexts, ['Complete evidence body.']);
+});
+
+test('buildLangfuseEvalScores exposes deterministic and Agent diagnostics', () => {
+  const scores = buildLangfuseEvalScores(
+    {
+      case_id: 'case-1',
+      query: 'Question',
+      kind: 'answer',
+      expected_kind: 'answer',
+      kind_pass: true,
+      hit_at_5: true,
+      hit_at_1: true,
+      hit_at_3: true,
+      mrr: 0.5,
+      context_precision_at_5: 0.8,
+      citation_anchor_pass: true,
+      unexpected_citation_pages: [],
+      unexpected_citation_rate: 0,
+      answer_rule_pass: true,
+      api_rule_pass: null,
+      retrieval_content_pass: null,
+      retrieved_pages_top5: [],
+      cited_pages: [],
+      missing_must_contain: [],
+      missing_must_contain_regex: [],
+      missing_must_retrieve_regex: [],
+      hit_forbid_contain: [],
+      hit_forbid_contain_regex: [],
+      missing_must_cite_operations: [],
+      missing_must_cite_urls: [],
+      error_code: null,
+      error_message: null,
+      error_detail: null,
+      latency_ms: 1,
+    },
+    {
+      fused: [],
+      subtree_ask_triggered: false,
+      top_final_score: 0,
+      timings: { router_ms: 0, embedding_ms: 0, retrieval_ms: 0, rerank_ms: 0, generation_ms: 1 },
+      tokens_in: 1,
+      tokens_out: 1,
+      agent: {
+        steps: 3,
+        tool_choice_retry_count: 1,
+        forced_finalization_count: 1,
+        citation_retry_count: 1,
+        tool_calls: [
+          { tool: 'searchDocs', ok: true, duration_ms: 1 },
+          { tool: 'readDoc', ok: false, duration_ms: 1, error_code: 'selector_not_found' },
+        ],
+        evidence: [],
+        required_facts: [
+          { id: 'fact-1', description: 'one', search_terms: ['one'], covered: true, evidence_ids: ['E1'], missing_terms: [] },
+          { id: 'fact-2', description: 'two', search_terms: ['two'], covered: false, evidence_ids: [], missing_terms: ['two'] },
+        ],
+        budget: {
+          discovery: { used: 1, limit: 2 },
+          read: { used: 1, limit: 3 },
+          supplemental: { used: 1, limit: 1 },
+        },
+      },
+    },
+  );
+
+  assert.equal(scores.find((score) => score.name === 'eval_mrr')?.value, 0.5);
+  assert.equal(scores.find((score) => score.name === 'agent_required_fact_coverage')?.value, 0.5);
+  assert.equal(scores.find((score) => score.name === 'agent_missing_fact_count')?.value, 1);
+  assert.equal(scores.find((score) => score.name === 'agent_tool_error_count')?.value, 1);
+  assert.equal(scores.find((score) => score.name === 'agent_tool_choice_retry_count')?.value, 1);
+  assert.equal(scores.find((score) => score.name === 'agent_forced_finalization_count')?.value, 1);
+  assert.equal(scores.find((score) => score.name === 'agent_citation_retry_count')?.value, 1);
 });
 
 test('renderReport separates core quality, retrieval diagnostics, citation calibration, and answer text diagnostics', () => {

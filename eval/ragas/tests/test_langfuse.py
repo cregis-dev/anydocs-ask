@@ -2,7 +2,12 @@ import pytest
 from langfuse import Evaluation
 from langfuse.api.core.api_error import ApiError
 
-from anydocs_ragas.langfuse import _ensure_dataset, _evaluations_for_result
+from anydocs_ragas.langfuse import (
+    _ensure_dataset,
+    _evaluations_for_result,
+    _experiment_output,
+    _publish_source_trace_scores,
+)
 
 
 class FakeLangfuse:
@@ -74,3 +79,75 @@ def test_evaluations_use_langfuse_sdk_type():
         ("ragas_context_precision", 1.0),
         ("ragas_factual_correctness", 0.5),
     ]
+
+
+def test_experiment_output_includes_golden_context_for_trace_review():
+    output = _experiment_output(
+        "case-1",
+        {
+            "response": "Use /api/v1/payout.",
+            "retrieved_contexts": ["POST /api/v1/payout creates a payout."],
+            "reference": "Use /api/v1/payout to create a payout.",
+            "reference_facts": ["The endpoint is /api/v1/payout."],
+            "rubric": {"precision": "Do not name a different endpoint."},
+            "source_trace_id": "trace-1",
+            "source_observation_id": "observation-1",
+            "agent_diagnostics": {"steps": 2},
+        },
+    )
+
+    assert output == {
+        "case_id": "case-1",
+        "response": "Use /api/v1/payout.",
+        "retrieved_contexts": ["POST /api/v1/payout creates a payout."],
+        "reference_answer": "Use /api/v1/payout to create a payout.",
+        "reference_facts": ["The endpoint is /api/v1/payout."],
+        "evaluation_rubric": {"precision": "Do not name a different endpoint."},
+        "source_trace_id": "trace-1",
+        "source_observation_id": "observation-1",
+        "agent_diagnostics": {"steps": 2},
+    }
+
+
+def test_publish_source_trace_scores_links_scores_to_original_observation():
+    class ScoreClient:
+        def __init__(self):
+            self.scores = []
+
+        def create_score(self, **kwargs):
+            self.scores.append(kwargs)
+
+    client = ScoreClient()
+    count = _publish_source_trace_scores(
+        client,
+        {
+            "case-1": {
+                "source_trace_id": "trace-1",
+                "source_observation_id": "observation-1",
+            },
+            "case-2": {"source_trace_id": None, "source_observation_id": None},
+        },
+        [
+            {
+                "case_id": "case-1",
+                "scores": {
+                    "context_recall": {"value": 0.5, "reason": "missing one fact"},
+                    "faithfulness": {"value": 0.75, "reason": None},
+                },
+            },
+            {
+                "case_id": "case-2",
+                "scores": {"context_recall": {"value": 0.25, "reason": None}},
+            },
+        ],
+    )
+
+    assert count == 2
+    assert [score["name"] for score in client.scores] == [
+        "ragas_context_recall",
+        "ragas_faithfulness",
+    ]
+    assert all(score["trace_id"] == "trace-1" for score in client.scores)
+    assert all(score["observation_id"] == "observation-1" for score in client.scores)
+    assert all("score_id" in score for score in client.scores)
+    assert client.scores[0]["comment"] == "missing one fact"

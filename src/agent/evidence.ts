@@ -13,7 +13,6 @@ import type { Reranker } from '../reranker/types.ts';
 export const AGENT_SEARCH_LIMIT = 20;
 const AGENT_SEARCH_OVERFETCH_MULTIPLIER = 5;
 const AGENT_SEARCH_OVERFETCH_CAP = 100;
-export const AGENT_CATALOG_LIMIT = 50;
 export const AGENT_READ_TOKEN_LIMIT = 3300;
 export const AGENT_READ_TOKEN_HARD_CAP = 8000;
 const DEFAULT_AGENT_PAGE_RERANK_TOP_K = 8;
@@ -53,14 +52,24 @@ export type ExactMatch = {
   snippet: string;
 };
 
-export type CatalogEntry = {
+export type CatalogPage = {
   pageId: string;
-  lang: DocsLang;
   title: string;
-  url: string | null;
-  breadcrumb: BreadcrumbNode[];
-  subtreeRoot: string | null;
-  navIndex: number | null;
+};
+
+export type CatalogGroup = {
+  id: string;
+  title: string;
+  kind: 'section' | 'folder';
+  groups: CatalogGroup[];
+  pages: CatalogPage[];
+};
+
+export type CatalogTree = {
+  language: DocsLang;
+  pageCount: number;
+  groups: CatalogGroup[];
+  pages: CatalogPage[];
 };
 
 export type EvidenceRecord = {
@@ -301,35 +310,18 @@ export class EvidenceService {
     return matches;
   }
 
-  browseCatalog(input: {
-    scopeId?: string | null;
-    lang?: DocsLang | null;
-    query?: string | null;
-    limit?: number;
-  } = {}): CatalogEntry[] {
-    assertScope(this.deps.db, input.scopeId ?? null);
-    const query = input.query?.trim().toLowerCase() || null;
+  browseCatalog(input: { lang: DocsLang }): CatalogTree {
     const rows = this.deps.db.prepare(
       `SELECT page_id, lang, title, url, breadcrumb, subtree_root, nav_index
          FROM pages
         WHERE status = 'published'
-          AND (? IS NULL OR subtree_root = ?)
-          AND (? IS NULL OR lang = ?)
-          AND (? IS NULL OR lower(title) LIKE ? OR lower(page_id) LIKE ?)
-        ORDER BY lang ASC, nav_index ASC, page_id ASC
-        LIMIT ?`,
+          AND lang = ?
+        ORDER BY nav_index ASC, page_id ASC`,
     ).all(
-      input.scopeId ?? null,
-      input.scopeId ?? null,
-      input.lang ?? null,
-      input.lang ?? null,
-      query,
-      query ? `%${query}%` : null,
-      query ? `%${query}%` : null,
-      clampInteger(input.limit, 20, 1, AGENT_CATALOG_LIMIT),
+      input.lang,
     ) as PageRow[];
 
-    return rows.map(catalogEntryFromRow);
+    return buildCatalogTree(input.lang, rows);
   }
 
   readDoc(input: {
@@ -648,15 +640,63 @@ function takeWithinTokenBudget(
   return { units: taken, truncated: taken.length < units.length };
 }
 
-function catalogEntryFromRow(row: PageRow): CatalogEntry {
+function buildCatalogTree(language: DocsLang, rows: PageRow[]): CatalogTree {
+  const root: MutableCatalogBranch = { groups: [], pages: [], groupIndex: new Map() };
+  for (const row of rows) {
+    const breadcrumb = parseBreadcrumb(row.breadcrumb);
+    const structuralNodes = breadcrumb.filter((node) => node.type !== 'page');
+    let branch = root;
+    for (const node of structuralNodes) {
+      const kind = node.type === 'folder' ? 'folder' : 'section';
+      const key = `${kind}:${node.id}`;
+      let group = branch.groupIndex.get(key);
+      if (!group) {
+        group = {
+          id: node.id,
+          title: node.title,
+          kind,
+          groups: [],
+          pages: [],
+          groupIndex: new Map(),
+        };
+        branch.groupIndex.set(key, group);
+        branch.groups.push(group);
+      }
+      branch = group;
+    }
+    branch.pages.push({ pageId: row.page_id, title: row.title });
+  }
+
   return {
-    pageId: row.page_id,
-    lang: row.lang,
-    title: row.title,
-    url: row.url,
-    breadcrumb: parseBreadcrumb(row.breadcrumb),
-    subtreeRoot: row.subtree_root,
-    navIndex: row.nav_index,
+    language,
+    pageCount: rows.length,
+    groups: root.groups.map(publicCatalogGroup),
+    pages: root.pages,
+  };
+}
+
+type MutableCatalogBranch = {
+  groups: MutableCatalogGroup[];
+  pages: CatalogPage[];
+  groupIndex: Map<string, MutableCatalogGroup>;
+};
+
+type MutableCatalogGroup = {
+  id: string;
+  title: string;
+  kind: 'section' | 'folder';
+  groupIndex: Map<string, MutableCatalogGroup>;
+  groups: MutableCatalogGroup[];
+  pages: CatalogPage[];
+};
+
+function publicCatalogGroup(group: MutableCatalogGroup): CatalogGroup {
+  return {
+    id: group.id,
+    title: group.title,
+    kind: group.kind,
+    groups: group.groups.map(publicCatalogGroup),
+    pages: group.pages,
   };
 }
 

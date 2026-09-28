@@ -15,6 +15,7 @@
  * server is not booted because eval doesn't need the HTTP layer.
  */
 
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -50,6 +51,12 @@ import {
   readRuntimeBuildMetadata,
   type RuntimeBuildMetadata,
 } from '../runtime-build.ts';
+import {
+  recordTraceScores,
+  startLangfuseObservability,
+  traceAskTurn,
+  type TraceScoreInput,
+} from '../observability/langfuse.ts';
 
 export type EvalOptions = {
   projectRoot: string;
@@ -68,8 +75,11 @@ export type EvalOptions = {
 };
 
 export type EvalCaseTraceRecord = {
-  schema_version: 2;
+  schema_version: 3;
   case_id: string;
+  eval_run_id: string | null;
+  langfuse_trace_id: string | null;
+  langfuse_observation_id: string | null;
   index: number;
   total: number;
   query: string;
@@ -200,100 +210,145 @@ export async function runEval(opts: EvalOptions): Promise<number> {
   process.stdout.write(`anydocs-ask eval: ${cases.length} cases loaded\n`);
   opts.onProgress?.({ type: 'boot', totalCases: cases.length });
 
-  // 2. Boot Runtime (no HTTP). skipWatcher avoids chokidar reindex churn during eval.
-  const runtime = new Runtime({ projectRoot, stateRoot, config, skipWatcher: true });
-  const t0 = performance.now();
-  const start = await runtime.start();
-  process.stdout.write(
-    `anydocs-ask eval: warm in ${start.boot_ms}ms — chunks=${start.initialIndex.chunks.totalChunks}\n`,
-  );
-  opts.onProgress?.({ type: 'warm', bootMs: start.boot_ms, chunks: start.initialIndex.chunks.totalChunks });
+  const langfuse = await startLangfuseObservability();
+  const evalRunId = `golden-eval-${randomUUID()}`;
+  const build = readRuntimeBuildMetadata(process.env);
 
-  // 3. Run cases.
-  const agentEnabled = runtime.config.agent.enabled;
-  // The Agent owns its evidence-search dependencies. Supplying retrieval-only
-  // deps here keeps the retry harness type-safe without constructing the
-  // legacy answer/router LLMs on an Agent eval run.
-  const deps = agentEnabled
-    ? askDepsForRetrievalEval(runtime, { noRouter: true })
-    : askDepsForEval(runtime);
-  const askOnce: EvalAskFn = agentEnabled
-    ? (_deps, req) => runtime.agentRunner.ask(req)
-    : askWithTraceForEval;
-  process.stdout.write(
-    `anydocs-ask eval: execution mode=${agentEnabled ? 'agent' : 'legacy'}\n`,
-  );
-  const results: CaseResult[] = [];
-  const caseTraces: EvalCaseTraceRecord[] = [];
-  for (let i = 0; i < cases.length; i++) {
-    const c = cases[i]!;
-    opts.onProgress?.({
-      type: 'case-start',
-      i, total: cases.length,
-      caseId: c.id, query: c.query, lang: c.lang,
-    });
-    const t1 = performance.now();
-    let traced;
-    let caseResult: CaseResult;
-    try {
-      traced = await runEvalCaseWithRetries(c, deps, askOnce);
-      caseResult = scoreCase(c, traced.result, traced.trace);
-      caseResult.latency_ms = Math.round(performance.now() - t1);
-    } catch (err) {
-      process.stderr.write(`[ask] eval: case ${c.id} threw: ${(err as Error).message}\n`);
-      caseResult = failedCase(c, performance.now() - t1);
+  try {
+    // 2. Boot Runtime (no HTTP). skipWatcher avoids chokidar reindex churn during eval.
+    const runtime = new Runtime({ projectRoot, stateRoot, config, skipWatcher: true });
+    const t0 = performance.now();
+    const start = await runtime.start();
+    process.stdout.write(
+      `anydocs-ask eval: warm in ${start.boot_ms}ms — chunks=${start.initialIndex.chunks.totalChunks}\n`,
+    );
+    opts.onProgress?.({ type: 'warm', bootMs: start.boot_ms, chunks: start.initialIndex.chunks.totalChunks });
+
+    // 3. Run cases.
+    const agentEnabled = runtime.config.agent.enabled;
+    // The Agent owns its evidence-search dependencies. Supplying retrieval-only
+    // deps here keeps the retry harness type-safe without constructing the
+    // legacy answer/router LLMs on an Agent eval run.
+    const deps = agentEnabled
+      ? askDepsForRetrievalEval(runtime, { noRouter: true })
+      : askDepsForEval(runtime);
+    const askOnce: EvalAskFn = agentEnabled
+      ? (_deps, req) => runtime.agentRunner.ask(req)
+      : askWithTraceForEval;
+    process.stdout.write(
+      `anydocs-ask eval: execution mode=${agentEnabled ? 'agent' : 'legacy'}\n`,
+    );
+    const results: CaseResult[] = [];
+    const caseTraces: EvalCaseTraceRecord[] = [];
+    for (let i = 0; i < cases.length; i++) {
+      const c = cases[i]!;
+      opts.onProgress?.({
+        type: 'case-start',
+        i, total: cases.length,
+        caseId: c.id, query: c.query, lang: c.lang,
+      });
+      const t1 = performance.now();
+      let traced;
+      let langfuseTraceId: string | null = null;
+      let langfuseObservationId: string | null = null;
+      let caseResult: CaseResult;
+      try {
+        const observed = await traceAskTurn(
+          {
+            requestId: `${evalRunId}:${c.id}`,
+            sessionId: evalRunId,
+            source: 'eval',
+            question: c.query,
+            currentPageId: c.context_pageId ?? null,
+            agentic: agentEnabled,
+            traceName: 'golden-eval-case',
+            environment: 'evaluation',
+            version: build.engine_release ?? undefined,
+            tags: ['golden-eval', c.lang],
+            metadata: {
+              case_id: c.id,
+              eval_run_id: evalRunId,
+              case_index: String(i + 1),
+              case_total: String(cases.length),
+              golden_language: c.lang,
+              ...(build.release ? { docs_release: build.release } : {}),
+              ...(build.engine_release ? { engine_release: build.engine_release } : {}),
+            },
+          },
+          () => runEvalCaseWithRetries(c, deps, askOnce),
+          (value) => ({ case_id: c.id, result: value.result }),
+        );
+        traced = observed.value;
+        langfuseTraceId = observed.traceId;
+        langfuseObservationId = observed.observationId;
+        caseResult = scoreCase(c, traced.result, traced.trace);
+        caseResult.latency_ms = Math.round(performance.now() - t1);
+        await recordTraceScores({
+          traceId: langfuseTraceId,
+          observationId: langfuseObservationId,
+          scores: buildLangfuseEvalScores(caseResult, traced.trace),
+        });
+      } catch (err) {
+        process.stderr.write(`[ask] eval: case ${c.id} threw: ${(err as Error).message}\n`);
+        caseResult = failedCase(c, performance.now() - t1);
+      }
+      results.push(caseResult);
+      caseTraces.push(buildEvalCaseTraceRecord({
+        c,
+        index: i,
+        total: cases.length,
+        caseResult,
+        traced: traced ?? null,
+        evalRunId,
+        langfuseTraceId,
+        langfuseObservationId,
+      }));
+      opts.onProgress?.({
+        type: 'case-done',
+        i, total: cases.length,
+        caseId: c.id,
+        latencyMs: caseResult.latency_ms,
+        kind: caseResult.kind,
+        hit_at_5: caseResult.hit_at_5,
+        hit_at_1: caseResult.hit_at_1,
+        hit_at_3: caseResult.hit_at_3,
+        mrr: caseResult.mrr,
+        context_precision_at_5: caseResult.context_precision_at_5,
+        citation_anchor_pass: caseResult.citation_anchor_pass,
+        unexpected_citation_rate: caseResult.unexpected_citation_rate,
+        answer_rule_pass: caseResult.answer_rule_pass,
+      });
+      if ((i + 1) % 5 === 0 || i === cases.length - 1) {
+        process.stdout.write(`  ${i + 1}/${cases.length} cases done\n`);
+      }
     }
-    results.push(caseResult);
-    caseTraces.push(buildEvalCaseTraceRecord({
-      c,
-      index: i,
-      total: cases.length,
-      caseResult,
-      traced: traced ?? null,
-    }));
-    opts.onProgress?.({
-      type: 'case-done',
-      i, total: cases.length,
-      caseId: c.id,
-      latencyMs: caseResult.latency_ms,
-      kind: caseResult.kind,
-      hit_at_5: caseResult.hit_at_5,
-      hit_at_1: caseResult.hit_at_1,
-      hit_at_3: caseResult.hit_at_3,
-      mrr: caseResult.mrr,
-      context_precision_at_5: caseResult.context_precision_at_5,
-      citation_anchor_pass: caseResult.citation_anchor_pass,
-      unexpected_citation_rate: caseResult.unexpected_citation_rate,
-      answer_rule_pass: caseResult.answer_rule_pass,
+    await runtime.stop();
+    const totalMs = Math.round(performance.now() - t0);
+
+    // 4. Aggregate.
+    const summary = summarizeResults(results);
+
+    // 5. Diff against baseline (last prior eval report if not specified).
+    const baseline = loadBaseline(stateRoot, opts.baselinePath);
+
+    // 6. Write report.
+    const { reportPath, caseTracePath } = writeReport(stateRoot, {
+      summary,
+      results,
+      caseTraces,
+      totalMs,
+      baseline,
     });
-    if ((i + 1) % 5 === 0 || i === cases.length - 1) {
-      process.stdout.write(`  ${i + 1}/${cases.length} cases done\n`);
-    }
+    process.stdout.write(
+      `anydocs-ask eval: wrote ${reportPath}\n` +
+        `anydocs-ask eval: wrote ${caseTracePath}\n` +
+        `  MRR=${summary.mrr.toFixed(2)}  H@5=${summary.hit_at_5.toFixed(2)}  CP@5=${summary.context_precision_at_5.toFixed(2)}  Field=${summary.retrieval_content_pass === null ? '—' : summary.retrieval_content_pass.toFixed(2)}  Anchor=${summary.citation_anchor_pass.toFixed(2)}  Kind=${summary.kind_pass.toFixed(2)}  Api=${summary.api_rule_pass === null ? '—' : summary.api_rule_pass.toFixed(2)}  (retrieval diagnostics: H@1=${summary.hit_at_1.toFixed(2)} H@3=${summary.hit_at_3.toFixed(2)}; citations: unexpected=${summary.unexpected_citation_rate.toFixed(2)}; ${results.length} cases, ${totalMs}ms)\n`,
+    );
+    opts.onProgress?.({ type: 'done', reportPath, totalMs, summary });
+    return 0;
+  } finally {
+    await langfuse.shutdown();
   }
-  await runtime.stop();
-  const totalMs = Math.round(performance.now() - t0);
-
-  // 4. Aggregate.
-  const summary = summarizeResults(results);
-
-  // 5. Diff against baseline (last prior eval report if not specified).
-  const baseline = loadBaseline(stateRoot, opts.baselinePath);
-
-  // 6. Write report.
-  const { reportPath, caseTracePath } = writeReport(stateRoot, {
-    summary,
-    results,
-    caseTraces,
-    totalMs,
-    baseline,
-  });
-  process.stdout.write(
-    `anydocs-ask eval: wrote ${reportPath}\n` +
-      `anydocs-ask eval: wrote ${caseTracePath}\n` +
-      `  MRR=${summary.mrr.toFixed(2)}  H@5=${summary.hit_at_5.toFixed(2)}  CP@5=${summary.context_precision_at_5.toFixed(2)}  Field=${summary.retrieval_content_pass === null ? '—' : summary.retrieval_content_pass.toFixed(2)}  Anchor=${summary.citation_anchor_pass.toFixed(2)}  Kind=${summary.kind_pass.toFixed(2)}  Api=${summary.api_rule_pass === null ? '—' : summary.api_rule_pass.toFixed(2)}  (retrieval diagnostics: H@1=${summary.hit_at_1.toFixed(2)} H@3=${summary.hit_at_3.toFixed(2)}; citations: unexpected=${summary.unexpected_citation_rate.toFixed(2)}; ${results.length} cases, ${totalMs}ms)\n`,
-  );
-  opts.onProgress?.({ type: 'done', reportPath, totalMs, summary });
-  return 0;
 }
 
 export async function runRetrievalEval(opts: EvalOptions): Promise<number> {
@@ -490,6 +545,9 @@ export function buildEvalCaseTraceRecord(args: {
   total: number;
   caseResult: CaseResult;
   traced: AskWithTraceResult | null;
+  evalRunId?: string | null;
+  langfuseTraceId?: string | null;
+  langfuseObservationId?: string | null;
 }): EvalCaseTraceRecord {
   const runtimeBuild = readRuntimeBuildMetadata(process.env);
   const result = args.traced?.result ?? {
@@ -499,8 +557,11 @@ export function buildEvalCaseTraceRecord(args: {
     detail: args.caseResult.error_detail,
   };
   return {
-    schema_version: 2,
+    schema_version: 3,
     case_id: args.c.id,
+    eval_run_id: args.evalRunId ?? null,
+    langfuse_trace_id: args.langfuseTraceId ?? null,
+    langfuse_observation_id: args.langfuseObservationId ?? null,
     index: args.index,
     total: args.total,
     query: args.c.query,
@@ -514,6 +575,71 @@ export function buildEvalCaseTraceRecord(args: {
     runtime_build: hasRuntimeBuildMetadata(runtimeBuild) ? runtimeBuild : null,
     ragas_sample: buildRagasSample(args.c, result, args.traced?.trace ?? null),
   };
+}
+
+export function buildLangfuseEvalScores(
+  caseResult: CaseResult,
+  trace: AskTrace | null,
+): TraceScoreInput[] {
+  const scores: TraceScoreInput[] = [
+    { name: 'eval_mrr', value: caseResult.mrr },
+    { name: 'eval_hit_at_5', value: caseResult.hit_at_5 ? 1 : 0, dataType: 'BOOLEAN' },
+    { name: 'eval_context_precision_at_5', value: caseResult.context_precision_at_5 },
+    {
+      name: 'eval_citation_anchor_pass',
+      value: caseResult.citation_anchor_pass ? 1 : 0,
+      dataType: 'BOOLEAN',
+    },
+    { name: 'eval_kind_pass', value: caseResult.kind_pass ? 1 : 0, dataType: 'BOOLEAN' },
+    {
+      name: 'eval_answer_rule_pass',
+      value: caseResult.answer_rule_pass ? 1 : 0,
+      dataType: 'BOOLEAN',
+    },
+  ];
+  if (caseResult.api_rule_pass !== null) {
+    scores.push({
+      name: 'eval_api_rule_pass',
+      value: caseResult.api_rule_pass ? 1 : 0,
+      dataType: 'BOOLEAN',
+    });
+  }
+  if (caseResult.retrieval_content_pass !== null) {
+    scores.push({
+      name: 'eval_retrieval_content_pass',
+      value: caseResult.retrieval_content_pass ? 1 : 0,
+      dataType: 'BOOLEAN',
+    });
+  }
+
+  const agent = trace?.agent;
+  if (!agent) return scores;
+  const facts = agent.required_facts ?? [];
+  const coveredFacts = facts.filter((fact) => fact.covered).length;
+  const missingFacts = facts.length - coveredFacts;
+  const toolErrors = agent.tool_calls.filter((call) => !call.ok).length;
+  if (facts.length > 0) {
+    scores.push(
+      {
+        name: 'agent_required_fact_coverage',
+        value: coveredFacts / facts.length,
+        comment: `${coveredFacts}/${facts.length} required facts had lexical evidence coverage`,
+      },
+      { name: 'agent_missing_fact_count', value: missingFacts },
+      {
+        name: 'agent_evidence_complete',
+        value: missingFacts === 0 ? 1 : 0,
+        dataType: 'BOOLEAN',
+      },
+    );
+  }
+  scores.push(
+    { name: 'agent_tool_error_count', value: toolErrors },
+    { name: 'agent_tool_choice_retry_count', value: agent.tool_choice_retry_count ?? 0 },
+    { name: 'agent_forced_finalization_count', value: agent.forced_finalization_count ?? 0 },
+    { name: 'agent_citation_retry_count', value: agent.citation_retry_count ?? 0 },
+  );
+  return scores;
 }
 
 export function buildRagasSample(

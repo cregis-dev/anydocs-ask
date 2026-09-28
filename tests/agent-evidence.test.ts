@@ -30,7 +30,7 @@ function insertPage(
     `/${lang}/${pageId}`,
     scope,
     navIndex,
-    JSON.stringify([{ id: scope, title: scope, type: 'group' }, { id: pageId, title: pageId, type: 'page' }]),
+    JSON.stringify([{ id: scope, title: scope, type: 'section' }, { id: pageId, title: pageId, type: 'page' }]),
   );
 }
 
@@ -426,14 +426,42 @@ test('readDoc enforces scope and reports truncation without splitting a parent',
   }
 });
 
-test('browseCatalog returns published pages in navigation order', () => {
+test('browseCatalog returns the full current-language catalog as a structured tree', () => {
   const db = openDatabase({ dbPath: ':memory:' });
   try {
     insertPage(db, 'second', 'zh', 'waas', 2);
     insertPage(db, 'first', 'zh', 'waas', 1);
     insertPage(db, 'other', 'zh', 'payment-engine', 0);
-    const pages = service(db).browseCatalog({ scopeId: 'waas', lang: 'zh' });
-    assert.deepEqual(pages.map((page) => page.pageId), ['first', 'second']);
+    insertPage(db, 'nested', 'zh', 'waas', 3);
+    db.prepare('UPDATE pages SET breadcrumb = ? WHERE page_id = ? AND lang = ?').run(
+      JSON.stringify([
+        { id: 'waas', title: 'WaaS', type: 'section' },
+        { id: 'api-reference', title: 'API Reference', type: 'folder' },
+        { id: 'nested', title: 'nested', type: 'page' },
+      ]),
+      'nested',
+      'zh',
+    );
+    insertPage(db, 'english', 'en', 'waas', 0);
+
+    const catalog = service(db).browseCatalog({ lang: 'zh' });
+
+    assert.equal(catalog.language, 'zh');
+    assert.equal(catalog.pageCount, 4);
+    assert.deepEqual(catalog.pages, []);
+    assert.deepEqual(catalog.groups.map((group) => group.id), ['payment-engine', 'waas']);
+    assert.deepEqual(catalog.groups[0]?.pages, [{ pageId: 'other', title: 'other zh' }]);
+    assert.deepEqual(catalog.groups[1]?.pages, [
+      { pageId: 'first', title: 'first zh' },
+      { pageId: 'second', title: 'second zh' },
+    ]);
+    assert.deepEqual(catalog.groups[1]?.groups, [{
+      id: 'api-reference',
+      title: 'API Reference',
+      kind: 'folder',
+      groups: [],
+      pages: [{ pageId: 'nested', title: 'nested zh' }],
+    }]);
   } finally {
     db.close();
   }

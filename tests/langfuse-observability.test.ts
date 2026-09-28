@@ -24,7 +24,11 @@ test('Langfuse observability is a fail-open no-op without credentials', async ()
       async () => ({ result: 'ok' }),
       (value) => value,
     );
-    assert.deepEqual(traced, { value: { result: 'ok' }, traceId: null });
+    assert.deepEqual(traced, {
+      value: { result: 'ok' },
+      traceId: null,
+      observationId: null,
+    });
     await lifecycle.shutdown();
   } finally {
     if (previousPublicKey === undefined) delete process.env.LANGFUSE_PUBLIC_KEY;
