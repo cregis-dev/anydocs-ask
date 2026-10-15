@@ -46,6 +46,7 @@ export type AgenticRagRunnerOptions = {
 };
 
 type ToolTrace = NonNullable<AskTrace['agent']>['tool_calls'][number];
+type AgentSearchTimings = NonNullable<NonNullable<AskTrace['agent']>['search_timings']>;
 
 const requiredFactsSchema = z.array(z.object({
   description: z.string().min(1).max(240)
@@ -78,7 +79,14 @@ export class AgenticRagRunner {
     const checklist = new EvidenceChecklist();
     const candidates = new Map<number, SearchHit>();
     const toolTrace: ToolTrace[] = [];
-    let retrievalMs = 0;
+    let toolMs = 0;
+    const searchTimings: AgentSearchTimings = {
+      calls: 0,
+      router_ms: 0,
+      embedding_ms: 0,
+      retrieval_ms: 0,
+      rerank_ms: 0,
+    };
 
     await hooks.onStatus?.('retrieving');
     const tools = {
@@ -131,7 +139,7 @@ export class AgenticRagRunner {
               })),
             };
           },
-          (duration) => { retrievalMs += duration; },
+          (duration) => { toolMs += duration; },
         ),
       }),
       searchDocs: tool({
@@ -154,6 +162,11 @@ export class AgenticRagRunner {
               scopeId,
               currentPageId: req.context?.current_page_id ?? null,
             });
+            searchTimings.calls += 1;
+            searchTimings.router_ms += result.timings.router_ms;
+            searchTimings.embedding_ms += result.timings.embedding_ms;
+            searchTimings.retrieval_ms += result.timings.retrieval_ms;
+            searchTimings.rerank_ms += result.timings.rerank_ms;
             for (const hit of result.candidates) candidates.set(hit.chunk_id, hit);
             return {
               ok: true as const,
@@ -168,7 +181,7 @@ export class AgenticRagRunner {
               })),
             };
           },
-          (duration) => { retrievalMs += duration; },
+          (duration) => { toolMs += duration; },
         ),
       }),
       browseCatalog: tool({
@@ -183,7 +196,7 @@ export class AgenticRagRunner {
             const catalog = this.evidence.browseCatalog({ lang: queryLang });
             return { ok: true as const, count: catalog.pageCount, catalog };
           },
-          (duration) => { retrievalMs += duration; },
+          (duration) => { toolMs += duration; },
         ),
       }),
       readDoc: tool({
@@ -224,7 +237,7 @@ export class AgenticRagRunner {
               },
             };
           },
-          (duration) => { retrievalMs += duration; },
+          (duration) => { toolMs += duration; },
         ),
       }),
     };
@@ -367,7 +380,7 @@ export class AgenticRagRunner {
         trace: buildTrace(
           candidates, ledger.all(), toolTrace, budget, checklist, toolChoiceRetryCount,
           forcedFinalizationCount, 0,
-          0, retrievalMs, performance.now() - startedAt,
+          0, toolMs, searchTimings, performance.now() - startedAt,
         ),
         queryVector: null,
       };
@@ -383,7 +396,7 @@ export class AgenticRagRunner {
         trace: buildTrace(
           candidates, evidence, toolTrace, budget, checklist, toolChoiceRetryCount,
           forcedFinalizationCount, 0,
-          generated?.steps.length ?? toolTrace.length, retrievalMs, performance.now() - startedAt,
+          generated?.steps.length ?? toolTrace.length, toolMs, searchTimings, performance.now() - startedAt,
           generated?.usage.inputTokens ?? forcedFinalization?.inputTokens ?? null,
           generated?.usage.outputTokens ?? forcedFinalization?.outputTokens ?? null,
         ),
@@ -426,7 +439,8 @@ export class AgenticRagRunner {
       forcedFinalizationCount,
       citationRetryCount,
       generated?.steps.length ?? toolTrace.length,
-      retrievalMs,
+      toolMs,
+      searchTimings,
       performance.now() - startedAt,
       ((generated?.usage.inputTokens ?? forcedFinalization?.inputTokens ?? 0) + repairInputTokens) || null,
       ((generated?.usage.outputTokens ?? forcedFinalization?.outputTokens ?? 0) + repairOutputTokens) || null,
@@ -598,7 +612,8 @@ function buildTrace(
   forcedFinalizationCount: number,
   citationRetryCount: number,
   steps: number,
-  retrievalMs: number,
+  toolMs: number,
+  searchTimings: AgentSearchTimings,
   totalMs: number,
   inputTokens: number | null = null,
   outputTokens: number | null = null,
@@ -638,17 +653,29 @@ function buildTrace(
     context_token_count: record.tokenCount,
     expanded_parent: null,
   }));
+  const roundedSearch = {
+    calls: searchTimings.calls,
+    router_ms: Math.round(searchTimings.router_ms),
+    embedding_ms: Math.round(searchTimings.embedding_ms),
+    retrieval_ms: Math.round(searchTimings.retrieval_ms),
+    rerank_ms: Math.round(searchTimings.rerank_ms),
+  };
+  const separatelyCategorizedToolMs = searchTimings.router_ms
+    + searchTimings.embedding_ms
+    + searchTimings.rerank_ms;
   return {
     fused,
     selected_context: selectedContext,
     subtree_ask_triggered: false,
     top_final_score: fused[0]?.final_score ?? 0,
     timings: {
-      router_ms: 0,
-      embedding_ms: 0,
-      retrieval_ms: Math.round(retrievalMs),
-      rerank_ms: 0,
-      generation_ms: Math.max(0, Math.round(totalMs - retrievalMs)),
+      router_ms: roundedSearch.router_ms,
+      embedding_ms: roundedSearch.embedding_ms,
+      // Keep the five top-level stages additive. This bucket includes pure
+      // SQLite retrieval plus exact lookup, catalog/read tools, and wrappers.
+      retrieval_ms: Math.max(0, Math.round(toolMs - separatelyCategorizedToolMs)),
+      rerank_ms: roundedSearch.rerank_ms,
+      generation_ms: Math.max(0, Math.round(totalMs - toolMs)),
     },
     tokens_in: inputTokens,
     tokens_out: outputTokens,
@@ -658,6 +685,8 @@ function buildTrace(
       forced_finalization_count: forcedFinalizationCount,
       citation_retry_count: citationRetryCount,
       tool_calls: toolCalls,
+      tool_ms: Math.round(toolMs),
+      search_timings: roundedSearch,
       evidence: evidence.map((record) => ({
         evidence_id: record.evidenceId,
         page_id: record.pageId,

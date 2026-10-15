@@ -144,6 +144,16 @@ export type AskTrace = {
       result_count?: number;
       error_code?: string;
     }>;
+    /** Aggregate latency of all evidence tools. */
+    tool_ms?: number;
+    /** Pure searchDocs internals, aggregated across all calls. */
+    search_timings?: {
+      calls: number;
+      router_ms: number;
+      embedding_ms: number;
+      retrieval_ms: number;
+      rerank_ms: number;
+    };
     evidence: Array<{
       evidence_id: string;
       page_id: string;
@@ -305,26 +315,50 @@ export async function search(
   req: AskRequest,
   topK: number = SEARCH_DEFAULT_TOP_K,
 ): Promise<SearchResult> {
+  return (await searchWithTrace(deps, req, topK)).result;
+}
+
+/**
+ * Internal retrieval-only variant that also exposes measured pipeline stages.
+ * Agent discovery uses this without changing the public MCP search response.
+ */
+export async function searchWithTrace(
+  deps: AskDeps,
+  req: AskRequest,
+  topK: number = SEARCH_DEFAULT_TOP_K,
+): Promise<{ result: SearchResult; trace: AskTrace }> {
   if (req.question === undefined || req.question === null) {
-    return { type: 'error', code: 'invalid_question', message: "field 'question' is required" };
+    return {
+      result: { type: 'error', code: 'invalid_question', message: "field 'question' is required" },
+      trace: emptyTrace(),
+    };
   }
   const question = req.question.trim();
   if (question.length === 0) {
-    return { type: 'error', code: 'invalid_question', message: 'question must not be empty' };
+    return {
+      result: { type: 'error', code: 'invalid_question', message: 'question must not be empty' },
+      trace: emptyTrace(),
+    };
   }
   if (question.length > MAX_QUESTION_CHARS) {
     return {
-      type: 'error',
-      code: 'invalid_question',
-      message: `question exceeds ${MAX_QUESTION_CHARS} characters`,
+      result: {
+        type: 'error',
+        code: 'invalid_question',
+        message: `question exceeds ${MAX_QUESTION_CHARS} characters`,
+      },
+      trace: emptyTrace(),
     };
   }
   const scopeId = req.context?.scope_id ?? null;
   if (scopeId !== null && !isValidScopeId(deps.db, scopeId)) {
     return {
-      type: 'error',
-      code: 'invalid_scope',
-      message: `scope_id '${scopeId}' is not a published subtree`,
+      result: {
+        type: 'error',
+        code: 'invalid_scope',
+        message: `scope_id '${scopeId}' is not a published subtree`,
+      },
+      trace: emptyTrace(),
     };
   }
 
@@ -335,7 +369,7 @@ export async function search(
   const queryLang = resolveQueryLang(deps.db, question, req);
   const retrieval = await runRetrievalPipeline(deps, req, question, queryLang);
   const hits = retrieval.reranked.slice(0, limit).map(searchHitFromChunk);
-  return { type: 'hits', hits };
+  return { result: { type: 'hits', hits }, trace: retrieval.trace };
 }
 
 function emptyTrace(): AskTrace {

@@ -463,6 +463,16 @@ test('AgenticRagRunner continues discovery when required facts are absent from t
     assert.deepEqual(response.trace.agent?.tool_calls.map((call) => call.tool), [
       'lookupExact', 'readDoc', 'searchDocs', 'readDoc',
     ]);
+    assert.equal(response.trace.agent?.search_timings?.calls, 1);
+    assert.equal(
+      response.trace.timings.embedding_ms,
+      response.trace.agent?.search_timings?.embedding_ms,
+    );
+    assert.equal(
+      response.trace.timings.rerank_ms,
+      response.trace.agent?.search_timings?.rerank_ms,
+    );
+    assert.ok((response.trace.agent?.tool_ms ?? -1) >= 0);
     assert.equal(response.trace.agent?.budget.supplemental.used, 1);
     assert.equal(response.trace.agent?.required_facts?.[0]?.covered, true);
     assert.deepEqual(response.trace.agent?.required_facts?.[0]?.missing_terms, []);

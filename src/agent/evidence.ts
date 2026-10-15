@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import type { DocsLang } from '../anydocs/types.ts';
 import type { RerankerConfig } from '../config.ts';
 import { extractIndexedIdentifiers } from '../content/identifiers.ts';
 import type { BreadcrumbNode } from '../db/schema.ts';
 import type { DbHandle } from '../db/index.ts';
 import { observeLangfuse } from '../observability/langfuse.ts';
-import { search, type AskDeps } from '../query/answer.ts';
+import { searchWithTrace, type AskDeps, type AskStageTimings } from '../query/answer.ts';
 import { fallbackRoute, type IntentRouter } from '../query/intent-router.ts';
 import type { SearchHit } from '../query/types.ts';
 import type { Reranker } from '../reranker/types.ts';
@@ -36,6 +37,7 @@ export type SearchDocsInput = {
 export type SearchDocsOutput = {
   type: 'candidates';
   candidates: SearchHit[];
+  timings: Omit<AskStageTimings, 'generation_ms'>;
 };
 
 export type ExactMatch = {
@@ -149,7 +151,7 @@ export class EvidenceService {
       AGENT_SEARCH_OVERFETCH_CAP,
       Math.max(configuredRetrieval.topK, requestedLimit * AGENT_SEARCH_OVERFETCH_MULTIPLIER),
     );
-    const result = await search(
+    const searched = await searchWithTrace(
       {
         ...this.deps.searchDeps,
         // The Agent reasons over pages, not child chunks. Keep the public
@@ -178,6 +180,7 @@ export class EvidenceService {
       },
       overfetchLimit,
     );
+    const result = searched.result;
     if (result.type === 'error') {
       throw new EvidenceToolError(result.code, result.message);
     }
@@ -198,6 +201,7 @@ export class EvidenceService {
       input.currentPageId ?? null,
       pageCandidates,
     );
+    const rerankStartedAt = performance.now();
     const ranked = this.deps.searchDeps.reranker
       ? await observeLangfuse(
           'rerank-page-candidates',
@@ -231,8 +235,20 @@ export class EvidenceService {
           },
         )
       : pageCandidates;
+    const pageRerankMs = this.deps.searchDeps.reranker
+      ? performance.now() - rerankStartedAt
+      : 0;
     const candidates = ranked.slice(0, requestedLimit);
-    return { type: 'candidates' as const, candidates };
+    return {
+      type: 'candidates' as const,
+      candidates,
+      timings: {
+        router_ms: searched.trace.timings.router_ms,
+        embedding_ms: searched.trace.timings.embedding_ms,
+        retrieval_ms: searched.trace.timings.retrieval_ms,
+        rerank_ms: pageRerankMs,
+      },
+    };
   }
 
   lookupExact(input: {

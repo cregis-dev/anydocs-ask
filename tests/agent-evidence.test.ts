@@ -225,6 +225,10 @@ test('searchDocs reranks one representative per page after child collapse', asyn
     });
 
     assert.equal(reranker.calls.length, 1);
+    assert.ok(result.timings.router_ms >= 0);
+    assert.ok(result.timings.embedding_ms >= 0);
+    assert.ok(result.timings.retrieval_ms >= 0);
+    assert.ok(result.timings.rerank_ms >= 0);
     assert.equal(reranker.calls[0]?.length, 3);
     assert.match(reranker.calls[0]?.[0]?.text ?? '', /^Title:/);
     assert.match(reranker.calls[0]?.[0]?.text ?? '', /Section:/);

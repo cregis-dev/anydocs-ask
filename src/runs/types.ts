@@ -70,6 +70,14 @@ export type RunAgentTrace = {
     result_count?: number;
     error_code?: string;
   }>;
+  tool_ms?: number;
+  search_timings?: {
+    calls: number;
+    router_ms: number;
+    embedding_ms: number;
+    retrieval_ms: number;
+    rerank_ms: number;
+  };
   evidence: Array<{
     evidence_id: string;
     page_id: string;
