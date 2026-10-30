@@ -35,6 +35,7 @@
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "prepublishOnly": "pnpm clean && pnpm build",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.ui.json",
+    "typecheck:eval": "tsc -p tsconfig.eval.json",
     "test": "node --experimental-strip-types --test --test-concurrency=1 'tests/**/*.test.ts'"
   },
   "engines": {

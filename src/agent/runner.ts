@@ -43,6 +43,8 @@ export type AgenticRagRunnerOptions = {
   config: AgentConfig;
   promptConfig?: PromptConfig;
   askDeps: AskDeps;
+  /** Optional evidence adapter for controlled evaluations; runtime defaults are unchanged. */
+  evidence?: EvidenceService;
 };
 
 type ToolTrace = NonNullable<AskTrace['agent']>['tool_calls'][number];
@@ -64,7 +66,7 @@ export class AgenticRagRunner {
 
   constructor(options: AgenticRagRunnerOptions) {
     this.options = options;
-    this.evidence = new EvidenceService({ db: options.askDeps.db, searchDeps: options.askDeps });
+    this.evidence = options.evidence ?? new EvidenceService({ db: options.askDeps.db, searchDeps: options.askDeps });
   }
 
   async ask(req: AskRequest, hooks: AskStreamHooks = {}): Promise<AskWithTraceResult> {
