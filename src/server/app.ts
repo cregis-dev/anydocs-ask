@@ -67,9 +67,18 @@ type PreparedAskCall =
       ok: true;
       options: AskRouteOptions;
       req: AskRequest;
-      llm: LLM;
       /** session_id the Reader client echoed (null when first ask in session). */
       requestedSessionId: string | null;
+      mode: 'agent';
+    }
+  | {
+      ok: true;
+      options: AskRouteOptions;
+      req: AskRequest;
+      /** session_id the Reader client echoed (null when first ask in session). */
+      requestedSessionId: string | null;
+      mode: 'legacy';
+      llm: LLM;
     }
   | {
       ok: false;
@@ -252,6 +261,21 @@ export function createApp(deps: AppDeps): Hono {
       let ask: Awaited<ReturnType<typeof askWithTrace>>;
       let langfuseTraceId: string | null = null;
       try {
+        const executeAsk = prepared.mode === 'agent'
+          ? () => runtime.agentRunner.ask(prepared.req)
+          : () => askWithTrace(
+              {
+                db: runtime.db,
+                embedder: runtime.embedder,
+                llm: prepared.llm,
+                reranker: runtime.reranker,
+                rerankerConfig: runtime.config.reranker,
+                retrievalConfig: runtime.config.retrieval,
+                promptConfig: runtime.config.prompt,
+                intentRouter: runtime.intentRouter,
+              },
+              prepared.req,
+            );
         const traced = await traceAskTurn(
           {
             requestId,
@@ -260,20 +284,9 @@ export function createApp(deps: AppDeps): Hono {
             question: prepared.req.question ?? '',
             currentPageId: prepared.req.context?.current_page_id,
             dryRun: prepared.options.dryRun,
+            agentic: prepared.mode === 'agent',
           },
-          () => askWithTrace(
-            {
-              db: runtime.db,
-              embedder: runtime.embedder,
-              llm: prepared.llm,
-              reranker: runtime.reranker,
-              rerankerConfig: runtime.config.reranker,
-              retrievalConfig: runtime.config.retrieval,
-              promptConfig: runtime.config.prompt,
-              intentRouter: runtime.intentRouter,
-            },
-            prepared.req,
-          ),
+          executeAsk,
           summarizeAskForLangfuse,
         );
         ask = traced.value;
@@ -306,7 +319,7 @@ export function createApp(deps: AppDeps): Hono {
       if (result.type === 'error') {
         // llm_failed is an upstream/transient gateway problem — same family as
         // llm_unavailable (503). Everything else is client-side validation (400).
-        const status = result.code === 'llm_failed' ? 503 : 400;
+        const status = askErrorStatus(result.code);
         return c.json(bodyOut, status);
       }
       return c.json(bodyOut, 200);
@@ -403,28 +416,8 @@ export function createApp(deps: AppDeps): Hono {
         let ask: Awaited<ReturnType<typeof askWithTraceStream>>;
         let langfuseTraceId: string | null = null;
         try {
-          const traced = await traceAskTurn(
-            {
-              requestId,
-              sessionId,
-              source: prepared.options.source,
-              question: prepared.req.question ?? '',
-              currentPageId: prepared.req.context?.current_page_id,
-              dryRun: prepared.options.dryRun,
-            },
-            () => askWithTraceStream(
-              {
-                db: runtime.db,
-                embedder: runtime.embedder,
-                llm: prepared.llm,
-                reranker: runtime.reranker,
-                rerankerConfig: runtime.config.reranker,
-                retrievalConfig: runtime.config.retrieval,
-                promptConfig: runtime.config.prompt,
-                intentRouter: runtime.intentRouter,
-              },
-              prepared.req,
-              {
+          const executeAsk = prepared.mode === 'agent'
+            ? () => runtime.agentRunner.ask(prepared.req, {
                 signal: abortController.signal,
                 onStatus: async (stage) => {
                   await writeFlushed('status', { stage });
@@ -439,8 +432,47 @@ export function createApp(deps: AppDeps): Hono {
                     scheduleDeltaFlush();
                   }
                 },
-              },
-            ),
+              })
+            : () => askWithTraceStream(
+                {
+                  db: runtime.db,
+                  embedder: runtime.embedder,
+                  llm: prepared.llm,
+                  reranker: runtime.reranker,
+                  rerankerConfig: runtime.config.reranker,
+                  retrievalConfig: runtime.config.retrieval,
+                  promptConfig: runtime.config.prompt,
+                  intentRouter: runtime.intentRouter,
+                },
+                prepared.req,
+                {
+                  signal: abortController.signal,
+                  onStatus: async (stage) => {
+                    await writeFlushed('status', { stage });
+                    if (stage === 'generating') startHeartbeat();
+                  },
+                  onDelta: async (text) => {
+                    await write('delta', { text });
+                    if (!wroteFirstDelta) {
+                      wroteFirstDelta = true;
+                      await flushDeltaPadding();
+                    } else {
+                      scheduleDeltaFlush();
+                    }
+                  },
+                },
+              );
+          const traced = await traceAskTurn(
+            {
+              requestId,
+              sessionId,
+              source: prepared.options.source,
+              question: prepared.req.question ?? '',
+              currentPageId: prepared.req.context?.current_page_id,
+              dryRun: prepared.options.dryRun,
+              agentic: prepared.mode === 'agent',
+            },
+            executeAsk,
             summarizeAskForLangfuse,
           );
           ask = traced.value;
@@ -775,9 +807,17 @@ async function prepareAskCall(runtime: Runtime, c: Context): Promise<PreparedAsk
     };
   }
 
-  let llm: LLM;
+  let execution: { mode: 'agent' } | { mode: 'legacy'; llm: LLM };
   try {
-    llm = runtime.llm;
+    if (runtime.config.agent.enabled) {
+      // Resolve the tool-capable provider here so configuration errors retain
+      // the same structured 503 behavior as the legacy answer model. Do not
+      // instantiate the legacy text-only LLM on the Agent path.
+      void runtime.agentRunner;
+      execution = { mode: 'agent' };
+    } else {
+      execution = { mode: 'legacy', llm: runtime.llm };
+    }
   } catch (err) {
     return {
       ok: false,
@@ -799,9 +839,15 @@ async function prepareAskCall(runtime: Runtime, c: Context): Promise<PreparedAsk
     ok: true,
     options: { dryRun, source },
     req: body as AskRequest,
-    llm,
     requestedSessionId,
+    ...execution,
   };
+}
+
+function askErrorStatus(code: string): 400 | 502 | 503 {
+  if (code === 'llm_failed' || code === 'agent_failed') return 503;
+  if (code === 'agent_no_evidence' || code === 'agent_invalid_citations') return 502;
+  return 400;
 }
 
 /**
@@ -1116,6 +1162,7 @@ function appendRun(
         ? { router_strategy: trace.intent_route.routerStrategy }
         : {}),
       timings: trace.timings,
+      ...(trace.agent ? { agent: trace.agent } : {}),
     },
     answer: {
       kind,

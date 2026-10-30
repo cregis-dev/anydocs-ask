@@ -18,6 +18,11 @@ class EvalSample:
     rubric: dict[str, str] = field(default_factory=dict)
     context_source: str = "none"
     lang: str = "unknown"
+    source_trace_id: str | None = None
+    source_observation_id: str | None = None
+    agent_diagnostics: dict[str, Any] = field(default_factory=dict)
+    reference_fact_rules: dict[str, list[str]] = field(default_factory=dict)
+    reference_fact_direct_apis: dict[str, str] = field(default_factory=dict)
 
 
 def file_sha256(path: Path) -> str:
@@ -26,6 +31,19 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def experiment_metadata(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Keep controlled-run conditions when publishing, and reject mixed arms."""
+    metadata: dict[str, Any] = {}
+    for name in ("experiment_id", "variant", "context_mode", "repetition", "evaluation_input_sha256"):
+        values = [record.get(name) for record in records]
+        if not any(value is not None for value in values):
+            continue
+        if any(value is None or value != values[0] for value in values):
+            raise ValueError(f"trace mixes experiment metadata: {name}")
+        metadata[name] = values[0]
+    return metadata
 
 
 def golden_sha256(samples: list[EvalSample]) -> str:
@@ -86,6 +104,17 @@ def extract_sample(record: dict[str, Any]) -> EvalSample:
     if isinstance(raw, dict):
         contexts = _string_list(raw.get("retrieved_contexts"))
         facts = _string_list(raw.get("reference_facts"))
+        context_source = _optional_string(raw.get("context_source")) or "none"
+        trace = record.get("trace")
+        if (
+            context_source == "trace_preview"
+            and isinstance(trace, dict)
+            and isinstance(trace.get("agent"), dict)
+            and contexts
+        ):
+            # Agent selected_context contains the complete readDoc evidence
+            # sent to generation, not a truncated diagnostic preview.
+            context_source = "agent_evidence"
         return EvalSample(
             case_id=_required_string(record.get("case_id"), "case_id"),
             user_input=_required_string(raw.get("user_input"), "ragas_sample.user_input"),
@@ -94,8 +123,11 @@ def extract_sample(record: dict[str, Any]) -> EvalSample:
             reference=_optional_string(raw.get("reference")),
             reference_facts=facts,
             rubric=_string_dict(raw.get("rubric")),
-            context_source=_optional_string(raw.get("context_source")) or "none",
+            context_source=context_source,
             lang=_optional_string(record.get("lang")) or "unknown",
+            source_trace_id=_optional_string(record.get("langfuse_trace_id")),
+            source_observation_id=_optional_string(record.get("langfuse_observation_id")),
+            agent_diagnostics=_agent_diagnostics(record),
         )
 
     return _extract_legacy_sample(record)
@@ -143,23 +175,58 @@ def _extract_legacy_sample(record: dict[str, Any]) -> EvalSample:
         rubric=_string_dict(expected.get("evaluation_rubric")),
         context_source=source,
         lang=_optional_string(record.get("lang")) or "unknown",
+        source_trace_id=_optional_string(record.get("langfuse_trace_id")),
+        source_observation_id=_optional_string(record.get("langfuse_observation_id")),
+        agent_diagnostics=_agent_diagnostics(record),
     )
+
+
+def _agent_diagnostics(record: dict[str, Any]) -> dict[str, Any]:
+    trace = record.get("trace")
+    if not isinstance(trace, dict):
+        return {}
+    agent = trace.get("agent")
+    if not isinstance(agent, dict):
+        return {}
+    required_facts = agent.get("required_facts")
+    tool_calls = agent.get("tool_calls")
+    facts = required_facts if isinstance(required_facts, list) else []
+    calls = tool_calls if isinstance(tool_calls, list) else []
+    return {
+        "steps": agent.get("steps"),
+        "tool_choice_retry_count": agent.get("tool_choice_retry_count", 0),
+        "forced_finalization_count": agent.get("forced_finalization_count", 0),
+        "citation_retry_count": agent.get("citation_retry_count", 0),
+        "required_fact_count": len(facts),
+        "missing_fact_count": sum(
+            1 for fact in facts if isinstance(fact, dict) and fact.get("covered") is False
+        ),
+        "tool_error_count": sum(
+            1 for call in calls if isinstance(call, dict) and call.get("ok") is False
+        ),
+    }
 
 
 def coverage(samples: list[EvalSample]) -> dict[str, int | float]:
     total = len(samples)
-    full_context = sum(sample.context_source == "prompt_snapshot" for sample in samples)
+    full_context = sum(
+        sample.context_source in {"prompt_snapshot", "agent_evidence"}
+        for sample in samples
+    )
     references = sum(sample.reference is not None for sample in samples)
     answers = sum(sample.response is not None for sample in samples)
     rubrics = sum(bool(sample.rubric) for sample in samples)
+    source_traces = sum(sample.source_trace_id is not None for sample in samples)
     return {
         "total": total,
         "answer_count": answers,
         "full_context_count": full_context,
         "reference_count": references,
         "rubric_count": rubrics,
+        "source_trace_count": source_traces,
         "reference_coverage": references / total if total else 0.0,
         "full_context_coverage": full_context / total if total else 0.0,
+        "source_trace_coverage": source_traces / total if total else 0.0,
     }
 
 

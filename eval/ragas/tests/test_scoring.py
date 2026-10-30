@@ -111,6 +111,48 @@ def test_context_recall_skips_empty_retrieval_context():
     assert result["skipped"]["context_recall"] == "no retrieved contexts"
 
 
+def test_reference_fact_recall_scores_curated_facts_independently():
+    class AtomicRecallMetric:
+        async def ascore(self, **kwargs):
+            fact = kwargs["reference"]
+            return Result(1.0 if "paid_partial" in fact else 0.0, f"checked: {fact}")
+
+    sample = EvalSample(
+        case_id="case-atomic-recall",
+        user_input="Can an order be paid in parts?",
+        response=None,
+        retrieved_contexts=["The callback may contain paid_partial."],
+        reference="An order may emit paid_partial and later paid_remain.",
+        reference_facts=[
+            "A partial payment emits paid_partial.",
+            "A later payment emits paid_remain.",
+        ],
+    )
+    result = asyncio.run(
+        score_sample(sample, Scorers(reference_fact_recall=AtomicRecallMetric()))
+    )
+    assert result["scores"]["reference_fact_recall"]["value"] == 0.5
+    assert "paid_partial" in result["scores"]["reference_fact_recall"]["reason"]
+    assert "paid_remain" in result["scores"]["reference_fact_recall"]["reason"]
+
+
+def test_reference_fact_recall_requires_atomic_facts():
+    sample = EvalSample(
+        case_id="case-no-facts",
+        user_input="question",
+        response=None,
+        retrieved_contexts=["context"],
+        reference="reference",
+    )
+    result = asyncio.run(
+        score_sample(sample, Scorers(reference_fact_recall=FakeMetric(1.0)))
+    )
+    assert (
+        result["skipped"]["reference_fact_recall"]
+        == "golden case has no atomic reference facts"
+    )
+
+
 def test_context_precision_scores_ranked_context_usefulness_without_generated_answer():
     class ContextPrecisionMetric:
         async def ascore(self, **kwargs):
@@ -215,6 +257,7 @@ def test_anthropic_provider_reuses_existing_gateway_environment(monkeypatch):
             "faithfulness",
             "context_precision",
             "context_recall",
+            "reference_fact_recall",
             "factual_correctness",
             "rubric_compliance",
         },
@@ -222,6 +265,7 @@ def test_anthropic_provider_reuses_existing_gateway_environment(monkeypatch):
     assert type(scorers.faithfulness).__name__ == "Faithfulness"
     assert type(scorers.context_precision).__name__ == "ContextPrecision"
     assert type(scorers.context_recall).__name__ == "ContextRecall"
+    assert scorers.reference_fact_recall is scorers.context_recall
     assert type(scorers.factual_correctness).__name__ == "FactualCorrectness"
     assert type(scorers.rubric_compliance).__name__ == "NormalizedFivePointScorer"
     assert type(scorers.rubric_compliance.scorer).__name__ == "InstanceSpecificRubrics"

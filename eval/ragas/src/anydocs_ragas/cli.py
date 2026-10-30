@@ -13,6 +13,7 @@ from . import __version__
 from .models import (
     coverage,
     extract_sample,
+    experiment_metadata,
     file_sha256,
     golden_sha256,
     load_trace_records,
@@ -37,11 +38,14 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--metrics", default=",".join(SUPPORTED_METRICS))
     command.add_argument("--limit", type=int)
     command.add_argument("--concurrency", type=int, default=2)
+    command.add_argument("--judge-profile", choices=("legacy", "audited-v1", "audited-v2", "audited-v3", "audited-v4"), default="legacy")
+    command.add_argument("--fact-rules", type=Path, help="Versioned explicit fact rules for audited-v2/v3/v4")
     command.add_argument("--release", default=os.getenv("LANGFUSE_RELEASE"))
     command.add_argument("--engine", default=os.getenv("ANYDOCS_ENGINE_VERSION"))
     command.add_argument("--validate-only", action="store_true")
     command.add_argument("--langfuse-dataset", help="Publish scores to a versioned Langfuse dataset")
     command.add_argument("--experiment-name", help="Langfuse run name; defaults to release + Golden hash")
+    command.add_argument("--no-source-scores", action="store_true", help="Publish a new experiment without overwriting source scores")
     command.add_argument("--version", action="version", version=__version__)
     return command
 
@@ -50,7 +54,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         records = load_trace_records(args.trace)
+        run_metadata = experiment_metadata(records)
         samples = [extract_sample(record) for record in records]
+        if args.judge_profile in {"audited-v2", "audited-v3", "audited-v4"} and args.fact_rules is None:
+            raise ValueError(f"{args.judge_profile} requires an explicit fact-rules file")
+        if args.fact_rules is not None:
+            if args.judge_profile not in {"audited-v2", "audited-v3", "audited-v4"}:
+                raise ValueError("Explicit fact rules require audited-v2, audited-v3 or audited-v4")
+            from .fact_rules import apply_fact_rules
+            samples = apply_fact_rules(samples, args.fact_rules, allow_direct_api=args.judge_profile == "audited-v4")
+        if args.judge_profile in {"audited-v2", "audited-v3", "audited-v4"} and args.langfuse_dataset and not args.no_source_scores:
+            raise ValueError(f"{args.judge_profile} rejudging must preserve original source scores; use --no-source-scores")
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -72,13 +86,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
-    scorers = build_scorers(settings, metrics)
+    scorers = build_scorers(settings, metrics, profile=args.judge_profile)
     results = asyncio.run(score_samples(samples, scorers, args.concurrency))
     golden_hash = golden_sha256(samples)
     trace_build = trace_build_metadata(records)
     release = args.release or trace_build.get("release")
     engine = args.engine or trace_build.get("engine_release")
     metadata = {
+        "judge_profile": args.judge_profile,
+        **run_metadata,
         "source_trace": str(args.trace.resolve()),
         "source_trace_sha256": file_sha256(args.trace),
         "golden_sha256": golden_hash,
@@ -91,6 +107,22 @@ def main(argv: list[str] | None = None) -> int:
         "metrics": sorted(metrics),
         "coverage": coverage_summary,
     }
+    if args.judge_profile == "audited-v1":
+        from .audited import contract_metadata
+        metadata.update(contract_metadata())
+    elif args.judge_profile == "audited-v2":
+        from .evidence_judge import contract_metadata
+        metadata.update(contract_metadata())
+        metadata["judge_fact_rules_sha256"] = file_sha256(args.fact_rules)
+    elif args.judge_profile == "audited-v3":
+        from .calibrated_judge import contract_metadata
+        metadata.update(contract_metadata())
+        metadata["judge_fact_rules_sha256"] = file_sha256(args.fact_rules)
+    elif args.judge_profile == "audited-v4":
+        from .source_scoped_judge import contract_metadata
+        metadata.update(contract_metadata())
+        metadata["judge_fact_rules_sha256"] = file_sha256(args.fact_rules)
+    metadata["source_scores_published"] = bool(args.langfuse_dataset and not args.no_source_scores)
     paths = write_reports(args.output_dir, results, metadata)
     for kind, path in paths.items():
         print(f"{kind}: {path.resolve()}")
@@ -109,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
                 dataset_base_name=args.langfuse_dataset,
                 experiment_name=experiment_name,
                 metadata=metadata,
+                publish_source_scores=not args.no_source_scores,
             )
         except Exception as error:
             print(f"error: Langfuse publish failed: {type(error).__name__}: {error}", file=sys.stderr)

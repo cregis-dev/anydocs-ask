@@ -88,7 +88,7 @@ flowchart LR
 
 ### 4.2 硬边界与降级
 
-初始预算是待测配置，而不是已验证的最优值：最多 2 次发现调用、2 次阅读调用、1 次定向补查、最多 5 次模型生成步骤；工具执行层另设单请求时间、累计上下文 token、输出 token 和并发上限。并行工具调用也要合计预算，不能只依赖 SDK 的 `stopWhen` 或网关参数。触顶时使用**已经核对过的证据**作简短答复；未覆盖的事实明说未知，绝不回退到无证据的旧 RAG 自由生成。
+初始预算是待测配置，而不是已验证的最优值：最多 2 次发现调用、3 次阅读调用、1 次定向补查、最多 5 次模型生成步骤；工具执行层另设单请求时间、累计上下文 token、输出 token 和并发上限。并行工具调用也要合计预算，不能只依赖 SDK 的 `stopWhen` 或网关参数。触顶时使用**已经核对过的证据**作简短答复；未覆盖的事实明说未知，绝不回退到无证据的旧 RAG 自由生成。
 
 工具超时、索引不可用、页面版本不一致、模型未调用工具、引用校验失败都有显式状态。可以对瞬时只读错误作一次受控重试；仍失败则返回可观察的部分结果/错误。流式接口只向用户推最终答案和状态，不泄露中间规划文本；在证据校验前不先流出无法撤回的事实断言。
 
@@ -121,7 +121,7 @@ flowchart LR
 
 选**单 Agent + 受控工具循环**，首选 AI SDK 的 `ToolLoopAgent`；其多步工具、`stopWhen` 与 `prepareStep` 能覆盖本方案，而执行层仍要自行限制调用和时间。现有 `src/llm/types.ts` 只有文本 `generate/streamGenerate`，不能直接承载工具调用；新增 tool-capable adapter，旧接口保留给其他用途。POC 已用 Anthropic 兼容网关验证 `deepseek-flash` 的工具调用与多步流程，但只覆盖一个真实文档问题，不构成生产质量/延迟证明。[AI SDK 工具循环说明](https://ai-sdk.dev/docs/agents/building-agents)。
 
-POC 验证版本为 `ai@7.0.111`、`@ai-sdk/anthropic@4.0.60`；第一阶段依赖以这些版本做可复现起点，实施前核对锁文件、provider 行为与安全更新。项目当前声明 Node `>=20`，而 POC 环境使用 Node 22；必须先做 Node 20/22 的 CI 与容器兼容矩阵，**不能仅凭 POC 直接升级运行时或发布依赖**。网关的 thinking/tool-choice 兼容性及 `disableParallelToolUse` 表现也要作为集成测试，而非依赖提示词假设。
+实现固定使用 `ai@7.0.111`、`@ai-sdk/anthropic@4.0.60` 和 Node `>=22`；仓库 CI 与 Docker 本就运行 Node 22/24，因此包声明已与实际运行时对齐。网关的 thinking/tool-choice 兼容性及 `disableParallelToolUse` 表现仍须通过真实端到端探针与集成测试确认，而不能只依赖提示词假设。
 
 Langfuse 继续使用仓库已固定的 `@langfuse/client`、`@langfuse/otel`、`@langfuse/tracing@5.11.1`；如采用 AI SDK 原生 telemetry，拟增配相同版本的 `@langfuse/vercel-ai-sdk`，实施前核实 peer dependencies 和实际 trace 树，避免重复上报。优先框架集成捕获模型/usage，业务证据链补手工 observation。[Langfuse AI SDK 集成](https://langfuse.com/docs/observability/get-started)。
 
@@ -182,6 +182,104 @@ Langfuse 继续使用仓库已固定的 `@langfuse/client`、`@langfuse/otel`、
 - **API 路径/版本识别**：需要处理“用户给的是示例路径”与“用户明确指定版本”的差异，避免硬过滤掉正确证据。
 - **Judge 可靠性**：部分低分是长答案/指标口径问题，不要为追分引入错误的文档或过度规则。
 - **Langfuse 数据安全**：精确记录证据足以复盘，但不能把 API key、日志原文和敏感用户字段写进 trace。
-- **依赖兼容**：AI SDK 7/Node 20 声明、Anthropic 兼容网关、OTel/Langfuse 版本组合需在实施前以锁文件和端到端 trace 实测。
+- **依赖兼容**：AI SDK 7/Node 22、Anthropic 兼容网关、OTel/Langfuse 版本组合已锁定，仍需在发布前用真实端到端 trace 复核。
 
-本方案的第一项工程工作应是**阶段 0 + 阶段 1 的只读工具垂直切片**，用上述 8 类阻断题证明“找得到且读得全”；之后再接 Agent 循环与回答评测。这样可以明确新收益来自证据发现、证据阅读，还是最终生成，而不是只得到一个难解释的新总分。
+## 12. 当前实现状态
+
+第一阶段已落地为 feature flag：`agent.enabled=false` 保持现有生产行为，启用后 `/v1/ask`、SSE、Reader、Console 与 MCP `ask` 共用单 Agent 入口。Agent 暴露 `lookupExact`、`searchDocs`、`browseCatalog`、`readDoc` 四个进程内只读工具，执行层独立限制 discovery/read/supplemental-search 次数，并以稳定 `evidence_id` 校验最终引用。`browseCatalog` 是零参数导航工具，按当前问题语言返回完整的 section/folder/page 结构树，不受 scope 或 discovery 次数预算裁剪，且从第一步起到最终回答前始终可用；目录项本身不能作为引用。
+
+短页面按结构化 parent 去重后整页读取，长页面支持 section/field 定向读取并受 token 上限约束；候选 snippet 不能直接成为引用。Langfuse 顶层记录为 `agent`，每次发现/读取记录为 `retriever`，AI SDK telemetry 记录模型和 tool loop。SSE 首版在引用校验完成后发送一次答案 delta，暂不流出未经验证的中间文本。
+
+当前实现仍属于可运行的垂直切片，不等于已过生产闸门。固定 92 条 Golden 的旧管线/Agent A/B 已完成；结果见第 13 节。下一步需补齐 `required_fact` 覆盖检查、Agent query vector 对反馈链路的兼容，并优化真实网关下的延迟和 token 成本。
+
+阶段 0、阶段 1 与首个 Agent 垂直切片已经落地，完整 A/B 也验证了收益主要来自证据发现和精确阅读。后续仍按同一原则迭代：每次只改变证据覆盖、生成约束或工具成本中的一个变量，并复用相同 Golden 做配对评测，避免只得到难解释的新总分。
+
+## 13. 92 条 Golden A/B 结论
+
+2026-09-23 已在相同 Golden、索引、回答模型和 Judge 条件下完成现有 RAG 与 Agentic RAG 的完整对照。两组均完成 92/92 条回答，Ragas Judge 无执行错误。Agent 的确定性指标按最终 `selected_context` 证据账本计算，不能用工具循环中累计出现的 `fused` 搜索候选代替。
+
+| 指标 | 现有 RAG | Agentic RAG | 变化 |
+| --- | ---: | ---: | ---: |
+| Ragas Context Precision | 0.679 | 0.945 | +26.6pp |
+| Ragas Context Recall | 0.808 | 0.797 | -1.1pp |
+| Ragas Faithfulness | 0.935 | 0.910 | -2.5pp |
+| Ragas Rubric Compliance | 0.820 | 0.880 | +6.0pp |
+| Hit@1 | 0.707 | 0.902 | +19.6pp |
+| Hit@5 | 0.957 | 0.978 | +2.2pp |
+| Context-P@5 | 0.757 | 0.928 | +17.1pp |
+| Unexpected Citation Rate | 0.260 | 0.072 | -18.8pp |
+
+POC 已证明 Agent 能显著收敛证据范围、提高权威页面的首位命中，并解决 `/address/inner`、`sub_address_withdrawal`、订单金额范围和 payout 签名原串等既有失败题。但它平均使用 3.16 个步骤、约 3.98 次工具调用，平均延迟由 2.26 秒增至 4.14 秒，平均输入 token 由 5.4k 增至 12.5k。最终证据文本虽减少约 55%，工具 schema、历史和中间结果仍造成较高开销。
+
+当前不应直接开启生产默认开关。下一阶段集中做三项改造：
+
+1. 在回答前维护精简的 `required_facts` 清单，只为 `missing` 子问题补查，解决“读得准但读不全”；
+2. 对最终 claim 做 evidence binding，禁止把合理常识写成未被文档支持的确定结论；
+3. 压缩 `searchDocs`/`readDoc` 返回值和工具历史，明确路径问题优先走 `lookupExact -> readDoc`。
+
+另有两条 Golden 需要先校准：`cregis-tokens-zh-usdt-network-choice` 未明确产品域，`cregis-tokens-en-testnet-mainnet-separation` 的允许引用页不完整。修订后应固定新的 Golden hash，并用相同 92 条重新执行配对实验。建议下一轮在保持 Context Precision `>=0.90`、Rubric `>=0.88` 和非预期引用率 `<=0.10` 的同时，将 Context Recall 恢复到 `>=0.80`、Faithfulness 恢复到 `>=0.925`，并把 p95 延迟压到 5 秒、平均输入 token 压到 8k 左右，再进入影子流量。
+
+### 13.1 Agent 路径 reranker 复验
+
+同日增加第三组实验：Agent 保持不变，开启 `Xenova/bge-reranker-large`，采用 `topK=8`、融合权重 `0.6`。候选组的 Ragas Context Recall 为 `0.816`，高于无 reranker Agent 的 `0.797`；但共同有效样本的配对净增只有 `1.09pp`，同时 Context Precision 配对净降 `1.04pp`、Factual Correctness 净降 `2.51pp`。Faithfulness `0.910 -> 0.911`、Rubric `0.880 -> 0.883`，均可视为持平。
+
+确定性指标没有显示稳定收益：Hit@1 `0.902 -> 0.870`，MRR `0.938 -> 0.922`，Hit@3/Hit@5 均不变；平均延迟 `4.14s -> 4.88s`，p95 `6.19s -> 7.07s`。候选组还出现 1 条 `agent_no_evidence`：错误码查询被多个 API Reference 的通用 `code=00000` child 占据候选，Agent 未读到权威错误码页便耗尽 discovery 预算。
+
+因此，当前 `child top8 -> rerank -> page 去重` 不作为 Agent 默认配置。下一次仅验证页面级方案：先按 `page_id` 去重并回填 12–20 个真实页面候选，再用“标题 + 命中章节 + 最佳 snippet”重排；精确 path、operation、错误码、字段和当前页候选必须 pin/boost，`lookupExact -> readDoc` 不经过语义 reranker。先在 Hit@1 变化题和 recall 回退题上做小样本配对，满足完成率 100%、Hit@1 不低于 `0.90` 且答案指标有实质收益后，才值得重跑完整 92 条。
+
+本轮使用相同 Golden hash 和文档 Git 版本，但重建索引为 84 pages / 768 chunks，上一轮记录为 84 / 767，且旧实验没有保存可核对的 index hash。因此该实验足以否决当前接法的默认启用，不应用于宣称严格可复现的微小百分点提升。下一轮须把 index manifest/hash 纳入实验元数据。完整本地报告位于文档项目忽略目录 `eval/local-reports/agentic-rag-reranker-20260923/`，Langfuse run 为 [agentic-rag-reranker-large-top8-w06-05676bd-20260923](https://jp.cloud.langfuse.com/project/cmu2a8k6q00rkad0d5ryxpy3n/datasets/cmu6djv1p003had0i1nx61bbt/runs/26e31c8b-85ce-43a7-801a-58626419ba25)。
+
+### 13.2 页面级 reranker 复验
+
+针对 13.1 暴露出的“同一页面多个 child 抢占 top8”问题，Agent 的 `searchDocs` 改为以下顺序：
+
+```text
+BM25 / Vector / Exact child candidates
+  -> RRF
+  -> 扩大 child 召回窗口
+  -> 按 page_id 去重，每页保留最佳 child
+  -> 前 8 个真实页面用“标题 + breadcrumb + 命中 section + snippet”重排
+  -> RRF 融合，返回 20 个页面候选
+  -> Agent 选择 readDoc
+```
+
+此改动只影响 Agent 的发现工具；旧问答路径和 MCP `search` 仍沿用原 child 级 reranker。明确 API path、operation ID、错误码、字段以及 `current_page_id` 命中的页面保留原槽位，语义 reranker 只重排其余页面；`lookupExact -> readDoc` 仍不经过语义重排。
+
+先对 92 条 Golden 做不调用回答模型的纯搜索比较，`top8` 优于 `top12`：
+
+| 页面级配置 | Hit@1 | Hit@3 | Hit@5 | MRR | 未命中 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| top8 + 0.6 | 0.696 | 0.935 | 0.989 | 0.821 | 0 |
+| top12 + 0.6 | 0.696 | 0.924 | 0.978 | 0.818 | 0 |
+
+扩大到 12 个页面没有救回新案例，反而让跨产品/相邻主题页面进入重排窗口，因此保留现有 `top8 + 0.6`。这里的 `top8` 已是 8 个不同 page，不再是 8 个可能属于同一 page 的 child。
+
+随后在 84 pages / 768 chunks 的同一索引上跑满 92 条 Agent 端到端评测。与 13.1 的 child 级 reranker 对比：
+
+| 指标 | child top8 | page top8 | 变化 |
+| --- | ---: | ---: | ---: |
+| Hit@1 | 0.870 | 0.924 | +5.4pp |
+| Hit@3 / Hit@5 | 0.978 | 0.978 | 0 |
+| MRR | 0.922 | 0.949 | +2.7pp |
+| Context-P@5 | 0.926 | 0.929 | +0.3pp |
+| Citation Anchor | 0.967 | 0.967 | 0 |
+| 平均延迟 | 4,876ms | 4,652ms | -224ms |
+| p95 延迟 | 7,066ms | 6,994ms | -72ms |
+
+Hit@1 有 7 条改善、2 条回退。错误码优先级、凭证隔离、无效 token 名、API key 安全和 callback URL 等题恢复首位权威页，说明页面级目标与 Agent 后续 `readDoc` 的决策单位一致。两个回退案例是 `cregis-pe-zh-crypto-order-currency` 和 `cregis-setup-en-base-url-per-project`，后续需继续逐题观察，但没有造成 Hit@5 覆盖下降。
+
+Ragas 全量复验完成，92 条均成功评分，五项指标均为 0 errors。与 child 级 reranker 的共同样本配对结果如下：
+
+| 指标 | child top8 | page top8 | 配对变化 |
+| --- | ---: | ---: | ---: |
+| Context Precision | 0.932 | 0.944 | +1.22pp |
+| Context Recall | 0.816 | 0.802 | -1.36pp |
+| Factual Correctness | 0.408 | 0.422 | +1.43pp |
+| Faithfulness | 0.910 | 0.909 | -0.12pp |
+| Rubric Compliance | 0.883 | 0.872 | -1.02pp |
+
+与 Agent 不开 reranker 相比，页面组的 Context Precision `0.945 -> 0.947`、Context Recall `0.797 -> 0.794`、Factual Correctness `0.427 -> 0.416`、Faithfulness `0.910 -> 0.909`、Rubric `0.880 -> 0.875`，应整体解读为持平。页面 reranker 同时使平均延迟 `4.14s -> 4.65s`、p95 `6.19s -> 6.99s`；它改善了首位页面排序，但没有扩大前五覆盖，也没有形成稳定的答案质量收益。
+
+本轮仍有 1 条非检索错误：`cregis-waas-zh-deposit-callback-new-address` 已读取正确的 webhook 与 address/create 页面，但模型连续两次输出了无法映射到 evidence ledger 的引用，最终为 `agent_invalid_citations`。这应通过结构化引用或确定性 citation repair 解决，不能继续调 reranker。另有 2 条 citation-anchor 失败来自 Golden 的产品域/允许引用页歧义，需在下一次严格发布实验前校准。
+
+最终决策是保留页面级实现：只要 Agent 启用 reranker，就使用 page top8，而不再使用 child top8；但 `reranker.enabled` 默认值继续保持 `false`。下一阶段优先做 `required_facts` 缺口补查和 citation binding，完成后再评估页面 reranker 的额外延迟是否值得。完整报告位于忽略目录 `eval/local-reports/agentic-rag-page-reranker-20260923/`，Langfuse run 为 [agent-page-rerank-top8-b139ae5-20260923](https://jp.cloud.langfuse.com/project/cmu2a8k6q00rkad0d5ryxpy3n/datasets/cmu6djv1p003had0i1nx61bbt/runs/039e6462-982a-48bd-85b0-bdc112e275e2)。

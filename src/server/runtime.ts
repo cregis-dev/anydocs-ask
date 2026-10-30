@@ -30,6 +30,16 @@ import { resolveTransformersCacheDir, type ResolvedConfig } from '../config.ts';
 import { ensureFeedbackDirs } from '../workspace.ts';
 import { SessionTable } from '../feedback/session-table.ts';
 import { LLMIntentRouter, type IntentRouter } from '../query/intent-router.ts';
+import type { LanguageModel } from 'ai';
+import { AgenticRagRunner } from '../agent/runner.ts';
+import { buildAgentLanguageModel } from '../agent/provider.ts';
+
+const AGENT_SEARCH_LLM: LLM = {
+  model: 'agent-search-no-llm',
+  async generate() {
+    throw new Error('Agent evidence search must not invoke the legacy answer LLM');
+  },
+};
 
 export type RuntimeOptions = {
   /** Source: anydocs project (pages/ + navigation/). */
@@ -49,6 +59,8 @@ export type RuntimeOptions = {
   llm?: LLM;
   /** Override the lightweight router LLM independently from the answer LLM. */
   routerLlm?: LLM;
+  /** Tool-capable model override for Agentic RAG integration tests. */
+  agentModel?: LanguageModel;
   /**
    * If true, skip the chokidar watcher at start. Tests use this to keep the
    * filesystem from triggering reindex churn during assertions.
@@ -111,6 +123,9 @@ export class Runtime {
   private llmInstance: LLM | null = null;
   private readonly routerLlmFactory: () => LLM;
   private routerLlmInstance: LLM | null = null;
+  private readonly agentModelFactory: () => LanguageModel;
+  private agentModelInstance: LanguageModel | null = null;
+  private agentRunnerInstance: AgenticRagRunner | null = null;
 
   constructor(opts: RuntimeOptions) {
     this.projectRoot = resolve(opts.projectRoot);
@@ -136,6 +151,12 @@ export class Runtime {
       this.routerLlmFactory = () => buildDefaultLLM(opts.config, { model: opts.config.router.model! });
     } else {
       this.routerLlmFactory = () => this.llm;
+    }
+    if (opts.agentModel) {
+      this.agentModelInstance = opts.agentModel;
+      this.agentModelFactory = () => opts.agentModel!;
+    } else {
+      this.agentModelFactory = () => buildAgentLanguageModel(opts.config);
     }
     this.intentRouter = new LLMIntentRouter(() => this.routerLlm, {
       enabled: opts.config.router.enabled,
@@ -191,6 +212,35 @@ export class Runtime {
       this.routerLlmInstance = this.routerLlmFactory();
     }
     return this.routerLlmInstance;
+  }
+
+  get agentRunner(): AgenticRagRunner {
+    if (!this.agentRunnerInstance) {
+      if (!this.agentModelInstance) this.agentModelInstance = this.agentModelFactory();
+      this.agentRunnerInstance = new AgenticRagRunner({
+        model: this.agentModelInstance,
+        modelId: this.config.llm.model,
+        config: this.config.agent,
+        promptConfig: this.config.prompt,
+        askDeps: {
+          db: this.db,
+          embedder: this.embedder,
+          // search() keeps LLM in its historical dependency shape, but the
+          // Agent disables the legacy intent router and never generates from
+          // this dependency. A fail-fast sentinel prevents accidental nested
+          // answer-model calls if that contract changes later.
+          llm: AGENT_SEARCH_LLM,
+          reranker: this.reranker,
+          rerankerConfig: this.config.reranker,
+          retrievalConfig: this.config.retrieval,
+          promptConfig: this.config.prompt,
+          // EvidenceService overrides this with its deterministic router. Keep
+          // null here so the legacy router is never shared with Agent state.
+          intentRouter: null,
+        },
+      });
+    }
+    return this.agentRunnerInstance;
   }
 
   get lastIndexedAtMs(): number | null {

@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
 import { redactSensitiveText } from '../query/diagnostic-input.ts';
 
-type ObservationType = 'span' | 'generation' | 'embedding' | 'retriever';
+type ObservationType = 'span' | 'agent' | 'tool' | 'generation' | 'embedding' | 'retriever';
 
 export type Observation = {
+  id?: string;
   update(attributes: Record<string, unknown>): void;
 };
 
@@ -18,6 +19,7 @@ type LangfuseState = {
 };
 
 let state: LangfuseState | null = null;
+let aiSdkTelemetryRegistered = false;
 
 export type LangfuseLifecycle = {
   enabled: boolean;
@@ -31,11 +33,25 @@ export type TraceTurnOptions = {
   question: string;
   currentPageId?: string | null;
   dryRun?: boolean;
+  agentic?: boolean;
+  traceName?: string;
+  environment?: string;
+  version?: string;
+  tags?: string[];
+  metadata?: Record<string, string>;
 };
 
 export type TraceTurnResult<T> = {
   value: T;
   traceId: string | null;
+  observationId: string | null;
+};
+
+export type TraceScoreInput = {
+  name: string;
+  value: number;
+  dataType?: 'NUMERIC' | 'BOOLEAN';
+  comment?: string;
 };
 
 export async function startLangfuseObservability(): Promise<LangfuseLifecycle> {
@@ -54,12 +70,21 @@ export async function startLangfuseObservability(): Promise<LangfuseLifecycle> {
   try {
     // Import after loadConfig() has loaded the project env file. Both clients
     // read LANGFUSE_* values during construction.
-    const [{ NodeSDK }, { LangfuseSpanProcessor }, tracing, { LangfuseClient }] =
+    const [
+      { NodeSDK },
+      { LangfuseSpanProcessor },
+      tracing,
+      { LangfuseClient },
+      { registerTelemetry },
+      { LangfuseVercelAiSdkIntegration },
+    ] =
       await Promise.all([
         import('@opentelemetry/sdk-node'),
         import('@langfuse/otel'),
         import('@langfuse/tracing'),
         import('@langfuse/client'),
+        import('ai'),
+        import('@langfuse/vercel-ai-sdk'),
       ]);
     const baseUrl = process.env.LANGFUSE_BASE_URL?.trim();
     const processor = new LangfuseSpanProcessor({
@@ -71,6 +96,10 @@ export async function startLangfuseObservability(): Promise<LangfuseLifecycle> {
     });
     const sdk = new NodeSDK({ spanProcessors: [processor] });
     sdk.start();
+    if (!aiSdkTelemetryRegistered) {
+      registerTelemetry(new LangfuseVercelAiSdkIntegration());
+      aiSdkTelemetryRegistered = true;
+    }
     const client = new LangfuseClient({
       publicKey,
       secretKey,
@@ -96,10 +125,17 @@ export async function traceAskTurn<T>(
   output: (value: T) => unknown,
 ): Promise<TraceTurnResult<T>> {
   const current = state;
-  if (!current) return { value: await fn(), traceId: null };
+  if (!current) return { value: await fn(), traceId: null, observationId: null };
 
-  const run = () => current.tracing.startActiveObservation(
-    'answer-docs-question',
+  const traceName = options.traceName ?? 'answer-docs-question';
+
+  const start = current.tracing.startActiveObservation as unknown as (
+    observationName: string,
+    callback: (observation: Observation) => Promise<TraceTurnResult<T>>,
+    options?: { asType: ObservationType },
+  ) => Promise<TraceTurnResult<T>>;
+  const run = () => start(
+    traceName,
     async (observation) => {
       observation.update({
         input: { question: options.question },
@@ -108,33 +144,68 @@ export async function traceAskTurn<T>(
           source: options.source,
           dry_run: options.dryRun === true,
           ...(options.currentPageId ? { current_page_id: options.currentPageId } : {}),
+          ...options.metadata,
         },
       });
       const traceId = current.tracing.getActiveTraceId() ?? null;
+      const observationId = observation.id ?? null;
       try {
         const value = await fn();
         observation.update({ output: output(value) });
-        return { value, traceId };
+        return { value, traceId, observationId };
       } catch (err) {
         observation.update({ level: 'ERROR', statusMessage: describeError(err) });
         throw err;
       }
     },
+    { asType: options.agentic ? 'agent' : 'span' },
   );
 
   return current.tracing.propagateAttributes(
     {
-      traceName: 'answer-docs-question',
+      traceName,
       sessionId: options.sessionId,
+      ...(options.environment ? { environment: options.environment } : {}),
+      ...(options.version ? { version: options.version } : {}),
       metadata: {
         request_id: options.requestId,
         source: options.source,
         dry_run: String(options.dryRun === true),
+        ...options.metadata,
       },
-      tags: ['rag', options.source, ...(options.dryRun ? ['dry-run'] : [])],
+      tags: [
+        options.agentic ? 'agentic-rag' : 'rag',
+        options.source,
+        ...(options.dryRun ? ['dry-run'] : []),
+        ...(options.tags ?? []),
+      ],
     },
     run,
   );
+}
+
+export async function recordTraceScores(args: {
+  traceId: string | null;
+  observationId?: string | null;
+  scores: TraceScoreInput[];
+}): Promise<void> {
+  if (!state || !args.traceId || args.scores.length === 0) return;
+  try {
+    for (const score of args.scores) {
+      state.client.score.create({
+        id: scoreIdForTrace(args.traceId, score.name),
+        traceId: args.traceId,
+        ...(args.observationId ? { observationId: args.observationId } : {}),
+        name: score.name,
+        value: score.value,
+        dataType: score.dataType ?? 'NUMERIC',
+        ...(score.comment ? { comment: score.comment } : {}),
+      });
+    }
+    await state.client.score.flush();
+  } catch (err) {
+    process.stderr.write(`[langfuse] eval score upload failed: ${describeError(err)}\n`);
+  }
 }
 
 export async function observeLangfuse<T>(
@@ -238,6 +309,11 @@ function maskSensitiveText(value: string): string {
 
 function scoreIdForAnswer(answerId: string): string {
   const hex = createHash('sha256').update(`user-thumbs:${answerId}`).digest('hex').slice(0, 32);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20)}`;
+}
+
+function scoreIdForTrace(traceId: string, name: string): string {
+  const hex = createHash('sha256').update(`trace-score:${traceId}:${name}`).digest('hex').slice(0, 32);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20)}`;
 }
 

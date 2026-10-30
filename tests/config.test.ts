@@ -58,6 +58,44 @@ test('loadConfig: missing file -> defaults, source = null', async () => {
     assert.equal(r.config.reranker.model, 'Xenova/bge-reranker-large');
     assert.equal(r.config.reranker.rerankTopK, 8);
     assert.equal(r.config.reranker.weight, 0.6);
+    assert.deepEqual(r.config.agent, {
+      enabled: false,
+      maxSteps: 5,
+      maxDiscoveryCalls: 2,
+      maxReadCalls: 3,
+      maxSupplementalSearchCalls: 1,
+      readTokenLimit: 3300,
+    });
+  } finally {
+    await cleanup();
+  }
+});
+
+test('loadConfig: agent budgets merge and reject out-of-range values', async () => {
+  const { root, cleanup } = await withTmpProject(async (r) => {
+    await fs.writeFile(
+      join(r, 'anydocs.ask.json'),
+      JSON.stringify({
+        agent: {
+          enabled: true,
+          maxSteps: 6,
+          maxDiscoveryCalls: 3,
+          maxReadCalls: 4,
+          maxSupplementalSearchCalls: 9,
+          readTokenLimit: 4200,
+        },
+      }),
+    );
+  });
+  try {
+    const r = await loadConfig(root);
+    assert.equal(r.config.agent.enabled, true);
+    assert.equal(r.config.agent.maxSteps, 6);
+    assert.equal(r.config.agent.maxDiscoveryCalls, 3);
+    assert.equal(r.config.agent.maxReadCalls, 4);
+    assert.equal(r.config.agent.maxSupplementalSearchCalls, 1);
+    assert.equal(r.config.agent.readTokenLimit, 4200);
+    assert.ok(r.warnings.some((warning) => /agent\.maxSupplementalSearchCalls/.test(warning)));
   } finally {
     await cleanup();
   }

@@ -130,6 +130,54 @@ export type AskTrace = {
    *  filter / group on multi-turn calls without re-joining on session_id.
    *  Undefined / 0 on single-turn or `multiTurn.enabled=false` paths. */
   history_window?: number;
+  /** Evidence-first Agentic RAG diagnostics. Present only when the candidate
+   *  implementation handled this request; additive for runs compatibility. */
+  agent?: {
+    steps: number;
+    tool_choice_retry_count?: number;
+    forced_finalization_count?: number;
+    citation_retry_count?: number;
+    tool_calls: Array<{
+      tool: string;
+      ok: boolean;
+      duration_ms: number;
+      result_count?: number;
+      error_code?: string;
+    }>;
+    /** Aggregate latency of all evidence tools. */
+    tool_ms?: number;
+    /** Pure searchDocs internals, aggregated across all calls. */
+    search_timings?: {
+      calls: number;
+      router_ms: number;
+      embedding_ms: number;
+      retrieval_ms: number;
+      rerank_ms: number;
+    };
+    evidence: Array<{
+      evidence_id: string;
+      page_id: string;
+      lang: DocsLang;
+      mode: string;
+      selector: string | null;
+      token_count: number;
+      truncated: boolean;
+      content_hash: string;
+    }>;
+    required_facts?: Array<{
+      id: string;
+      description: string;
+      search_terms: string[];
+      covered: boolean;
+      evidence_ids: string[];
+      missing_terms: string[];
+    }>;
+    budget: {
+      discovery: { used: number; limit: number };
+      read: { used: number; limit: number };
+      supplemental: { used: number; limit: number };
+    };
+  };
 };
 
 export type AskStageTimings = {
@@ -267,26 +315,50 @@ export async function search(
   req: AskRequest,
   topK: number = SEARCH_DEFAULT_TOP_K,
 ): Promise<SearchResult> {
+  return (await searchWithTrace(deps, req, topK)).result;
+}
+
+/**
+ * Internal retrieval-only variant that also exposes measured pipeline stages.
+ * Agent discovery uses this without changing the public MCP search response.
+ */
+export async function searchWithTrace(
+  deps: AskDeps,
+  req: AskRequest,
+  topK: number = SEARCH_DEFAULT_TOP_K,
+): Promise<{ result: SearchResult; trace: AskTrace }> {
   if (req.question === undefined || req.question === null) {
-    return { type: 'error', code: 'invalid_question', message: "field 'question' is required" };
+    return {
+      result: { type: 'error', code: 'invalid_question', message: "field 'question' is required" },
+      trace: emptyTrace(),
+    };
   }
   const question = req.question.trim();
   if (question.length === 0) {
-    return { type: 'error', code: 'invalid_question', message: 'question must not be empty' };
+    return {
+      result: { type: 'error', code: 'invalid_question', message: 'question must not be empty' },
+      trace: emptyTrace(),
+    };
   }
   if (question.length > MAX_QUESTION_CHARS) {
     return {
-      type: 'error',
-      code: 'invalid_question',
-      message: `question exceeds ${MAX_QUESTION_CHARS} characters`,
+      result: {
+        type: 'error',
+        code: 'invalid_question',
+        message: `question exceeds ${MAX_QUESTION_CHARS} characters`,
+      },
+      trace: emptyTrace(),
     };
   }
   const scopeId = req.context?.scope_id ?? null;
   if (scopeId !== null && !isValidScopeId(deps.db, scopeId)) {
     return {
-      type: 'error',
-      code: 'invalid_scope',
-      message: `scope_id '${scopeId}' is not a published subtree`,
+      result: {
+        type: 'error',
+        code: 'invalid_scope',
+        message: `scope_id '${scopeId}' is not a published subtree`,
+      },
+      trace: emptyTrace(),
     };
   }
 
@@ -297,7 +369,7 @@ export async function search(
   const queryLang = resolveQueryLang(deps.db, question, req);
   const retrieval = await runRetrievalPipeline(deps, req, question, queryLang);
   const hits = retrieval.reranked.slice(0, limit).map(searchHitFromChunk);
-  return { type: 'hits', hits };
+  return { result: { type: 'hits', hits }, trace: retrieval.trace };
 }
 
 function emptyTrace(): AskTrace {

@@ -32,6 +32,7 @@ import type { AskDeps, AskTrace } from '../query/answer.ts';
 import type { AskResult } from '../query/types.ts';
 import { fallbackRoute, type IntentRouter } from '../query/intent-router.ts';
 import { MAX_QUESTION_CHARS } from '../query/diagnostic-input.ts';
+import { AGENT_READ_TOKEN_HARD_CAP, EvidenceService, EvidenceToolError } from '../agent/evidence.ts';
 
 /**
  * Dependencies the MCP tools need. The LLM is resolved lazily (and only by
@@ -128,6 +129,7 @@ export function registerMcpTools(
     promptConfig: deps.promptConfig,
     intentRouter: STATIC_SEARCH_ROUTER,
   };
+  const evidenceService = new EvidenceService({ db: deps.db, searchDeps: retrievalDeps });
 
   if (enabled.has('search')) {
     server.registerTool(
@@ -245,7 +247,7 @@ export function registerMcpTools(
       {
         title: 'Fetch a documentation page',
         description:
-          'Retrieve the full text of a documentation page by its page_id (as returned by `search`). Use this to read a whole page after `search` surfaces a relevant snippet. A page_id can exist in several languages — pass the `lang` from the search hit to read the matching one; otherwise the default language is returned and the others are listed.',
+          'Retrieve a bounded structural rendering of a documentation page by its page_id (as returned by `search`). Parent chunks are deduplicated and truncation is reported. Pass the `lang` from the search hit to read the matching language.',
         inputSchema: {
           page_id: z.string().min(1).describe('The page_id to fetch (from a `search` hit).'),
           lang: z
@@ -257,9 +259,18 @@ export function registerMcpTools(
         },
       },
       async ({ page_id, lang }) => {
-        const page = fetchPage(deps.db, page_id, lang ?? null);
-        if (!page) {
-          return text(`fetch_page failed (not_found): no published page with page_id '${page_id}'`, true);
+        let page;
+        try {
+          page = evidenceService.readDoc({
+            pageId: page_id,
+            lang: lang === 'en' || lang === 'zh' ? lang : null,
+            mode: 'page',
+            maxTokens: AGENT_READ_TOKEN_HARD_CAP,
+          });
+        } catch (error) {
+          const code = error instanceof EvidenceToolError ? error.code : 'read_failed';
+          const message = error instanceof Error ? error.message : String(error);
+          return text(`fetch_page failed (${code}): ${message}`, true);
         }
         const otherLangs = page.availableLangs.filter((l) => l !== page.lang);
         const header =
@@ -267,7 +278,8 @@ export function registerMcpTools(
           (page.url ? `URL: ${page.url}\n` : '') +
           (page.breadcrumb.length ? `Path: ${breadcrumbPath(page.breadcrumb)}\n` : '') +
           `Language: ${page.lang}\n` +
-          (otherLangs.length ? `Also available in: ${otherLangs.join(', ')} (pass lang= to switch)\n` : '');
+          (otherLangs.length ? `Also available in: ${otherLangs.join(', ')} (pass lang= to switch)\n` : '') +
+          `Truncated: ${page.truncated ? 'yes' : 'no'}\n`;
         return text(`${header}\n${page.body}`);
       },
     );
@@ -277,17 +289,6 @@ export function registerMcpTools(
 // ---------------------------------------------------------------------------
 // fetch_page DB read
 // ---------------------------------------------------------------------------
-
-type FetchedPage = {
-  title: string;
-  url: string | null;
-  lang: string;
-  /** All published languages for this page_id, sorted (≥ 1, includes `lang`). */
-  availableLangs: string[];
-  breadcrumb: BreadcrumbNode[];
-  /** Page text reconstructed by concatenating its chunks in order. */
-  body: string;
-};
 
 /**
  * Pick which published language to serve for a page.
@@ -307,51 +308,4 @@ export function pickPageLang(
     return { lang: preferLang, available };
   }
   return { lang: available[0]!, available };
-}
-
-/**
- * Reconstruct a page's text from the indexed chunks. Pages aren't stored as
- * whole markdown (only chunks carry `text`), so we concatenate the chunks for
- * the resolved `(page_id, lang)` ordered by chunk_id — a faithful-enough
- * rendering for an agent reading the page.
- */
-function fetchPage(db: DbHandle, pageId: string, preferLang: string | null): FetchedPage | null {
-  type PageMetaRow = { title: string; url: string | null; breadcrumb: string; lang: string };
-  const rows = db
-    .prepare(
-      `SELECT title, url, breadcrumb, lang FROM pages
-       WHERE page_id = ? AND status = 'published'`,
-    )
-    .all(pageId) as PageMetaRow[];
-
-  const picked = pickPageLang(
-    rows.map((r) => r.lang),
-    preferLang,
-  );
-  if (!picked) return null;
-  const chosen = rows.find((r) => r.lang === picked.lang)!;
-
-  type ChunkTextRow = { text: string };
-  const chunks = db
-    .prepare(`SELECT text FROM chunks WHERE page_id = ? AND lang = ? ORDER BY chunk_id`)
-    .all(pageId, chosen.lang) as ChunkTextRow[];
-
-  let breadcrumb: BreadcrumbNode[] = [];
-  try {
-    // Guard the type, not just the parse: a row that parses to a non-array
-    // (DB corruption) would otherwise blow up `breadcrumbPath()`'s `.map`.
-    const parsed = JSON.parse(chosen.breadcrumb) as unknown;
-    if (Array.isArray(parsed)) breadcrumb = parsed as BreadcrumbNode[];
-  } catch {
-    breadcrumb = [];
-  }
-
-  return {
-    title: chosen.title,
-    url: chosen.url,
-    lang: chosen.lang,
-    availableLangs: picked.available,
-    breadcrumb,
-    body: chunks.map((c) => c.text).join('\n\n'),
-  };
 }

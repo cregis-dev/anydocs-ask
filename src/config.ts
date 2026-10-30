@@ -169,6 +169,21 @@ export type MultiTurnConfig = {
 };
 
 /**
+ * Evidence-first Agentic RAG rollout controls. The public API stays the same;
+ * `enabled` selects the candidate implementation during offline A/B and
+ * shadow/gray rollout. Once the Agent passes the release gates this flag can
+ * be removed together with the legacy implementation.
+ */
+export type AgentConfig = {
+  enabled: boolean;
+  maxSteps: number;
+  maxDiscoveryCalls: number;
+  maxReadCalls: number;
+  maxSupplementalSearchCalls: number;
+  readTokenLimit: number;
+};
+
+/**
  * RFC 0005 — citation 语义校验（B.2 复用主 LLM 路径）。0.3 起 shadow 模式
  * 上线，事后异步校验每条 citation 的 claim_sentence ↔ chunk_text 是否语义
  * 一致。
@@ -286,6 +301,7 @@ export type ResolvedConfig = {
   analyze: AnalyzeConfig;
   feedback: FeedbackConfig;
   multiTurn: MultiTurnConfig;
+  agent: AgentConfig;
   citationSemanticCheck: CitationSemanticCheckConfig;
   widget: WidgetConfig;
   mcp: McpConfig;
@@ -372,6 +388,14 @@ const DEFAULTS: ResolvedConfig = {
     // single-turn behaviour.
     enabled: true,
     historyTurns: 3,
+  },
+  agent: {
+    enabled: false,
+    maxSteps: 5,
+    maxDiscoveryCalls: 2,
+    maxReadCalls: 3,
+    maxSupplementalSearchCalls: 1,
+    readTokenLimit: 3300,
   },
   citationSemanticCheck: {
     // RFC 0005 alpha.0: schema 留位，整段默认关闭。0.3 alpha.1+ 才接通实际
@@ -488,6 +512,9 @@ export function applyEnvOverrides(config: ResolvedConfig): void {
       config.server.maxConcurrentAsk = parsed;
     }
   }
+  const envAgentEnabled = process.env.ANYDOCS_AGENT_ENABLED?.trim().toLowerCase();
+  if (envAgentEnabled === 'true' || envAgentEnabled === '1') config.agent.enabled = true;
+  if (envAgentEnabled === 'false' || envAgentEnabled === '0') config.agent.enabled = false;
 }
 
 /**
@@ -528,6 +555,7 @@ function mergeWithDefaults(
   applyAnalyze(user.analyze, out.analyze, warnings);
   applyFeedback(user.feedback, out.feedback, warnings);
   applyMultiTurn(user.multiTurn, out.multiTurn, warnings);
+  applyAgent(user.agent, out.agent, warnings);
   applyCitationSemanticCheck(
     user.citationSemanticCheck,
     out.citationSemanticCheck,
@@ -682,6 +710,41 @@ function applyMultiTurn(value: unknown, target: MultiTurnConfig, warnings: strin
       warnings.push(`anydocs.ask.json: multiTurn.historyTurns must be an integer in [1, 20]; using default`);
     }
   }
+}
+
+function applyAgent(value: unknown, target: AgentConfig, warnings: string[]): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    warnings.push(`anydocs.ask.json: 'agent' must be an object; ignored`);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.enabled !== undefined) {
+    if (typeof obj.enabled === 'boolean') target.enabled = obj.enabled;
+    else warnings.push(`anydocs.ask.json: agent.enabled must be a boolean; using default`);
+  }
+  applyAgentInteger(obj, 'maxSteps', target, 2, 12, warnings);
+  applyAgentInteger(obj, 'maxDiscoveryCalls', target, 1, 8, warnings);
+  applyAgentInteger(obj, 'maxReadCalls', target, 1, 8, warnings);
+  applyAgentInteger(obj, 'maxSupplementalSearchCalls', target, 0, 4, warnings);
+  applyAgentInteger(obj, 'readTokenLimit', target, 256, 8000, warnings);
+}
+
+function applyAgentInteger(
+  obj: Record<string, unknown>,
+  key: keyof Omit<AgentConfig, 'enabled'>,
+  target: AgentConfig,
+  min: number,
+  max: number,
+  warnings: string[],
+): void {
+  const value = obj[key];
+  if (value === undefined) return;
+  if (typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max) {
+    target[key] = value;
+    return;
+  }
+  warnings.push(`anydocs.ask.json: agent.${key} must be an integer in [${min}, ${max}]; using default`);
 }
 
 function applyCitationSemanticCheck(

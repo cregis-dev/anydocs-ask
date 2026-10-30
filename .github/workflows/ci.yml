@@ -34,6 +34,9 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      - name: Typecheck controlled evaluation scripts
+        run: pnpm typecheck:eval
+
       - name: Test
         run: pnpm test
 
