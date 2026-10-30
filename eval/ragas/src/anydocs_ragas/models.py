@@ -21,6 +21,8 @@ class EvalSample:
     source_trace_id: str | None = None
     source_observation_id: str | None = None
     agent_diagnostics: dict[str, Any] = field(default_factory=dict)
+    reference_fact_rules: dict[str, list[str]] = field(default_factory=dict)
+    reference_fact_direct_apis: dict[str, str] = field(default_factory=dict)
 
 
 def file_sha256(path: Path) -> str:
@@ -29,6 +31,19 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def experiment_metadata(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Keep controlled-run conditions when publishing, and reject mixed arms."""
+    metadata: dict[str, Any] = {}
+    for name in ("experiment_id", "variant", "context_mode", "repetition", "evaluation_input_sha256"):
+        values = [record.get(name) for record in records]
+        if not any(value is not None for value in values):
+            continue
+        if any(value is None or value != values[0] for value in values):
+            raise ValueError(f"trace mixes experiment metadata: {name}")
+        metadata[name] = values[0]
+    return metadata
 
 
 def golden_sha256(samples: list[EvalSample]) -> str:

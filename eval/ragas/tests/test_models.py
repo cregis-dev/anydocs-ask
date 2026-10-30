@@ -1,13 +1,26 @@
 import json
+import pytest
 
 from anydocs_ragas.models import (
     EvalSample,
     coverage,
     extract_sample,
+    experiment_metadata,
     golden_sha256,
     load_trace_records,
     trace_build_metadata,
 )
+
+
+def test_experiment_metadata_preserves_conditions_and_rejects_mixed_groups():
+    record = {"experiment_id": "smoke-1", "variant": "parent_child", "context_mode": "no_page",
+              "repetition": 1, "evaluation_input_sha256": "input-hash"}
+    assert experiment_metadata([record, dict(record)]) == record
+    assert experiment_metadata([{"case_id": "legacy"}]) == {}
+    with pytest.raises(ValueError, match="variant"):
+        experiment_metadata([record, {**record, "variant": "agentic"}])
+    with pytest.raises(ValueError, match="experiment_id"):
+        experiment_metadata([record, {"case_id": "legacy"}])
 
 
 def test_extracts_v2_ragas_sample(tmp_path):

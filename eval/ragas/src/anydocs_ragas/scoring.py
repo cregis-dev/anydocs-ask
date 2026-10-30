@@ -68,7 +68,11 @@ class ProviderSettings:
     max_tokens: int = 4096
 
 
-def build_scorers(settings: ProviderSettings, metrics: set[str]) -> Scorers:
+def build_scorers(settings: ProviderSettings, metrics: set[str], *, profile: str = "legacy") -> Scorers:
+    if profile not in {"legacy", "audited-v1", "audited-v2", "audited-v3", "audited-v4"}:
+        raise ValueError(f"Unknown judge profile: {profile}")
+    if profile in {"audited-v2", "audited-v3", "audited-v4"} and metrics != {"reference_fact_recall"}:
+        raise ValueError(f"{profile} changes RFR only; select exactly reference_fact_recall")
     from ragas.embeddings.base import embedding_factory
     from ragas.llms import llm_factory
     from ragas.metrics.collections import (
@@ -110,6 +114,18 @@ def build_scorers(settings: ProviderSettings, metrics: set[str]) -> Scorers:
         client=judge_client,
         **model_args,
     )
+    if profile == "audited-v2":
+        from .evidence_judge import EvidenceFactScorer
+        return Scorers(reference_fact_recall=EvidenceFactScorer(llm))
+    if profile == "audited-v3":
+        from .calibrated_judge import CalibratedFactScorer
+        return Scorers(reference_fact_recall=CalibratedFactScorer(llm))
+    if profile == "audited-v4":
+        from .source_scoped_judge import SourceScopedFactScorer
+        return Scorers(reference_fact_recall=SourceScopedFactScorer(llm))
+    if profile == "audited-v1":
+        from .audited import RecordingLLM
+        llm = RecordingLLM(llm)
 
     relevancy = None
     if "answer_relevancy" in metrics:
@@ -134,7 +150,7 @@ def build_scorers(settings: ProviderSettings, metrics: set[str]) -> Scorers:
         if {"context_recall", "reference_fact_recall"}.intersection(metrics)
         else None
     )
-    return Scorers(
+    scorers = Scorers(
         faithfulness=Faithfulness(llm=llm) if "faithfulness" in metrics else None,
         context_precision=ContextPrecision(llm=llm)
         if "context_precision" in metrics
@@ -153,6 +169,10 @@ def build_scorers(settings: ProviderSettings, metrics: set[str]) -> Scorers:
             else None
         ),
     )
+    if profile == "audited-v1":
+        from .audited import configure_audited
+        return configure_audited(scorers, llm)
+    return scorers
 
 
 async def score_samples(
@@ -328,10 +348,14 @@ async def _score_reference_fact_recall(
     fact_results: list[dict[str, Any]] = []
     try:
         for fact in sample.reference_facts:
+            options = {"alternatives": sample.reference_fact_rules[fact]} if fact in sample.reference_fact_rules else {}
+            if fact in sample.reference_fact_direct_apis:
+                options["required_api_operation"] = sample.reference_fact_direct_apis[fact]
             result = await scorer.ascore(
                 user_input=sample.user_input,
                 retrieved_contexts=sample.retrieved_contexts,
                 reference=fact,
+                **options,
             )
             fact_results.append(
                 {
