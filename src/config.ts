@@ -13,6 +13,7 @@
 import { promises as fs } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import type { RuntimeConfiguration } from './runtime-configuration.ts';
 
 export type EmbeddingConfig = {
   provider: 'local';
@@ -317,6 +318,46 @@ export type LoadConfigResult = {
   warnings: string[];
 };
 
+const configurationSnapshots = new WeakMap<ResolvedConfig, RuntimeConfiguration>();
+
+function captureConfiguration(result: LoadConfigResult, raw: Record<string, unknown> = {}): LoadConfigResult {
+  const agentEnv = process.env.ANYDOCS_AGENT_ENABLED?.trim().toLowerCase();
+  const agentOverride = agentEnv === 'true' || agentEnv === '1' || agentEnv === 'false' || agentEnv === '0';
+  const modelOverride = result.config.llm.provider === 'anthropic' && Boolean(process.env.ANTHROPIC_MODEL?.trim());
+  const agent = raw.agent as { enabled?: unknown } | null | undefined;
+  const llm = raw.llm as { model?: unknown } | null | undefined;
+  configurationSnapshots.set(result.config, {
+    loadedAt: new Date().toISOString(),
+    mode: result.config.agent.enabled ? 'agent' : 'rag',
+    agent: {
+      enabled: result.config.agent.enabled,
+      source: agentOverride ? 'environment' : typeof agent?.enabled === 'boolean' ? 'project' : 'default',
+      environmentVariable: agentOverride ? 'ANYDOCS_AGENT_ENABLED' : null,
+    },
+    model: {
+      name: result.config.llm.model,
+      source: modelOverride ? 'environment' : typeof llm?.model === 'string' && llm.model.trim() ? 'project' : 'default',
+      environmentVariable: modelOverride ? 'ANTHROPIC_MODEL' : null,
+    },
+  });
+  return result;
+}
+
+/** Describe the loaded object, not environment variables changed after startup. */
+export function describeRuntimeConfiguration(config: ResolvedConfig): RuntimeConfiguration {
+  const snapshot = configurationSnapshots.get(config);
+  return {
+    loadedAt: snapshot?.loadedAt ?? new Date().toISOString(),
+    mode: config.agent.enabled ? 'agent' : 'rag',
+    agent: snapshot?.agent.enabled === config.agent.enabled
+      ? { ...snapshot.agent }
+      : { enabled: config.agent.enabled, source: 'runtime', environmentVariable: null },
+    model: snapshot?.model.name === config.llm.model
+      ? { ...snapshot.model }
+      : { name: config.llm.model, source: 'runtime', environmentVariable: null },
+  };
+}
+
 const DEFAULTS: ResolvedConfig = {
   embedding: {
     provider: 'local',
@@ -441,7 +482,7 @@ export async function loadConfig(projectRoot: string): Promise<LoadConfigResult>
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       const config = structuredClone(DEFAULTS);
       applyEnvOverrides(config);
-      return { config, source: null, warnings: [] };
+      return captureConfiguration({ config, source: null, warnings: [] });
     }
     throw err;
   }
@@ -459,7 +500,7 @@ export async function loadConfig(projectRoot: string): Promise<LoadConfigResult>
   const warnings: string[] = [];
   const config = mergeWithDefaults(parsed as Record<string, unknown>, warnings);
   applyEnvOverrides(config);
-  return { config, source: path, warnings };
+  return captureConfiguration({ config, source: path, warnings }, parsed as Record<string, unknown>);
 }
 
 /**

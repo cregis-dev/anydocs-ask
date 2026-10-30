@@ -92,6 +92,23 @@ LANGFUSE_RELEASE=<git-sha-or-version>
 
 - **重新索引** — 子进程运行期间，在项目页触发；内部调用 `/v1/index/rebuild` 完成。
 
+### 生效配置与外部托管
+
+Settings 顶部的 **Effective configuration** 从正在运行的 Ask 的
+`/v1/health.configuration` 读取模式、模型、加载时间及来源。它会明确标出
+`ANYDOCS_AGENT_ENABLED` 和 `ANTHROPIC_MODEL` 的环境变量覆盖；下方 JSON 编辑器
+显示文件内容，二者可能不同。诊断只返回这两项配置及来源，不返回密钥或完整环境。
+
+Console 自己启动的子进程可以编辑配置。保存只写入文件，页面会提示待重启；
+停止并重新启动 Ask 后，再检查其报告的生效值。
+
+通过 `ANYDOCS_CONSOLE_ATTACHED_PROJECT` 接入 Docker/systemd 托管的 Ask 时，
+Console 不拥有服务生命周期，且容器中的项目文件可能互相隔离。此模式下配置
+只读，Start/Stop 按钮不显示，写配置及启停 API 返回 `409 externally_managed`。
+请通过部署环境更新配置；修改容器的环境文件后需要重新创建容器，普通 restart
+不会刷新已有容器的环境。旧 Ask 引擎未报告生效配置时，页面显示 unavailable，
+不会用 Console 文件推断运行模式。
+
 ### Ask 体验台
 
 项目页内嵌查询表单。请求默认带 `dry_run=1` 转发给子进程——答案正常展示，但**不写入** runs 日志。勾选 **Persist** 后，本次交互以 `source=console` 写入 runs jsonl（默认不纳入分析和 golden 候选；需要时用 `--include-console` 显式开启）。

@@ -111,6 +111,8 @@ export type ProjectStatusJSON = ProjectListing & {
 
 export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   const app = new Hono();
+  const externallyManaged = deps.registry.externallyManaged === true;
+  const externalManagementMessage = 'Ask is managed outside Console. Update its deployment configuration and recreate the service containers to apply environment changes. Console files may be isolated from Ask.';
   const fetchFn = deps.fetchFn ?? globalThis.fetch;
   const ops = deps.ops ?? defaultOps;
   const idleTimeoutMin = deps.idleTimeoutMin ?? 15;
@@ -453,6 +455,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const nav = buildNav(name);
     return c.html(renderReactApp(project.name, {
       kind: 'project',
+      externallyManaged,
       project,
       running,
       reports,
@@ -505,6 +508,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         mtimeISO: null,
         warnings: [],
         parseError: null,
+        readOnly: externallyManaged,
       });
     }
     let rawText: string;
@@ -522,13 +526,16 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     } catch (err) {
       parseError = (err as Error).message;
     }
-    return c.json({ ok: true, path, exists: true, rawText, mtimeISO, warnings, parseError });
+    return c.json({ ok: true, path, exists: true, rawText, mtimeISO, warnings, parseError, readOnly: externallyManaged });
   });
 
   app.post('/api/projects/:name/ask-config', async (c) => {
     const project = findProject(deps.workspacePath, c.req.param('name'));
     if (!project) {
       return c.json({ ok: false, error: `unknown project: ${c.req.param('name')}` }, 404);
+    }
+    if (externallyManaged) {
+      return c.json({ ok: false, code: 'externally_managed', error: externalManagementMessage }, 409);
     }
     if (!project.valid) {
       return c.json(
@@ -854,6 +861,9 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     if (!project) {
       return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
     }
+    if (externallyManaged) {
+      return c.json({ ok: false, code: 'externally_managed', error: externalManagementMessage }, 409);
+    }
     if (!project.valid) {
       return c.json(
         { ok: false, error: `project '${name}' invalid (missing: ${project.missing.join(', ')})` },
@@ -869,6 +879,12 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
 
   app.post('/api/projects/:name/stop', (c) => {
     const name = c.req.param('name');
+    if (!findProject(deps.workspacePath, name)) {
+      return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
+    }
+    if (externallyManaged) {
+      return c.json({ ok: false, code: 'externally_managed', error: externalManagementMessage }, 409);
+    }
     const stopped = deps.registry.stop(name);
     return c.json({ ok: true, stopped });
   });

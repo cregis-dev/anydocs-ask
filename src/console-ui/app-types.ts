@@ -299,6 +299,7 @@ export type AskConfigView = {
 
 export type ProjectBootstrap = {
   kind: 'project';
+  externallyManaged?: boolean;
   project: ProjectListing;
   running: ProcessInfo | null;
   reports: ReportListing[];

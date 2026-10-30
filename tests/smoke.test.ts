@@ -25,6 +25,7 @@ import { MockEmbedder } from '../src/embedding/mock.ts';
 import { MockLLM } from '../src/llm/mock.ts';
 import { MockLanguageModelV3 } from 'ai/test';
 import { tailRuns } from '../src/runs/writer.ts';
+import type { RuntimeConfiguration } from '../src/runtime-configuration.ts';
 
 async function buildProject(): Promise<{ root: string; cleanup: () => Promise<void> }> {
   const root = await fs.mkdtemp(join(tmpdir(), 'anydocs-ask-srv-'));
@@ -96,17 +97,20 @@ test('GET /v1/health returns 503 before start(), 200 after', async () => {
 
     const cold = await app.request('/v1/health');
     assert.equal(cold.status, 503);
-    const coldBody = (await cold.json()) as { warm: boolean; status: string };
+    const coldBody = (await cold.json()) as { warm: boolean; status: string; configuration: RuntimeConfiguration };
     assert.equal(coldBody.warm, false);
     assert.equal(coldBody.status, 'warming');
+    assert.equal(coldBody.configuration.mode, runtime.config.agent.enabled ? 'agent' : 'rag');
+    assert.equal(coldBody.configuration.model.name, runtime.config.llm.model);
 
     await runtime.start();
 
     const warm = await app.request('/v1/health');
     assert.equal(warm.status, 200);
-    const warmBody = (await warm.json()) as { warm: boolean; status: string };
+    const warmBody = (await warm.json()) as { warm: boolean; status: string; configuration: RuntimeConfiguration };
     assert.equal(warmBody.warm, true);
     assert.equal(warmBody.status, 'ok');
+    assert.deepEqual(warmBody.configuration, coldBody.configuration);
   } finally {
     await cleanup();
   }

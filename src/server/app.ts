@@ -42,6 +42,7 @@ import { handleMcpRequest } from '../mcp/server.ts';
 import { resolveMcpToken } from '../mcp/gate.ts';
 import { inspectIndexedPage, resolveIndexedChunks } from '../index/inspect.ts';
 import { recordUserThumb, traceAskTurn } from '../observability/langfuse.ts';
+import { describeRuntimeConfiguration } from '../config.ts';
 
 const SSE_HEARTBEAT_MS = 2_000;
 const SSE_DELTA_FLUSH_MS = 150;
@@ -89,6 +90,7 @@ type PreparedAskCall =
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
   const { runtime } = deps;
+  const configuration = describeRuntimeConfiguration(runtime.config);
   let activeAskRequests = 0;
 
   app.use('*', buildCorsMiddleware(runtime.config.server, runtime.config.widget));
@@ -179,13 +181,14 @@ export function createApp(deps: AppDeps): Hono {
   app.get('/v1/health', (c) => {
     const build = readRuntimeBuildMetadata(process.env);
     if (!runtime.warm) {
-      return c.json({ status: 'warming', warm: false, build }, 503);
+      return c.json({ status: 'warming', warm: false, build, configuration }, 503);
     }
     return c.json({
       status: 'ok',
       warm: true,
       booted_at: runtime.bootedAtMs,
       build,
+      configuration,
     });
   });
 
