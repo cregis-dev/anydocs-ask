@@ -74,6 +74,7 @@ export type StartResult =
   | { ok: false; error: string };
 
 export interface ConsoleProcessRegistry {
+  readonly externallyManaged?: boolean;
   start(name: string): Promise<StartResult>;
   stop(name: string): boolean;
   touch(name: string): void;
@@ -290,6 +291,7 @@ export class ProcessRegistry implements ConsoleProcessRegistry {
  * lifecycle remains owned by Docker/systemd.
  */
 export class AttachedProcessRegistry implements ConsoleProcessRegistry {
+  readonly externallyManaged = true;
   private readonly startedAt = Date.now();
   private lastUsedAt = this.startedAt;
   private readonly name: string;

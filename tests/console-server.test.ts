@@ -13,6 +13,7 @@ import { openDatabase } from '../src/db/index.ts';
 import { ensureStateRoot } from '../src/workspace.ts';
 import {
   ProcessRegistry,
+  AttachedProcessRegistry,
   type RegistryConfig,
   type Spawnable,
 } from '../src/console/registry.ts';
@@ -2272,6 +2273,56 @@ legacySsrTest('GET /p/:name: Settings tab surfaces validation warnings inline', 
 // ---------------------------------------------------------------------------
 // anydocs.ask.json full-file read/write (Config drawer editable mode)
 // ---------------------------------------------------------------------------
+
+test('attached Console rejects file writes and lifecycle changes instead of reporting a successful no-op', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const configPath = join(ws, 'projects', 'docs-zh', 'anydocs.ask.json');
+    const original = '{"agent":{"enabled":false}}\n';
+    await fs.writeFile(configPath, original);
+    const registry = new AttachedProcessRegistry('docs-zh', 3100);
+    const app = createConsoleApp({ workspacePath: ws, consolePort: 4100, registry });
+
+    const read = await app.request('/api/projects/docs-zh/ask-config');
+    assert.equal((await read.json() as { readOnly: boolean }).readOnly, true);
+    for (const action of ['ask-config', 'start', 'stop']) {
+      const response = await app.request(`/api/projects/docs-zh/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rawText: '{"agent":{"enabled":true}}' }),
+      });
+      assert.equal(response.status, 409, action);
+      const body = await response.json() as { ok: boolean; code: string; error: string };
+      assert.equal(body.ok, false);
+      assert.equal(body.code, 'externally_managed');
+      assert.match(body.error, /managed outside Console/);
+    }
+    assert.equal(await fs.readFile(configPath, 'utf8'), original);
+    assert.equal(registry.getPort('docs-zh'), 3100);
+    assert.equal(registry.list().length, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('attached Console project bootstrap identifies deployment management', async () => {
+  const { path: ws, cleanup } = await withTmpDir();
+  try {
+    await makeWorkspaceWithProjects(ws, ['docs-zh']);
+    const app = createConsoleApp({
+      workspacePath: ws,
+      consolePort: 4100,
+      registry: new AttachedProcessRegistry('docs-zh', 3100),
+      fetchFn: (async () => new Response('{}', { status: 503 })) as typeof fetch,
+    });
+    const page = await app.request('/p/docs-zh');
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /"externallyManaged":true/);
+  } finally {
+    await cleanup();
+  }
+});
 
 test('GET /api/projects/:name/ask-config: returns rawText + mtimeISO when file exists', async () => {
   const { path: ws, cleanup } = await withTmpDir();

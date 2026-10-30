@@ -68,6 +68,8 @@ import { RunDetailScreen } from './run-detail';
 import { TrafficConversations } from './traffic-conversations';
 import { groupConversations, matchesConversationRun } from '../runs/conversations';
 import type { RuntimeBuildMetadata } from '../runtime-build';
+import type { RuntimeConfiguration } from '../runtime-configuration';
+import { RuntimeConfigurationPanel } from './runtime-configuration';
 
 const PROJECT_TABS = ['ask', 'index', 'eval', 'traffic', 'feedback', 'settings'] as const;
 type ProjectTab = typeof PROJECT_TABS[number];
@@ -248,6 +250,7 @@ function ProjectScreen({ data }: { data: ProjectBootstrap }) {
   const [running, setRunning] = useState(data.running);
   const [health, setHealth] = useState<'idle' | 'warming' | 'ready' | 'error'>(data.running ? 'warming' : 'idle');
   const [askBuild, setAskBuild] = useState<RuntimeBuildMetadata | null>(null);
+  const [runtimeConfiguration, setRuntimeConfiguration] = useState<RuntimeConfiguration | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
 
@@ -263,6 +266,7 @@ function ProjectScreen({ data }: { data: ProjectBootstrap }) {
           runtime?: { warm?: boolean };
           warm?: boolean;
           build?: RuntimeBuildMetadata;
+          configuration?: RuntimeConfiguration;
           error?: string;
         };
         if (!response.ok && response.status !== 503) {
@@ -271,9 +275,13 @@ function ProjectScreen({ data }: { data: ProjectBootstrap }) {
         if (!cancelled) {
           setHealth((result.runtime?.warm ?? result.warm) ? 'ready' : 'warming');
           setAskBuild(result.build ?? null);
+          setRuntimeConfiguration(result.configuration ?? null);
         }
       } catch {
-        if (!cancelled) setHealth('error');
+        if (!cancelled) {
+          setHealth('error');
+          setRuntimeConfiguration(null);
+        }
       }
     };
     void check();
@@ -282,20 +290,21 @@ function ProjectScreen({ data }: { data: ProjectBootstrap }) {
   }, [data.project.name, running]);
 
   useEffect(() => {
-    if (data.autostart && !running && data.project.valid) void lifecycle('start');
+    if (data.autostart && !running && data.project.valid && !data.externallyManaged) void lifecycle('start');
   }, []);
 
   const lifecycle = async (action: 'start' | 'stop') => {
     setLifecycleBusy(true);
     try {
-      const result = await apiJson<{ port?: number }>(projectApi(data.project.name, `/${action}`), { method: 'POST' });
+      const result = await apiJson<{ port?: number; stopped?: boolean }>(projectApi(data.project.name, `/${action}`), { method: 'POST' });
       if (action === 'start') {
         setRunning({ name: data.project.name, pid: 0, port: result.port ?? 0, startedAt: Date.now(), lastUsedAt: Date.now(), exited: false });
         setHealth('warming');
-      } else {
+      } else if (result.stopped === true) {
         setRunning(null);
         setHealth('idle');
         setAskBuild(null);
+        setRuntimeConfiguration(null);
       }
     } catch (err) {
       window.alert(errorMessage(err));
@@ -316,12 +325,13 @@ function ProjectScreen({ data }: { data: ProjectBootstrap }) {
               <div><dt>path</dt><dd><code title={data.project.path}>{shortPath(data.project.path)}</code></dd></div>
               <div><dt>index</dt><dd>{data.project.indexed ? 'available' : 'not built'}</dd></div>
               <div><dt>process</dt><dd>{running ? `:${running.port}${running.pid ? ` · pid ${running.pid}` : ''}` : 'stopped'}</dd></div>
+              <div><dt>mode</dt><dd>{runtimeConfiguration ? runtimeConfiguration.mode === 'agent' ? 'Agentic RAG' : 'RAG' : 'unknown'}</dd></div>
             </dl>
             <RuntimeBuildInfo consoleBuild={data.navigation.build} askBuild={askBuild} running={Boolean(running)} />
-            <div className="ca-split-actions">
+            {data.externallyManaged ? <p className="ca-managed-runtime">Managed by deployment. Restart or recreate the Ask service on its host.</p> : <div className="ca-split-actions">
               <button className="ca-button ca-primary" disabled={Boolean(running) || lifecycleBusy || !data.project.valid} onClick={() => lifecycle('start')}><Play size={15} />Start</button>
               <button className="ca-button" disabled={!running || lifecycleBusy} onClick={() => lifecycle('stop')}><Square size={14} />Stop</button>
-            </div>
+            </div>}
           </section>
           {data.reports.length > 0 && <ReportsNav projectName={data.project.name} reports={data.reports} />}
         </aside>
@@ -340,7 +350,7 @@ function ProjectScreen({ data }: { data: ProjectBootstrap }) {
               {tab === 'eval' && <EvalTab projectName={data.project.name} snapshot={data.evalSnapshot} candidates={data.candidates} />}
               {tab === 'traffic' && <TrafficTab projectName={data.project.name} window={data.trafficWindow} view={data.trafficView} />}
               {tab === 'feedback' && <FeedbackTab projectName={data.project.name} snapshot={data.feedbackSnapshot} />}
-              {tab === 'settings' && <SettingsTab projectName={data.project.name} config={data.askConfig} />}
+              {tab === 'settings' && <SettingsTab projectName={data.project.name} config={data.askConfig} externallyManaged={data.externallyManaged === true} runtimeConfiguration={runtimeConfiguration} ready={health === 'ready'} />}
             </div>
           )}
         </main>
@@ -658,23 +668,40 @@ function EvalTab({ projectName, snapshot, candidates }: { projectName: string; s
   </section>;
 }
 
-function SettingsTab({ projectName, config }: { projectName: string; config?: AskConfigView }) {
+function SettingsTab({ projectName, config, externallyManaged, runtimeConfiguration, ready }: {
+  projectName: string;
+  config?: AskConfigView;
+  externallyManaged: boolean;
+  runtimeConfiguration: RuntimeConfiguration | null;
+  ready: boolean;
+}) {
   const [text, setText] = useState(config?.rawText ?? JSON.stringify(config?.raw ?? config?.defaults ?? {}, null, 2));
   const [mtime, setMtime] = useState(config?.mtimeISO ?? null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
+  const [savedMtime, setSavedMtime] = useState<string | null>(null);
+  const pendingRestart = savedMtime !== null && (!runtimeConfiguration || Date.parse(runtimeConfiguration.loadedAt) <= Date.parse(savedMtime));
   const save = async () => {
+    if (externallyManaged) return;
     setSaving(true); setMessage('');
     try {
       JSON.parse(text);
       const result = await apiJson<{ mtimeISO: string; warnings: string[] }>(projectApi(projectName, '/ask-config'), { method: 'POST', body: JSON.stringify({ rawText: text, expectedMtimeISO: mtime }) });
-      setMtime(result.mtimeISO); setMessage(result.warnings.length ? result.warnings.join(' · ') : 'Configuration saved. Restart the service to apply runtime changes.');
+      setMtime(result.mtimeISO);
+      setSavedMtime(result.mtimeISO);
+      setMessage(result.warnings.join(' · '));
     } catch (err) { setMessage(errorMessage(err)); }
     finally { setSaving(false); }
   };
-  return <section className="ca-workspace"><WorkspaceHeader eyebrow="Project configuration" title="Settings" description="Edit the complete anydocs.ask.json with server-side validation." actions={<button className="ca-button ca-primary" disabled={saving} onClick={save}>{saving ? <LoaderCircle className="ca-spin" size={15} /> : <Save size={15} />}Save</button>} />
-    {config?.parseError && <Notice tone="error">{config.parseError}</Notice>}{config?.warnings.map((warning) => <Notice tone="warning" key={warning}>{warning}</Notice>)}{message && <Notice tone={message.includes('saved') ? 'success' : 'warning'}>{message}</Notice>}
-    <div className="ca-settings-grid"><section className="ca-panel ca-editor-panel"><div className="ca-panel-head"><div><span className="ca-kicker">JSON source</span><h2>{config?.path ?? 'anydocs.ask.json'}</h2></div><StatusBadge tone={config?.exists ? 'live' : 'warning'}>{config?.exists ? 'on disk' : 'new file'}</StatusBadge></div><textarea className="ca-code-editor" spellCheck={false} value={text} onChange={(event) => setText(event.target.value)} /></section><aside className="ca-settings-help"><Section title="Applies after restart"><p>Retrieval, feedback, multi-turn, generation, and model settings are read when the child service starts.</p></Section><Section title="Write protection"><p>The save request includes the last file modification time. A newer disk edit will not be overwritten.</p></Section></aside></div>
+  return <section className="ca-workspace"><WorkspaceHeader eyebrow="Project configuration" title="Settings" description="Inspect the running Ask service and its configuration sources." actions={externallyManaged ? <StatusBadge>Deployment managed</StatusBadge> : <button className="ca-button ca-primary" disabled={saving} onClick={save}>{saving ? <LoaderCircle className="ca-spin" size={15} /> : <Save size={15} />}Save</button>} />
+    <RuntimeConfigurationPanel configuration={runtimeConfiguration} ready={ready} />
+    {externallyManaged && <Notice tone="warning">This Console is attached to an externally managed Ask service. Its configuration file may be a separate container copy, so editing is disabled. Update the deployment configuration and recreate Ask and Console to apply environment changes.</Notice>}
+    {runtimeConfiguration?.agent.environmentVariable && <Notice tone="info"><code>ANYDOCS_AGENT_ENABLED</code> controls the running answer mode and takes precedence over <code>agent.enabled</code> in the project file.</Notice>}
+    {runtimeConfiguration?.model.environmentVariable && <Notice tone="info"><code>ANTHROPIC_MODEL</code> controls the running answer model and takes precedence over <code>llm.model</code> in the project file.</Notice>}
+    {pendingRestart && <Notice tone="warning">File saved. Ask is still using the configuration loaded before this edit. Restart the Ask service to apply it.</Notice>}
+    {savedMtime && !pendingRestart && <Notice tone="success">Ask has loaded configuration since the file was saved. Check the effective values above, including any environment overrides.</Notice>}
+    {config?.parseError && <Notice tone="error">{config.parseError}</Notice>}{config?.warnings.map((warning) => <Notice tone="warning" key={warning}>{warning}</Notice>)}{message && <Notice tone="warning">{message}</Notice>}
+    <div className="ca-settings-grid"><section className="ca-panel ca-editor-panel"><div className="ca-panel-head"><div><span className="ca-kicker">{externallyManaged ? 'Console file copy' : 'Project file'}</span><h2>{config?.path ?? 'anydocs.ask.json'}</h2></div><StatusBadge>{externallyManaged ? 'read only' : config?.exists ? 'on disk' : 'new file'}</StatusBadge></div><textarea className="ca-code-editor" aria-label="Project configuration JSON" readOnly={externallyManaged} spellCheck={false} value={text} onChange={(event) => setText(event.target.value)} /></section><aside className="ca-settings-help"><Section title={externallyManaged ? 'Apply through deployment' : 'Applies after restart'}><p>{externallyManaged ? 'Console cannot start or stop this service. Update settings on the deployment host. Environment-file changes require recreating containers; restarting an existing container keeps its old environment.' : 'Saving updates the project file. Stop and start Ask to load the new configuration, then check the effective values above.'}</p></Section><Section title="Configuration precedence"><p>Environment variables override the project file. The project file overrides engine defaults. Effective values are reported by Ask, independently of this editor.</p></Section>{!externallyManaged && <Section title="Write protection"><p>The save request includes the last file modification time. A newer disk edit will not be overwritten.</p></Section>}</aside></div>
   </section>;
 }
 

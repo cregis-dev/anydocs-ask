@@ -291,6 +291,16 @@ code, pre { font-family: "Fira Code", "SFMono-Regular", Consolas, monospace; }
 .ca-report-table small { color: var(--ca-muted); }
 
 .ca-settings-grid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 14px; }
+.ca-managed-runtime { margin: 14px 0 0; color: #b4bec7; font-size: 11px; line-height: 1.6; }
+.ca-effective-settings { margin-bottom: 16px; }
+.ca-runtime-values { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; }
+.ca-runtime-values > div { display: flex; flex-direction: column; gap: 7px; min-width: 0; padding: 18px; }
+.ca-runtime-values > div + div { border-left: 1px solid var(--ca-border); }
+.ca-runtime-values dt { color: var(--ca-muted); font-size: 11px; }
+.ca-runtime-values dd { margin: 0; overflow-wrap: anywhere; font-size: 19px; font-weight: 600; }
+.ca-runtime-values dd code { font-size: 15px; }
+.ca-runtime-values span, .ca-runtime-values > div > code { color: var(--ca-muted); font-size: 10px; overflow-wrap: anywhere; }
+.ca-runtime-loaded { margin: 0; padding: 12px 18px; color: var(--ca-muted); border-top: 1px solid var(--ca-border); font-size: 11px; line-height: 1.6; }
 .ca-editor-panel { min-width: 0; }
 .ca-editor-panel .ca-panel-head h2 { max-width: 660px; overflow: hidden; font: 11px "Fira Code", monospace; text-overflow: ellipsis; white-space: nowrap; }
 .ca-code-editor { width: 100%; min-height: 620px; display: block; resize: vertical; padding: 18px; color: #dfe8e3; background: #171b1f; border: 0; outline: 0; font: 11px/1.68 "Fira Code", monospace; tab-size: 2; }
