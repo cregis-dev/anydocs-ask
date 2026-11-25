@@ -66,7 +66,7 @@ LANGFUSE_RELEASE=<git-sha-or-version>
 
 ## Docker 部署：共享运行时
 
-`Dockerfile` 的 `bge-runtime` 目标包含 Ask、Console 和固定版本的 BGE-M3，不含任何站点的文档、索引或服务端密钥。[Runtime 工作流](.github/workflows/runtime.yml) 测试镜像，只在主线发布；部署使用其摘要中的完整 `ghcr.io/cregis-dev/anydocs-ask-runtime@sha256:…`。默认构建目标仍是没有预装模型的轻量运行时。
+`Dockerfile` 的 `bge-runtime` 目标包含 Ask、Console 和固定版本的 BGE-M3，不含任何站点的文档、索引或服务端密钥。[Runtime 工作流](.github/workflows/runtime.yml) 在本仓库验证镜像。正式镜像由 [Cregis Build Images](https://github.com/0xcregis/cregis-developer-docs/actions/workflows/release.yml) 按固定的 `ANYDOCS_ASK_REF` 发布到 `ghcr.io/0xcregis/cregis-docs-ask:runtime-<引擎完整 SHA>`。部署使用其摘要中的完整 `ghcr.io/0xcregis/cregis-docs-ask@sha256:…`。默认构建目标仍是没有预装模型的轻量运行时。
 
 每个站点运行自己的容器，用各自文档镜像初始化版本化内容卷，挂到 Ask 的 `/docs:ro`，将该站专用的可写状态挂到 `/runtime`。同一站的 Console 应挂相同内容，凭据由部署环境注入。启动前可执行 `node /app/check-content.mjs /docs <projectId> <完整文档SHA>`：内容包必须有匹配的 `.content-release`、项目配置、`pages/` 和 `navigation/`。共享镜像不等于共享数据库。
 
