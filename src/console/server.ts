@@ -109,10 +109,17 @@ export type ProjectStatusJSON = ProjectListing & {
   pid: number | null;
 };
 
+const ATTACHED_PROBE_TIMEOUT_MS = 4_000;
+
 export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   const app = new Hono();
   const externallyManaged = deps.registry.externallyManaged === true;
   const externalManagementMessage = 'Ask is managed outside Console. Update its deployment configuration and recreate the service containers to apply environment changes. Console files may be isolated from Ask.';
+  const remoteStateMessage = 'Run evaluation and reindex operations from this project\'s deployment.';
+  function hasRemoteState(name: string): boolean {
+    const origin = deps.registry.getOrigin(name);
+    return externallyManaged && origin !== null && new URL(origin).hostname !== '127.0.0.1';
+  }
   const fetchFn = deps.fetchFn ?? globalThis.fetch;
   const ops = deps.ops ?? defaultOps;
   const idleTimeoutMin = deps.idleTimeoutMin ?? 15;
@@ -138,6 +145,17 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   });
 
   app.get('/health', (c) => c.json({ ok: true, auth: auth !== null }));
+
+  // Remote project state is mounted read-only. Model jobs must also use the
+  // project's own deployment environment, not the Console's defaults.
+  app.use('/api/projects/:name/*', async (c, next) => {
+    const name = c.req.param('name');
+    if (name && hasRemoteState(name) && /^(POST|DELETE)$/.test(c.req.method) &&
+      /^\/api\/projects\/[^/]+\/(?:eval|golden|analyze|reindex)(?:\/|$)/.test(c.req.path)) {
+      return c.json({ ok: false, code: 'externally_managed', error: remoteStateMessage }, 409);
+    }
+    return next();
+  });
 
   app.get('/login', (c) => {
     if (auth?.hasValidSession(c)) return c.redirect(publicRootPath, 302);
@@ -218,6 +236,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     );
     return c.html(renderReactApp('projects', {
       kind: 'home',
+      externallyManaged,
       consolePort: deps.consolePort,
       idleTimeoutMin,
       projects,
@@ -263,6 +282,9 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   // -----------------------------------------------------------------------
 
   app.post('/api/projects/add', async (c) => {
+    if (externallyManaged) {
+      return c.json({ ok: false, code: 'externally_managed', error: externalManagementMessage }, 409);
+    }
     let body: { path?: unknown; name?: unknown } | null = null;
     try {
       body = (await c.req.json()) as { path?: unknown; name?: unknown };
@@ -319,6 +341,9 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   //     and continue. Without this flag, removing a running project returns
   //     409 so the UI can prompt the user before terminating live traffic.
   app.delete('/api/projects/:name', (c) => {
+    if (externallyManaged) {
+      return c.json({ ok: false, code: 'externally_managed', error: externalManagementMessage }, 409);
+    }
     const name = c.req.param('name');
     const purgeState = c.req.query('purge_state') !== 'false'; // default true
     const forceStop = c.req.query('force_stop') === 'true';
@@ -414,11 +439,11 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         ...(stateRoot ? { stateRoot } : {}),
       });
       // Best-effort: ask the child for DB-side counts when it's running.
-      const port = deps.registry.getPort(name);
-      if (port !== null) {
+      const origin = deps.registry.getOrigin(name);
+      if (origin !== null) {
         try {
-          const res = await fetchFn(`http://127.0.0.1:${port}/v1/index/status`, {
-            signal: AbortSignal.timeout(800),
+          const res = await fetchFn(`${origin}/v1/index/status`, {
+            signal: AbortSignal.timeout(ATTACHED_PROBE_TIMEOUT_MS),
           });
           if (res.ok) {
             indexSnapshot = {
@@ -456,6 +481,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     return c.html(renderReactApp(project.name, {
       kind: 'project',
       externallyManaged,
+      remoteState: hasRemoteState(name),
       project,
       running,
       reports,
@@ -631,6 +657,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     return c.html(renderReactApp(`${name} · runs`, {
       kind: 'runs',
       projectName: name,
+      remoteState: hasRemoteState(name),
       lines,
       limit,
       navigation: {
@@ -839,11 +866,11 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const name = c.req.param('name');
     const project = findProject(deps.workspacePath, name);
     if (!project) return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
-    const port = deps.registry.getPort(name);
-    if (port === null) return c.json({ ok: false, error: 'not running' }, 502);
+    const origin = deps.registry.getOrigin(name);
+    if (origin === null) return c.json({ ok: false, error: 'not running' }, 502);
     try {
-      const res = await fetchFn(`http://127.0.0.1:${port}/v1/health`, {
-        signal: AbortSignal.timeout(800),
+      const res = await fetchFn(`${origin}/v1/health`, {
+        signal: AbortSignal.timeout(ATTACHED_PROBE_TIMEOUT_MS),
       });
       const text = await res.text();
       return new Response(text, {
@@ -896,8 +923,8 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const name = c.req.param('name');
     const project = findProject(deps.workspacePath, name);
     if (!project) return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
-    const port = deps.registry.getPort(name);
-    if (port === null) {
+    const origin = deps.registry.getOrigin(name);
+    if (origin === null) {
       return c.json(
         { ok: false, error: 'child not running — start the project first' },
         502,
@@ -905,7 +932,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     }
     deps.registry.touch(name);
     try {
-      const res = await fetchFn(`http://127.0.0.1:${port}/v1/index/rebuild`, {
+      const res = await fetchFn(`${origin}/v1/index/rebuild`, {
         method: 'POST',
       });
       const text = await res.text();
@@ -930,14 +957,14 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     if (!pageId || !lang) {
       return c.json({ ok: false, error: 'page_id and lang are required' }, 400);
     }
-    const port = deps.registry.getPort(name);
-    if (port === null) {
+    const origin = deps.registry.getOrigin(name);
+    if (origin === null) {
       return c.json({ ok: false, error: 'child not running — start the project first' }, 502);
     }
     deps.registry.touch(name);
     const query = new URLSearchParams({ page_id: pageId, lang });
     try {
-      const res = await fetchFn(`http://127.0.0.1:${port}/v1/index/chunks?${query}`, {
+      const res = await fetchFn(`${origin}/v1/index/chunks?${query}`, {
         signal: AbortSignal.timeout(2_000),
       });
       const body = await res.text();
@@ -957,13 +984,13 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     const name = c.req.param('name');
     const project = findProject(deps.workspacePath, name);
     if (!project) return c.json({ ok: false, error: `unknown project: ${name}` }, 404);
-    const port = deps.registry.getPort(name);
-    if (port === null) {
+    const origin = deps.registry.getOrigin(name);
+    if (origin === null) {
       return c.json({ ok: false, error: 'child not running — start the project first' }, 502);
     }
     deps.registry.touch(name);
     try {
-      const res = await fetchFn(`http://127.0.0.1:${port}/v1/index/chunks/resolve`, {
+      const res = await fetchFn(`${origin}/v1/index/chunks/resolve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: await c.req.text(),
@@ -995,6 +1022,9 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
   // ---------------------------------------------------------------------
   app.all('/mcp/:name', async (c) => {
     const name = c.req.param('name');
+    if (hasRemoteState(name) && mcpToken === null) {
+      return c.json({ ok: false, error: 'MCP workspace token required for this project' }, 403);
+    }
 
     // Workspace token gate (when a token is configured). Accept the token via
     // either `Authorization: Bearer <token>` (standard MCP clients) or the raw
@@ -1023,13 +1053,14 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
       );
     }
 
-    let port = deps.registry.getPort(name);
-    if (port === null) {
+    let origin = deps.registry.getOrigin(name);
+    if (origin === null) {
       const start = await deps.registry.start(name);
       if (!start.ok) {
         return c.json({ ok: false, error: `failed to start child: ${start.error}` }, 502);
       }
-      port = start.port;
+      origin = deps.registry.getOrigin(name);
+      if (origin === null) return c.json({ ok: false, error: 'project not running' }, 502);
     }
     deps.registry.touch(name);
 
@@ -1050,7 +1081,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
 
     let res: Response;
     try {
-      res = await fetchFn(`http://127.0.0.1:${port}/mcp`, init);
+      res = await fetchFn(`${origin}/mcp`, init);
     } catch (err) {
       return c.json({ ok: false, error: `proxy failed: ${(err as Error).message}` }, 502);
     }
@@ -1091,13 +1122,14 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         400,
       );
     }
-    let port = deps.registry.getPort(name);
-    if (port === null) {
+    let origin = deps.registry.getOrigin(name);
+    if (origin === null) {
       const start = await deps.registry.start(name);
       if (!start.ok) {
         return c.json({ ok: false, error: `failed to start child: ${start.error}` }, 500);
       }
-      port = start.port;
+      origin = deps.registry.getOrigin(name);
+      if (origin === null) return c.json({ ok: false, error: 'project not running' }, 502);
     }
     deps.registry.touch(name);
 
@@ -1126,8 +1158,8 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     }
 
     const upstream = persist
-      ? `http://127.0.0.1:${port}/v1/ask?source=console`
-      : `http://127.0.0.1:${port}/v1/ask?dry_run=1`;
+      ? `${origin}/v1/ask?source=console`
+      : `${origin}/v1/ask?dry_run=1`;
     let res: Response;
     try {
       res = await fetchFn(upstream, {
@@ -1181,8 +1213,8 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
         400,
       );
     }
-    const port = deps.registry.getPort(name);
-    if (port === null) {
+    const origin = deps.registry.getOrigin(name);
+    if (origin === null) {
       return c.json({ ok: false, error: 'project not running' }, 502);
     }
     deps.registry.touch(name);
@@ -1195,7 +1227,7 @@ export function createConsoleApp(deps: ConsoleAppDeps): Hono {
     }
     let res: Response;
     try {
-      res = await fetchFn(`http://127.0.0.1:${port}/v1/ask/feedback`, {
+      res = await fetchFn(`${origin}/v1/ask/feedback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: rawBody,

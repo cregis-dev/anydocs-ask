@@ -30,6 +30,8 @@ export type OpenOptions = {
   dbPath?: string;
   /** If true, skip running migrations after open. Default false. */
   skipMigrations?: boolean;
+  /** Open an existing database for inspection without changing it. */
+  readOnly?: boolean;
 };
 
 export type DbHandle = DatabaseHandle;
@@ -53,22 +55,24 @@ export function openDatabase(options: OpenOptions = {}): DbHandle {
           throw new Error('openDatabase: provide stateRoot or dbPath');
         })());
 
-  if (dbPath !== ':memory:') {
+  if (!options.readOnly && dbPath !== ':memory:') {
     mkdirSync(dirname(dbPath), { recursive: true });
   }
 
-  const db = new Database(dbPath);
+  const db = new Database(dbPath, { readonly: options.readOnly === true });
 
   // PRAGMAs: WAL gives much better read-during-write behaviour for our usage
   // (server reads during chokidar-driven reindex). foreign_keys is required
   // for the (page_id, lang) cascade on chunks (ARCH §4 / §7.2).
-  db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
-  db.pragma('synchronous = NORMAL');
+  if (!options.readOnly) {
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');
+  }
 
   sqliteVec.load(db);
 
-  if (!options.skipMigrations) {
+  if (!options.readOnly && !options.skipMigrations) {
     runMigrations(db);
   }
 

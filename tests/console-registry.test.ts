@@ -249,6 +249,7 @@ test('shutdownAll: skips kill on already-exited entries', async () => {
 test('AttachedProcessRegistry reuses an externally managed Ask service', async () => {
   const registry = new AttachedProcessRegistry('docs', 3100);
   assert.equal(registry.getPort('docs'), 3100);
+  assert.equal(registry.getOrigin('docs'), 'http://127.0.0.1:3100');
   assert.equal(registry.getPort('other'), null);
   assert.deepEqual(await registry.start('docs'), { ok: true, port: 3100, reused: true });
   assert.deepEqual(await registry.start('other'), {
@@ -259,4 +260,34 @@ test('AttachedProcessRegistry reuses an externally managed Ask service', async (
   assert.equal(registry.list()[0]?.name, 'docs');
   assert.deepEqual(registry.reapIdle(), []);
   assert.deepEqual(registry.shutdownAll(), []);
+});
+
+test('AttachedProcessRegistry separates projects on the same port', async () => {
+  const registry = new AttachedProcessRegistry({
+    developer: 'http://developer-ask:3100',
+    product: 'http://product-ask:3100/',
+  });
+  assert.deepEqual(registry.list().map(({ name, port }) => [name, port]), [
+    ['developer', 3100], ['product', 3100],
+  ]);
+  assert.equal(registry.getOrigin('developer'), 'http://developer-ask:3100');
+  assert.equal(registry.getOrigin('product'), 'http://product-ask:3100');
+  assert.equal(registry.getOrigin('missing'), null);
+  assert.deepEqual(await registry.start('product'), { ok: true, port: 3100, reused: true });
+  assert.equal(registry.stop('product'), false);
+  assert.equal(registry.getPort('product'), 3100);
+});
+
+test('AttachedProcessRegistry rejects invalid and duplicate Ask origins', () => {
+  for (const origin of [
+    'file:///tmp/ask', 'http://secret@ask:3100', 'http://ask:3100/v1',
+    'http://ask:3100/?x=1', 'http://ask:0', 'http://ask:65536', 'http:/ask:3100',
+  ]) {
+    assert.throws(() => new AttachedProcessRegistry({ docs: origin }), /Invalid Ask origin/);
+  }
+  assert.throws(() => new AttachedProcessRegistry({}), /at least one/);
+  assert.throws(() => new AttachedProcessRegistry({
+    docs: 'http://ask:3100',
+    other: 'http://ASK:3100/',
+  }), /own Ask origin/);
 });

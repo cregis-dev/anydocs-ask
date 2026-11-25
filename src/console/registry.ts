@@ -79,6 +79,7 @@ export interface ConsoleProcessRegistry {
   stop(name: string): boolean;
   touch(name: string): void;
   getPort(name: string): number | null;
+  getOrigin(name: string): string | null;
   list(): RegisteredProcess[];
   reapIdle(): string[];
   shutdownAll(): string[];
@@ -207,6 +208,11 @@ export class ProcessRegistry implements ConsoleProcessRegistry {
     return entry.port;
   }
 
+  getOrigin(name: string): string | null {
+    const port = this.getPort(name);
+    return port === null ? null : `http://127.0.0.1:${port}`;
+  }
+
   list(): RegisteredProcess[] {
     const out: RegisteredProcess[] = [];
     for (const e of this.byName.values()) {
@@ -287,25 +293,52 @@ export class ProcessRegistry implements ConsoleProcessRegistry {
 
 /**
  * Registry facade for a Console sidecar attached to an already-running Ask
- * server in the same network namespace. It never starts or stops the service;
+ * servers. It never starts or stops the services;
  * lifecycle remains owned by Docker/systemd.
  */
 export class AttachedProcessRegistry implements ConsoleProcessRegistry {
   readonly externallyManaged = true;
   private readonly startedAt = Date.now();
-  private lastUsedAt = this.startedAt;
-  private readonly name: string;
-  private readonly port: number;
+  private readonly projects = new Map<string, { origin: string; port: number; lastUsedAt: number }>();
 
-  constructor(name: string, port: number) {
-    this.name = name;
-    this.port = port;
+  constructor(name: string, port: number);
+  constructor(projects: Readonly<Record<string, string>>);
+  constructor(projectsOrName: Readonly<Record<string, string>> | string, port?: number) {
+    const projects = typeof projectsOrName === 'string'
+      ? { [projectsOrName]: `http://127.0.0.1:${port}` }
+      : projectsOrName;
+    const origins = new Set<string>();
+    for (const [name, address] of Object.entries(projects)) {
+      if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(name) || typeof address !== 'string') {
+        throw new Error('Attached projects must map workspace names to Ask origins');
+      }
+      let url: URL;
+      try {
+        url = new URL(address);
+      } catch {
+        throw new Error(`Invalid Ask origin for attached project '${name}'`);
+      }
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password ||
+          url.pathname !== '/' || url.search || url.hash || url.port === '0' ||
+          !/^https?:\/\/[^/?#]+\/?$/i.test(address)) {
+        throw new Error(`Invalid Ask origin for attached project '${name}' (expected http[s]://host[:port])`);
+      }
+      if (origins.has(url.origin)) throw new Error('Each attached project must have its own Ask origin');
+      origins.add(url.origin);
+      this.projects.set(name, {
+        origin: url.origin,
+        port: url.port ? Number(url.port) : url.protocol === 'https:' ? 443 : 80,
+        lastUsedAt: this.startedAt,
+      });
+    }
+    if (this.projects.size === 0) throw new Error('Configure at least one attached project');
   }
 
   async start(name: string): Promise<StartResult> {
-    if (name !== this.name) return { ok: false, error: `unknown attached project '${name}'` };
+    const port = this.getPort(name);
+    if (port === null) return { ok: false, error: `unknown attached project '${name}'` };
     this.touch(name);
-    return { ok: true, port: this.port, reused: true };
+    return { ok: true, port, reused: true };
   }
 
   stop(name: string): boolean {
@@ -314,22 +347,27 @@ export class AttachedProcessRegistry implements ConsoleProcessRegistry {
   }
 
   touch(name: string): void {
-    if (name === this.name) this.lastUsedAt = Date.now();
+    const project = this.projects.get(name);
+    if (project) project.lastUsedAt = Date.now();
   }
 
   getPort(name: string): number | null {
-    return name === this.name ? this.port : null;
+    return this.projects.get(name)?.port ?? null;
+  }
+
+  getOrigin(name: string): string | null {
+    return this.projects.get(name)?.origin ?? null;
   }
 
   list(): RegisteredProcess[] {
-    return [{
-      name: this.name,
+    return Array.from(this.projects, ([name, project]) => ({
+      name,
       pid: process.pid,
-      port: this.port,
+      port: project.port,
       startedAt: this.startedAt,
-      lastUsedAt: this.lastUsedAt,
+      lastUsedAt: project.lastUsedAt,
       exited: false,
-    }];
+    }));
   }
 
   reapIdle(): string[] {

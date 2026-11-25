@@ -1,0 +1,15 @@
+**
+!package.json
+!pnpm-lock.yaml
+!tsconfig*.json
+!vite.config.ts
+!src/
+!src/**
+!scripts/
+!scripts/**
+!docker/
+!docker/check-content.mjs
+!README.md
+!CHANGELOG.md
+!PRD.md
+!ARCHITECTURE.md

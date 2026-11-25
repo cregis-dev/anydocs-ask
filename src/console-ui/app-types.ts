@@ -50,6 +50,7 @@ export type WorkspaceSummary = {
 
 export type HomeBootstrap = {
   kind: 'home';
+  externallyManaged?: boolean;
   consolePort: number;
   idleTimeoutMin: number;
   projects: ProjectListing[];
@@ -300,6 +301,7 @@ export type AskConfigView = {
 export type ProjectBootstrap = {
   kind: 'project';
   externallyManaged?: boolean;
+  remoteState?: boolean;
   project: ProjectListing;
   running: ProcessInfo | null;
   reports: ReportListing[];
@@ -319,6 +321,7 @@ export type ProjectBootstrap = {
 
 export type RunsBootstrap = {
   kind: 'runs';
+  remoteState?: boolean;
   projectName: string;
   lines: RunRecord[];
   limit: number;
