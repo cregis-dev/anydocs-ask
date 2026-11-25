@@ -126,7 +126,7 @@ code, pre { font-family: "Fira Code", "SFMono-Regular", Consolas, monospace; }
 .ca-metric strong { margin-top: 3px; font: 600 20px/1.1 "Fira Code", monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .ca-project-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
-.ca-project-card { min-height: 250px; display: flex; flex-direction: column; gap: 15px; padding: 18px; background: var(--ca-surface); border: 1px solid var(--ca-border); border-radius: var(--ca-radius); transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+.ca-project-card { min-width: 0; min-height: 250px; display: flex; flex-direction: column; gap: 15px; padding: 18px; background: var(--ca-surface); border: 1px solid var(--ca-border); border-radius: var(--ca-radius); transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
 .ca-project-card:hover { border-color: #b7bec4; box-shadow: var(--ca-shadow); transform: translateY(-1px); }
 .ca-project-card[data-invalid] { border-color: #e3aaa7; }
 .ca-project-card-head { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 11px; align-items: start; }
@@ -396,7 +396,7 @@ code, pre { font-family: "Fira Code", "SFMono-Regular", Consolas, monospace; }
   .ca-metric { border-bottom: 1px solid var(--ca-border); }
   .ca-metric:nth-child(2n) { border-right: 0; }
   .ca-metric:last-child { border-bottom: 0; }
-  .ca-project-grid { grid-template-columns: 1fr; }
+  .ca-project-grid { grid-template-columns: minmax(0, 1fr); }
   .ca-tabs-bar { padding: 0 9px; }
   .ca-tabs { flex: 1; justify-content: space-between; }
   .ca-tabs button { min-width: 42px; justify-content: center; padding: 0 10px; }

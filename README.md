@@ -64,6 +64,12 @@ LANGFUSE_RELEASE=<git-sha-or-version>
 
 ---
 
+## Docker 部署：共享运行时
+
+`Dockerfile` 的 `bge-runtime` 目标包含 Ask、Console 和固定版本的 BGE-M3，不含任何站点的文档、索引或服务端密钥。[Runtime 工作流](.github/workflows/runtime.yml) 测试镜像，只在主线发布；部署使用其摘要中的完整 `ghcr.io/cregis-dev/anydocs-ask-runtime@sha256:…`。默认构建目标仍是没有预装模型的轻量运行时。
+
+每个站点运行自己的容器，用各自文档镜像初始化版本化内容卷，挂到 Ask 的 `/docs:ro`，将该站专用的可写状态挂到 `/runtime`。同一站的 Console 应挂相同内容，凭据由部署环境注入。启动前可执行 `node /app/check-content.mjs /docs <projectId> <完整文档SHA>`：内容包必须有匹配的 `.content-release`、项目配置、`pages/` 和 `navigation/`。共享镜像不等于共享数据库。
+
 ## Web 控制台
 
 控制台是管理项目、调试查询、运行评测闭环的首选入口。仅绑定本地回环地址（`127.0.0.1`），自动按需启停各项目的子进程。
@@ -169,6 +175,14 @@ anydocs-ask console --workspace /runtime --port 4100
 export ANYDOCS_CONSOLE_ATTACHED_PROJECT=docs
 export ANYDOCS_CONSOLE_ATTACHED_PORT=3100
 ```
+
+若要用同一个 Console 管理多个已部署的项目，请改用：
+
+```bash
+export ANYDOCS_CONSOLE_ATTACHED_PROJECTS='{"docs":"http://127.0.0.1:3100","guide":"http://guide-ask:3100"}'
+```
+
+不要同时设置旧的单项目变量。键是通过 `workspace add --name` 注册的名称，值是 Console 从私有网络可达的 Ask origin。每个项目都需要可访问的文档目录和不同的 `projectId`；将已有项目的状态分别挂载到 `<workspace>/state/<projectId>/`，不要合并数据库。非 `127.0.0.1` 的项目建议只读挂载状态；Console 可以查看索引、记录、报告并试问，评测、重建和其它本地状态写入应在各自项目的部署环境操作。两个项目不会自动联合检索。
 
 ---
 

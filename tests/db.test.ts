@@ -81,6 +81,24 @@ test('runMigrations is idempotent — second run applies nothing', () => {
   }
 });
 
+test('readOnly opens the existing WAL index but does not allow writes', () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'anydocs-ask-readonly-'));
+  const writer = openDatabase({ stateRoot });
+  try {
+    writer.exec('CREATE TABLE sample (value TEXT); INSERT INTO sample VALUES (\'live\')');
+    const reader = openDatabase({ stateRoot, readOnly: true });
+    try {
+      assert.deepEqual(reader.prepare('SELECT value FROM sample').get(), { value: 'live' });
+      assert.throws(() => reader.exec('DELETE FROM sample'), /readonly database/);
+    } finally {
+      reader.close();
+    }
+  } finally {
+    writer.close();
+    rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
 test('pages enforces composite (page_id, lang) primary key', () => {
   const db = openDatabase({ dbPath: ':memory:' });
   const insert = db.prepare(

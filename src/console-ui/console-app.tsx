@@ -164,7 +164,7 @@ function HomeScreen({ data }: { data: HomeBootstrap }) {
       <main className="ca-home" id="console-main">
         <div className="ca-page-title">
           <div><span className="ca-kicker">Workspace</span><h1>Documentation projects</h1></div>
-          <button className="ca-button ca-primary" type="button" onClick={() => setAddOpen(true)}><Plus size={16} />Add project</button>
+          {!data.externallyManaged && <button className="ca-button ca-primary" type="button" onClick={() => setAddOpen(true)}><Plus size={16} />Add project</button>}
         </div>
         <div className="ca-metric-strip">
           <Metric label="Projects" value={`${data.workspaceSummary.projectsValid}/${data.workspaceSummary.projectsTotal}`} icon={<FolderOpen />} />
@@ -175,7 +175,7 @@ function HomeScreen({ data }: { data: HomeBootstrap }) {
         </div>
         {data.projects.length === 0 ? (
           <EmptyState icon={<FolderOpen />} title="No projects yet" detail="Register a documentation folder to begin indexing and evaluation.">
-            <button className="ca-button ca-primary" type="button" onClick={() => setAddOpen(true)}><Plus size={16} />Add project</button>
+            {!data.externallyManaged && <button className="ca-button ca-primary" type="button" onClick={() => setAddOpen(true)}><Plus size={16} />Add project</button>}
           </EmptyState>
         ) : (
           <div className="ca-project-grid">
@@ -185,6 +185,7 @@ function HomeScreen({ data }: { data: HomeBootstrap }) {
                 project={project}
                 running={data.running[project.name] ?? null}
                 stats={data.projectStats[project.name]}
+                externallyManaged={data.externallyManaged === true}
               />
             ))}
           </div>
@@ -209,7 +210,7 @@ function HomeScreen({ data }: { data: HomeBootstrap }) {
   );
 }
 
-function ProjectCard({ project, running, stats }: { project: HomeBootstrap['projects'][number]; running: ProcessInfo | null; stats?: HomeBootstrap['projectStats'][string] }) {
+function ProjectCard({ project, running, stats, externallyManaged }: { project: HomeBootstrap['projects'][number]; running: ProcessInfo | null; stats?: HomeBootstrap['projectStats'][string]; externallyManaged: boolean }) {
   const live = Boolean(running && !running.exited);
   const [deleting, setDeleting] = useState(false);
   const remove = async () => {
@@ -239,7 +240,7 @@ function ProjectCard({ project, running, stats }: { project: HomeBootstrap['proj
       {!project.valid && <Notice tone="error">Missing {project.missing.join(', ')}</Notice>}
       <div className="ca-project-card-actions">
         <a className="ca-button ca-primary" href={`/p/${encodeURIComponent(project.name)}`}>Open<ChevronRight size={15} /></a>
-        <button className="ca-icon-button" disabled={deleting} type="button" onClick={remove} aria-label={`Remove ${project.name}`}><Trash2 size={16} /></button>
+        {!externallyManaged && <button className="ca-icon-button" disabled={deleting} type="button" onClick={remove} aria-label={`Remove ${project.name}`}><Trash2 size={16} /></button>}
       </div>
     </article>
   );
@@ -346,9 +347,9 @@ function ProjectScreen({ data }: { data: ProjectBootstrap }) {
           {!data.project.valid ? <InvalidProject project={data.project} /> : (
             <div className="ca-tab-stage">
               {tab === 'ask' && <AskTab projectName={data.project.name} live={Boolean(running)} onStart={() => lifecycle('start')} />}
-              {tab === 'index' && data.indexSnapshot && <IndexExplorer initial={{ ...data.indexSnapshot, childLive: Boolean(running) }} />}
-              {tab === 'eval' && <EvalTab projectName={data.project.name} snapshot={data.evalSnapshot} candidates={data.candidates} />}
-              {tab === 'traffic' && <TrafficTab projectName={data.project.name} window={data.trafficWindow} view={data.trafficView} />}
+              {tab === 'index' && data.indexSnapshot && <IndexExplorer initial={{ ...data.indexSnapshot, childLive: Boolean(running) }} readOnly={data.remoteState} />}
+              {tab === 'eval' && <EvalTab projectName={data.project.name} snapshot={data.evalSnapshot} candidates={data.candidates} readOnly={data.remoteState} />}
+              {tab === 'traffic' && <TrafficTab projectName={data.project.name} window={data.trafficWindow} view={data.trafficView} readOnly={data.remoteState} />}
               {tab === 'feedback' && <FeedbackTab projectName={data.project.name} snapshot={data.feedbackSnapshot} />}
               {tab === 'settings' && <SettingsTab projectName={data.project.name} config={data.askConfig} externallyManaged={data.externallyManaged === true} runtimeConfiguration={runtimeConfiguration} ready={health === 'ready'} />}
             </div>
@@ -497,7 +498,7 @@ function ChatTurnView({ turn, onScope, onRate }: { turn: ChatTurn; onScope: (sco
   return <div className="ca-chat-turn"><div className="ca-question">{turn.question}</div>{response.type === 'answer' ? <div className="ca-answer"><Markdown body={response.answer_md} /><div className="ca-answer-meta"><span>{response.citations.length} citations</span><span>{formatDuration(response.latency_ms)}</span><span>{response.model}</span>{response._persisted && <span>saved</span>}</div>{response.citations.length > 0 && <div className="ca-citations">{response.citations.map((citation) => <article key={citation.citation_id}><span>{citation.citation_id}</span><div><strong>{citation.title}</strong><code>{citation.page_id}{citation.in_page_path ? ` · ${citation.in_page_path}` : ''}</code><p>{citation.snippet}</p></div></article>)}</div>}<div className="ca-rating"><button className="ca-icon-button" onClick={() => onRate(response.answer_id, 1)} aria-label="Helpful"><ThumbsUp size={15} /></button><button className="ca-icon-button" onClick={() => onRate(response.answer_id, -1)} aria-label="Not helpful"><ThumbsDown size={15} /></button></div></div> : response.type === 'clarify' ? <div className="ca-answer"><Notice tone="warning">{response.message}</Notice><div className="ca-scope-list">{response.options.map((option) => <button className="ca-button" key={option.scope_id} onClick={() => onScope(option.scope_id)}><ChevronRight size={14} />{option.label}</button>)}</div></div> : <div className="ca-answer"><Notice tone="error"><strong>{response.code}</strong> {response.message}</Notice></div>}</div>;
 }
 
-function TrafficTab({ projectName, window: traffic, view }: { projectName: string; window?: TrafficWindow; view?: TrafficViewState }) {
+function TrafficTab({ projectName, window: traffic, view, readOnly }: { projectName: string; window?: TrafficWindow; view?: TrafficViewState; readOnly?: boolean }) {
   const [range, setRange] = useState<string>(String(view?.range ?? traffic?.range ?? 7));
   const [query, setQuery] = useState(view?.query ?? '');
   const [source, setSource] = useState(view?.source ?? '');
@@ -524,7 +525,7 @@ function TrafficTab({ projectName, window: traffic, view }: { projectName: strin
     catch (err) { window.alert(errorMessage(err)); setAnalyzing(false); }
   };
   if (!traffic) return <WorkspaceEmpty icon={<BarChart3 />} title="No traffic data" detail="Persist Ask runs or connect the reader to populate operational metrics." />;
-  return <section className="ca-workspace"><WorkspaceHeader eyebrow="Observability" title="Traffic" description="Inspect live questions, answer quality, and latency." actions={<div className="ca-inline-actions"><button className="ca-button" disabled={analyzing} onClick={analyze}>{analyzing ? <LoaderCircle className="ca-spin" size={15} /> : <Sparkles size={15} />}Analyze</button><button className="ca-button" onClick={() => setExportOpen(true)}><Download size={15} />Export</button></div>} />
+  return <section className="ca-workspace"><WorkspaceHeader eyebrow="Observability" title="Traffic" description="Inspect live questions, answer quality, and latency." actions={<div className="ca-inline-actions">{!readOnly && <button className="ca-button" disabled={analyzing} onClick={analyze}>{analyzing ? <LoaderCircle className="ca-spin" size={15} /> : <Sparkles size={15} />}Analyze</button>}<button className="ca-button" onClick={() => setExportOpen(true)}><Download size={15} />Export</button></div>} />
     <div className="ca-metric-strip ca-four"><Metric label={`Conversations · ${range === 'all' ? 'all' : `${range}d`}`} value={groups.length} icon={<MessageSquareText />} /><Metric label={`Runs · ${totals?.count ?? 0} · Error rate`} value={formatPercent(totals?.errorRate)} icon={<CircleAlert />} /><Metric label="p50 run latency" value={formatDuration(totals?.p50LatencyMs)} icon={<Activity />} /><Metric label="p95 run latency" value={formatDuration(totals?.p95LatencyMs)} icon={<Activity />} /></div>
     <div className="ca-toolbar"><label className="ca-search"><Search size={15} /><input aria-label="Search conversations" value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} placeholder="Search questions, answers, session ID..." /></label><select aria-label="Traffic date range" value={range} onChange={(e) => { const next = e.target.value; setRange(next); window.location.href = trafficHref(projectName, { range: next, query, source, kind, page: 1 }); }}><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="all">All time</option></select><select aria-label="Traffic source" value={source} onChange={(e) => { setSource(e.target.value as TrafficViewState['source']); setPage(1); }}><option value="">All sources</option><option>reader</option><option>console</option><option>mcp</option></select><select aria-label="Run outcome" value={kind} onChange={(e) => { setKind(e.target.value as TrafficViewState['kind']); setPage(1); }}><option value="">All outcomes</option><option>answer</option><option>clarify</option><option>error</option></select></div>
     <TrafficConversations projectName={projectName} groups={visible} returnTo={returnTo} filters={{ query, source, kind }} pagination={<Pagination page={Math.min(page, pages)} pages={pages} total={filtered.length} onChange={setPage} />} />
@@ -640,7 +641,7 @@ function FeedbackTab({ projectName, snapshot }: { projectName: string; snapshot?
   </section>;
 }
 
-function EvalTab({ projectName, snapshot, candidates }: { projectName: string; snapshot?: EvalSnapshot; candidates?: CandidateSnapshot }) {
+function EvalTab({ projectName, snapshot, candidates, readOnly }: { projectName: string; snapshot?: EvalSnapshot; candidates?: CandidateSnapshot; readOnly?: boolean }) {
   const [progress, setProgress] = useState('');
   const [busy, setBusy] = useState(false);
   const runStream = async (path: string) => {
@@ -659,11 +660,11 @@ function EvalTab({ projectName, snapshot, candidates }: { projectName: string; s
     catch (err) { window.alert(errorMessage(err)); }
   };
   const latest = snapshot?.latest;
-  return <section className="ca-workspace"><WorkspaceHeader eyebrow="Evaluation" title="Quality lab" description="Build golden cases, run repeatable checks, and compare reports." actions={<button className="ca-button ca-primary" disabled={busy || !snapshot?.goldenStats.totalCases} onClick={() => runStream('/eval/stream')}><Play size={15} />Run evaluation</button>} />
+  return <section className="ca-workspace"><WorkspaceHeader eyebrow="Evaluation" title="Quality lab" description="Build golden cases, run repeatable checks, and compare reports." actions={readOnly ? <StatusBadge>Read only</StatusBadge> : <button className="ca-button ca-primary" disabled={busy || !snapshot?.goldenStats.totalCases} onClick={() => runStream('/eval/stream')}><Play size={15} />Run evaluation</button>} />
     {progress && <Notice tone={progress.toLowerCase().includes('error') ? 'error' : 'info'}>{busy && <LoaderCircle className="ca-spin" size={15} />}{progress}</Notice>}
     <div className="ca-metric-strip ca-four"><Metric label="Golden cases" value={snapshot?.goldenStats.totalCases ?? 0} icon={<ClipboardCheck />} /><Metric label="MRR" value={formatPercent(latest?.mrr)} icon={<Gauge />} /><Metric label="Hit @ 5" value={formatPercent(latest?.hit_at_5)} icon={<Layers3 />} /><Metric label="Context precision @ 5" value={formatPercent(latest?.context_precision_at_5)} icon={<Layers3 />} /></div>
     <div className="ca-metric-strip ca-four"><Metric label="Field retrieval" value={formatPercent(latest?.retrieval_content_pass)} icon={<SearchCheck />} /><Metric label="Citation anchor" value={formatPercent(latest?.citation_anchor_pass)} icon={<CheckCircle2 />} /><Metric label="Answer kind" value={formatPercent(latest?.kind_pass)} icon={<CheckCircle2 />} /><Metric label="API rules" value={formatPercent(latest?.api_rule_pass)} icon={<CheckCircle2 />} /></div>
-    <div className="ca-eval-grid"><section className="ca-panel"><div className="ca-panel-head"><div><span className="ca-kicker">Golden workshop</span><h2>Pending review</h2></div><div className="ca-inline-actions"><button className="ca-button" disabled={busy} onClick={() => runStream('/golden/generate/stream?from=structure')}><Sparkles size={15} />From structure</button><button className="ca-button" disabled={busy} onClick={() => runStream('/golden/generate/stream?from=runs')}><Activity size={15} />From runs</button></div></div>{candidates?.pending.length ? <div className="ca-candidate-list">{candidates.pending.slice(0, 50).map((candidate) => <article key={candidate.id}><div><StatusBadge>{candidate.lang}</StatusBadge><strong>{candidate.query}</strong><code>{candidate.context_pageId ?? 'project scope'}</code></div><div><button className="ca-icon-button ca-good" aria-label="Approve" onClick={() => decide(candidate, 'approved')}><Check size={16} /></button><button className="ca-icon-button ca-danger" aria-label="Reject" onClick={() => decide(candidate, 'rejected')}><X size={16} /></button></div></article>)}</div> : <EmptyState icon={<ClipboardCheck />} title="Review queue is empty" detail="Generate candidates from document structure or production runs." />}{(candidates?.approved ?? 0) > 0 && <div className="ca-panel-footer"><span>{candidates!.approved} approved candidates ready</span><button className="ca-button ca-primary" onClick={flush}>Flush approved</button></div>}</section>
+    <div className="ca-eval-grid">{!readOnly && <section className="ca-panel"><div className="ca-panel-head"><div><span className="ca-kicker">Golden workshop</span><h2>Pending review</h2></div><div className="ca-inline-actions"><button className="ca-button" disabled={busy} onClick={() => runStream('/golden/generate/stream?from=structure')}><Sparkles size={15} />From structure</button><button className="ca-button" disabled={busy} onClick={() => runStream('/golden/generate/stream?from=runs')}><Activity size={15} />From runs</button></div></div>{candidates?.pending.length ? <div className="ca-candidate-list">{candidates.pending.slice(0, 50).map((candidate) => <article key={candidate.id}><div><StatusBadge>{candidate.lang}</StatusBadge><strong>{candidate.query}</strong><code>{candidate.context_pageId ?? 'project scope'}</code></div><div><button className="ca-icon-button ca-good" aria-label="Approve" onClick={() => decide(candidate, 'approved')}><Check size={16} /></button><button className="ca-icon-button ca-danger" aria-label="Reject" onClick={() => decide(candidate, 'rejected')}><X size={16} /></button></div></article>)}</div> : <EmptyState icon={<ClipboardCheck />} title="Review queue is empty" detail="Generate candidates from document structure or production runs." />}{(candidates?.approved ?? 0) > 0 && <div className="ca-panel-footer"><span>{candidates!.approved} approved candidates ready</span><button className="ca-button ca-primary" onClick={flush}>Flush approved</button></div>}</section>}
     <section className="ca-panel"><div className="ca-panel-head"><div><span className="ca-kicker">History</span><h2>Evaluation reports</h2></div></div>{snapshot?.history.length ? <div className="ca-report-table">{snapshot.history.map((report) => <a key={report.filename} href={`/p/${encodeURIComponent(projectName)}/reports/${encodeURIComponent(report.filename)}`}><span>{report.date}</span><strong title="MRR">{formatPercent(report.mrr)}</strong><strong title="Hit @ 5">{formatPercent(report.hit_at_5)}</strong><strong title="Citation anchor">{formatPercent(report.citation_anchor_pass)}</strong><small>{report.cases ?? '—'} cases</small><ChevronRight size={15} /></a>)}</div> : <EmptyState icon={<FileChartColumn />} title="No evaluation reports" detail="Run the first evaluation after approving golden cases." />}</section></div>
   </section>;
 }
@@ -712,7 +713,7 @@ function ReportScreen({ data }: { data: ReportBootstrap }) {
 function RunsScreen({ data }: { data: RunsBootstrap }) {
   const records = data.lines.filter((line): line is RunRecord => Boolean(line && 'answer' in line));
   const traffic: TrafficWindow = { sinceISO: '', days: 0, range: 'all', records, totals: computeRunTotals(records), perDay: [] };
-  return <div className="ca-app"><AppHeader navigation={data.navigation} current={data.projectName} /><main className="ca-document-page ca-runs-page" id="console-main"><a className="ca-back" href={`/p/${encodeURIComponent(data.projectName)}#traffic`}><ArrowLeft size={15} />Back to project</a><TrafficTab projectName={data.projectName} window={traffic} /></main></div>;
+  return <div className="ca-app"><AppHeader navigation={data.navigation} current={data.projectName} /><main className="ca-document-page ca-runs-page" id="console-main"><a className="ca-back" href={`/p/${encodeURIComponent(data.projectName)}#traffic`}><ArrowLeft size={15} />Back to project</a><TrafficTab projectName={data.projectName} window={traffic} readOnly={data.remoteState} /></main></div>;
 }
 
 function WorkspaceHeader({ eyebrow, title, description, actions }: { eyebrow: string; title: string; description: string; actions?: React.ReactNode }) {

@@ -32,7 +32,7 @@ import type {
   IndexPage,
 } from './types';
 
-type Props = { initial: IndexBootstrap };
+type Props = { initial: IndexBootstrap; readOnly?: boolean };
 type IndexSelection =
   | { kind: 'parent'; key: string }
   | { kind: 'chunk'; id: number };
@@ -42,7 +42,7 @@ type ParentGroup = {
   children: IndexedChunk[];
 };
 
-export function IndexExplorer({ initial }: Props) {
+export function IndexExplorer({ initial, readOnly }: Props) {
   const firstLang = initial.langs[0]?.lang ?? '';
   const [language, setLanguage] = useState(firstLang);
   const [pageFilter, setPageFilter] = useState('');
@@ -150,7 +150,7 @@ export function IndexExplorer({ initial }: Props) {
             <span className={`ix-sync ${initial.childLive ? 'is-live' : ''}`}>
               <span />{initial.childLive ? 'Index online' : 'Service idle'}
             </span>
-            <button
+            {!readOnly && <button
               className="ix-button ix-button-primary"
               type="button"
               disabled={!initial.childLive || reindex.isPending}
@@ -158,7 +158,7 @@ export function IndexExplorer({ initial }: Props) {
             >
               {reindex.isPending ? <LoaderCircle className="ix-spin" size={15} /> : <RefreshCw size={15} />}
               {reindex.isPending ? 'Reindexing' : 'Reindex'}
-            </button>
+            </button>}
           </div>
         </header>
 

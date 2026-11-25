@@ -16,7 +16,7 @@ import {
 } from '../console/registry.ts';
 import { createNodeSpawner, httpHealthProbe } from '../console/spawner.ts';
 import { createConsoleApp } from '../console/server.ts';
-import { ensureWorkspace, type WorkspaceResolution } from '../workspace.ts';
+import { ensureWorkspace, scanProjects, type WorkspaceResolution } from '../workspace.ts';
 
 export type ConsoleOptions = {
   workspace: WorkspaceResolution;
@@ -73,13 +73,37 @@ export async function runConsole(opts: ConsoleOptions): Promise<number> {
   let registry: ConsoleProcessRegistry;
   const attachedName = process.env.ANYDOCS_CONSOLE_ATTACHED_PROJECT?.trim();
   const attachedPortRaw = process.env.ANYDOCS_CONSOLE_ATTACHED_PORT?.trim();
+  const attachedProjects = process.env.ANYDOCS_CONSOLE_ATTACHED_PROJECTS?.trim();
+  if (attachedProjects && (attachedName || attachedPortRaw)) {
+    process.stderr.write('error: ANYDOCS_CONSOLE_ATTACHED_PROJECTS cannot be combined with single-project attachment settings\n');
+    return 2;
+  }
   if ((attachedName && !attachedPortRaw) || (!attachedName && attachedPortRaw)) {
     process.stderr.write(
       'error: ANYDOCS_CONSOLE_ATTACHED_PROJECT and ANYDOCS_CONSOLE_ATTACHED_PORT must be configured together\n',
     );
     return 2;
   }
-  if (attachedName && attachedPortRaw) {
+  if (attachedProjects) {
+    try {
+      const parsed: unknown = JSON.parse(attachedProjects);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
+      registry = new AttachedProcessRegistry(parsed as Record<string, string>);
+    } catch {
+      process.stderr.write('error: ANYDOCS_CONSOLE_ATTACHED_PROJECTS must map workspace project names to distinct HTTP(S) origins without credentials, paths, or queries\n');
+      return 2;
+    }
+    const projects = new Map(scanProjects(workspace.path).map((project) => [project.name, project]));
+    const stateIds = new Set<string>();
+    for (const { name } of registry.list()) {
+      const entry = projects.get(name);
+      if (!entry?.valid || !entry.projectId || stateIds.has(entry.projectId)) {
+        process.stderr.write(`error: attached project '${name}' must be registered, valid, and use a distinct projectId\n`);
+        return 2;
+      }
+      stateIds.add(entry.projectId);
+    }
+  } else if (attachedName && attachedPortRaw) {
     const attachedPort = Number(attachedPortRaw);
     if (!Number.isInteger(attachedPort) || attachedPort < 1 || attachedPort > 65535) {
       process.stderr.write('error: ANYDOCS_CONSOLE_ATTACHED_PORT must be a valid TCP port\n');
@@ -127,7 +151,7 @@ export async function runConsole(opts: ConsoleOptions): Promise<number> {
           `  workspace · ${workspace.path}\n` +
           `  bind · ${consoleHost}\n` +
           `  auth · ${authToken ? 'token' : 'loopback only'}\n` +
-          (attachedName ? `  attached · ${attachedName}:${attachedPortRaw}\n` : '') +
+          (registry.externallyManaged ? `  attached · ${registry.list().map(({ name, port }) => `${name}:${port}`).join(', ')}\n` : '') +
           `  child range · ${config.childPortRangeStart}–${config.childPortRangeEnd}\n` +
           `  idle reap · ${config.idleTimeoutMin}min\n`,
       );

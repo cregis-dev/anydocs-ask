@@ -192,7 +192,7 @@ export function loadFeedbackTabSnapshot(
 
   let db: ReturnType<typeof openDatabase>;
   try {
-    db = openDatabase({ stateRoot, skipMigrations: true });
+    db = openDatabase({ stateRoot, readOnly: true });
   } catch {
     return empty;
   }
@@ -935,7 +935,7 @@ export function loadFeedbackRowDetail(
   if (!existsSync(dbPath)) return null;
   let db: ReturnType<typeof openDatabase>;
   try {
-    db = openDatabase({ stateRoot, skipMigrations: true });
+    db = openDatabase({ stateRoot, readOnly: true });
   } catch {
     return null;
   }

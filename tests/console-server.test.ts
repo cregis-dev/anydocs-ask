@@ -65,6 +65,58 @@ function makeRegistry(): ProcessRegistry {
 
 const CONSOLE_AUTH_TOKEN = 'test-console-auth-token-32-characters';
 
+test('attached console separates two Ask upstreams, state, and lifecycle', async (t) => {
+  const { path: ws, cleanup } = await withTmpDir();
+  t.after(cleanup);
+  await makeWorkspaceWithProjects(ws, ['developer', 'product']);
+  for (const name of ['developer', 'product']) {
+    const db = openDatabase({ stateRoot: ensureStateRoot(ws, name) });
+    db.close();
+  }
+  const called: string[] = [];
+  const app = createConsoleApp({
+    workspacePath: ws,
+    consolePort: 4100,
+    registry: new AttachedProcessRegistry({
+      developer: 'http://127.0.0.1:3100',
+      product: 'http://product-ask:3100',
+    }),
+    fetchFn: async (input) => {
+      const url = new URL(String(input));
+      called.push(url.href);
+      return Response.json({ backend: url.hostname });
+    },
+  });
+  const projects = await (await app.request('/api/projects')).json() as ProjectStatusJSON[];
+  assert.deepEqual(projects.map(({ name, indexed, running }) => [name, indexed, running]), [
+    ['developer', true, true], ['product', true, true],
+  ]);
+  for (const name of ['developer', 'product']) {
+    const path = `/api/projects/${name}`;
+    const backend = name === 'developer' ? '127.0.0.1' : 'product-ask';
+    assert.equal((await (await app.request(`${path}/health`)).json()).backend, backend);
+    assert.equal((await (await app.request(`${path}/ask`, {
+      method: 'POST', body: JSON.stringify({ question: 'How do I get started?' }),
+    })).json()).backend, backend);
+    assert.equal((await app.request(`/p/${name}`)).status, 200);
+    assert.equal((await app.request(`${path}/start`, { method: 'POST' })).status, 409);
+    assert.equal((await app.request(`${path}?force_stop=true&purge_state=true`, { method: 'DELETE' })).status, 409);
+    await fs.access(join(ws, 'state', name, 'index.db'));
+  }
+  for (const action of ['eval', 'eval/stream', 'golden/flush', 'analyze', 'reindex']) {
+    const res = await app.request(`/api/projects/product/${action}`, { method: 'POST' });
+    assert.equal(res.status, 409, action);
+    assert.equal((await res.json()).code, 'externally_managed');
+  }
+  assert.equal((await app.request('/mcp/product', { method: 'POST' })).status, 403);
+  assert.equal((await app.request('/api/projects/add', { method: 'POST' })).status, 409);
+  assert.deepEqual(called, ['127.0.0.1', 'product-ask'].flatMap((host) => [
+    `http://${host}:3100/v1/health`,
+    `http://${host}:3100/v1/ask?dry_run=1`,
+    `http://${host}:3100/v1/index/status`,
+  ]));
+});
+
 test('conversation API validates input and isolates project history', async () => {
   const { path: ws, cleanup } = await withTmpDir();
   try {
