@@ -10,7 +10,7 @@ on:
 jobs:
   runtime:
     runs-on: ubuntu-24.04
-    permissions: {contents: read, packages: write}
+    permissions: {contents: read}
     steps:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}
@@ -22,19 +22,10 @@ jobs:
           target: bge-runtime
           platforms: linux/amd64
           build-args: ENGINE_REVISION=${{ github.sha }}
-          tags: ghcr.io/cregis-dev/anydocs-ask-runtime:${{ github.sha }}
+          tags: ask-runtime:ci
           labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
           load: true
           cache-from: type=gha,scope=ask-runtime
           cache-to: type=gha,scope=ask-runtime,mode=max
-      - name: Verify and publish the tested image
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          image="ghcr.io/cregis-dev/anydocs-ask-runtime:$GITHUB_SHA"
-          docker run --rm --network none --entrypoint sh "$image" -ec 'test ! -e /docs/anydocs.config.json && test -s /app/check-content.mjs && node dist/cli.js --help >/dev/null'
-          if [[ "$GITHUB_EVENT_NAME" != pull_request && "$GITHUB_REF" == refs/heads/main ]]; then
-            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-            docker push "$image"
-            docker inspect --format '{{index .RepoDigests 0}}' "$image" >> "$GITHUB_STEP_SUMMARY"
-          fi
+      - name: Verify the runtime offline
+        run: docker run --rm --network none --entrypoint sh ask-runtime:ci -ec 'test ! -e /docs/anydocs.config.json && test -s /app/check-content.mjs && node dist/cli.js --help >/dev/null'
